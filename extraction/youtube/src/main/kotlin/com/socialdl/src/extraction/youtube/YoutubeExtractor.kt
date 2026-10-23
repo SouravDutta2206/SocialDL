@@ -25,6 +25,8 @@ import javax.inject.Singleton
 
 @Serializable
 internal data class YtDlpNormalizedResponse(
+    val id: String? = null,
+    val webpage_url: String? = null,
     val title: String? = null,
     val uploader: String? = null,
     val duration: Int? = null,
@@ -32,6 +34,8 @@ internal data class YtDlpNormalizedResponse(
     val formats: List<YtDlpFormatDto> = emptyList(),
     val error: String? = null,
     val detail: String? = null,
+    val is_playlist: Boolean = false,
+    val entries: List<YtDlpNormalizedResponse> = emptyList(),
 )
 
 @Serializable
@@ -137,27 +141,49 @@ class YoutubeExtractor @Inject constructor(
             }
         }
 
-        val duration = parsed.duration ?: 0
-        val cachedThumb = thumbnailCache.store(parsed.thumbnail_url) ?: parsed.thumbnail_url
+        if (parsed.is_playlist && parsed.entries.isNotEmpty()) {
+            val mediaItems = parsed.entries.mapIndexed { index, entryDto ->
+                val cleanUrl = entryDto.webpage_url
+                    ?: entryDto.id?.let { "https://www.youtube.com/watch?v=$it" }
+                    ?: sourceUrl.substringBefore("&list").substringBefore("?list")
+                mapDtoToMediaItem(entryDto, cleanUrl, carouselIndex = index + 1)
+            }
+            return ExtractionResult.Success(mediaItems)
+        } else {
+            val singleCleanUrl = parsed.webpage_url
+                ?: parsed.id?.let { "https://www.youtube.com/watch?v=$it" }
+                ?: sourceUrl.substringBefore("&list").substringBefore("?list")
+            val singleItem = mapDtoToMediaItem(parsed, singleCleanUrl, carouselIndex = null)
+            return ExtractionResult.Success(listOf(singleItem))
+        }
+    }
+
+    private suspend fun mapDtoToMediaItem(
+        dto: YtDlpNormalizedResponse,
+        itemUrl: String,
+        carouselIndex: Int?
+    ): MediaItem {
+        val duration = dto.duration ?: 0
+        val cachedThumb = thumbnailCache.store(dto.thumbnail_url) ?: dto.thumbnail_url
 
         // 1. Partition formats into audio-only, progressive (audio+video), and video-only (§4.2)
         val audioFormats = mutableListOf<MediaFormat>()
         val progressiveFormats = mutableListOf<MediaFormat>()
         val videoOnlyDtos = mutableListOf<YtDlpFormatDto>()
 
-        for (dto in parsed.formats) {
-            val hasVideo = dto.vcodec != null && dto.vcodec != "none"
-            val hasAudio = dto.acodec != null && dto.acodec != "none"
+        for (fDto in dto.formats) {
+            val hasVideo = fDto.vcodec != null && fDto.vcodec != "none"
+            val hasAudio = fDto.acodec != null && fDto.acodec != "none"
 
             when {
                 !hasVideo && hasAudio -> {
-                    audioFormats.add(mapAudioFormat(dto, duration))
+                    audioFormats.add(mapAudioFormat(fDto, duration))
                 }
                 hasVideo && hasAudio -> {
-                    progressiveFormats.add(mapProgressiveFormat(dto, duration))
+                    progressiveFormats.add(mapProgressiveFormat(fDto, duration))
                 }
                 hasVideo && !hasAudio -> {
-                    videoOnlyDtos.add(dto)
+                    videoOnlyDtos.add(fDto)
                 }
             }
         }
@@ -172,8 +198,8 @@ class YoutubeExtractor @Inject constructor(
         // Add progressive formats first (already muxed)
         videoFormats.addAll(progressiveFormats)
 
-        for (dto in videoOnlyDtos) {
-            videoFormats.add(mapVideoOnlyFormat(dto, duration, bestAudio))
+        for (vDto in videoOnlyDtos) {
+            videoFormats.add(mapVideoOnlyFormat(vDto, duration, bestAudio))
         }
 
         // Sort video formats by height descending, then fps descending
@@ -183,19 +209,18 @@ class YoutubeExtractor @Inject constructor(
                 .thenByDescending { it.approxSizeBytes ?: 0L }
         )
 
-        val mediaItem = MediaItem(
+        return MediaItem(
             platform = Platform.YOUTUBE,
-            sourceUrl = sourceUrl,
-            title = parsed.title ?: "YouTube Video",
-            author = parsed.uploader ?: "Unknown",
+            sourceUrl = itemUrl,
+            title = dto.title ?: "YouTube Video",
+            author = dto.uploader ?: "Unknown",
             durationSeconds = duration,
             thumbnailUrl = cachedThumb,
             videoFormats = videoFormats,
             audioFormats = audioFormats,
-            isCarousel = false
+            isCarousel = false,
+            carouselIndex = carouselIndex
         )
-
-        return ExtractionResult.Success(listOf(mediaItem))
     }
 
     private fun mapAudioFormat(dto: YtDlpFormatDto, durationSeconds: Int): MediaFormat {

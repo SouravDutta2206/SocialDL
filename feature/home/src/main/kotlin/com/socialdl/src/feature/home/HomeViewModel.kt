@@ -60,6 +60,20 @@ class HomeViewModel @Inject constructor(
         )
     }
 
+    fun startBatchDownload(items: List<Pair<MediaItem, MediaFormat>>): List<String> {
+        val groupId = java.util.UUID.randomUUID().toString()
+        return items.map { (item, format) ->
+            downloadManager.enqueueDownload(
+                mediaItem = item,
+                selectedFormat = format,
+                container = format.container,
+                customTitle = item.title,
+                customAuthor = item.author,
+                groupId = groupId
+            )
+        }
+    }
+
 
     fun onQueryChange(newQuery: String) {
         val platform = if (newQuery.isNotBlank()) {
