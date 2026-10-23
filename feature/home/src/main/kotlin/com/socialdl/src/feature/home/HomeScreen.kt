@@ -1,0 +1,187 @@
+package com.socialdl.src.feature.home
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.socialdl.src.core.model.FormatKind
+import com.socialdl.src.core.model.MediaItem
+import com.socialdl.src.core.ui.component.FormatBottomSheet
+import com.socialdl.src.core.ui.component.MediaCard
+import com.socialdl.src.core.ui.component.PillSearchBar
+import com.socialdl.src.core.ui.component.SocialDLToastHost
+import com.socialdl.src.core.ui.component.ToastMessage
+import com.socialdl.src.core.ui.theme.SocialDLAccent
+import com.socialdl.src.core.ui.theme.SocialDLBg
+import com.socialdl.src.core.ui.theme.SocialDLOnSurface
+import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HomeScreen(
+    onNavigateToSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+    viewModel: HomeViewModel = hiltViewModel(),
+) {
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
+    var selectedItemForSheet by remember { mutableStateOf<MediaItem?>(null) }
+    var sheetInitialTab by remember { mutableStateOf(FormatKind.VIDEO) }
+
+    LaunchedEffect(uiState.infoMessage) {
+        uiState.infoMessage?.let { msg ->
+            toastMessage = ToastMessage(message = msg)
+            viewModel.clearInfoMessage()
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(SocialDLBg)
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // App Branding Header matching mock (Social in Red Accent, DL in Slate-200)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Social",
+                        style = MaterialTheme.typography.displayMedium,
+                        color = SocialDLAccent
+                    )
+                    Text(
+                        text = "DL",
+                        style = MaterialTheme.typography.displayMedium,
+                        color = SocialDLOnSurface
+                    )
+                }
+
+                IconButton(onClick = onNavigateToSettings) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Settings",
+                        tint = SocialDLOnSurfaceVariant
+                    )
+                }
+            }
+
+            // Search Bar
+            PillSearchBar(
+                query = uiState.query,
+                onQueryChange = viewModel::onQueryChange,
+                onSearch = {
+                    viewModel.submitQuery(uiState.query)
+                },
+                isLoading = uiState.isLoading
+            )
+
+            // Result Cards List or Empty State
+            if (uiState.mediaItems.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(horizontal = 24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = if (uiState.isLoading) "Fetching media details..." else "No media loaded",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = SocialDLOnSurface
+                        )
+                        Text(
+                            text = if (uiState.isLoading) "Resolving audio and video formats" else "Paste a video link above to fetch formats and download",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = SocialDLOnSurfaceVariant
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    itemsIndexed(
+                        items = uiState.mediaItems,
+                        key = { index, item -> "${item.sourceUrl}_${item.carouselIndex ?: index}" }
+                    ) { _, item ->
+                        MediaCard(
+                            item = item,
+                            onCardClick = {
+                                sheetInitialTab = FormatKind.VIDEO
+                                selectedItemForSheet = item
+                            },
+                            onQuickAudioDownload = {
+                                sheetInitialTab = FormatKind.AUDIO
+                                selectedItemForSheet = item
+                            },
+                            onQuickVideoDownload = {
+                                sheetInitialTab = FormatKind.VIDEO
+                                selectedItemForSheet = item
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        // Format Selection Bottom Sheet
+        selectedItemForSheet?.let { item ->
+            FormatBottomSheet(
+                item = item,
+                initialTab = sheetInitialTab,
+                onDismiss = { selectedItemForSheet = null },
+                onConfirmDownload = { format, container, title, author ->
+                    selectedItemForSheet = null
+                    viewModel.startDownload(item, format, container, title, author)
+                    toastMessage = ToastMessage(message = "Download queued: $title (${format.label})")
+                }
+
+            )
+        }
+
+        // Floating Toast
+        SocialDLToastHost(
+            toast = toastMessage,
+            onDismiss = { toastMessage = null }
+        )
+    }
+}
