@@ -1,0 +1,155 @@
+# ==============================================================================
+# Gitignore for SocialDL (Android, Kotlin, Gradle, Chaquopy/Python)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Sensitive Files, Secrets & Signing Credentials (DO NOT SHARE / COMMIT)
+# ------------------------------------------------------------------------------
+# Keystores & private keys
+*.jks
+*.keystore
+*.key
+*.pem
+*.p12
+*.pk8
+
+# Secret properties & credential configurations
+local.properties
+/local.properties
+secrets.properties
+signing.properties
+keystore.properties
+release-signing.properties
+
+# Environment variables & local secrets
+.env
+.env.*
+*.env
+
+# Google Services / Firebase API secrets (if added)
+google-services.json
+GoogleService-Info.plist
+firebase.json
+
+# Chaquopy license keys / private configs
+chaquopy.license
+
+# ------------------------------------------------------------------------------
+# 2. Build Outputs & Binaries
+# ------------------------------------------------------------------------------
+# Gradle build directories (root and all submodules)
+build/
+**/build/
+.gradle/
+.kotlin/
+
+# Android binary outputs
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+
+# Native C/C++ builds & intermediate caches
+.externalNativeBuild/
+.cxx/
+
+# Android profiler, heap dumps, UI automator dumps
+captures/
+dump.xml
+*.dump
+*.hprof
+*.trace
+
+# ------------------------------------------------------------------------------
+# 3. Test Folders (Unit & Instrumented Tests Across All Submodules)
+# ------------------------------------------------------------------------------
+**/src/test/
+**/src/androidTest/
+**/src/testDebug/
+**/src/testRelease/
+**/src/androidTestDebug/
+**/src/androidTestRelease/
+test/
+**/test/
+tests/
+**/tests/
+
+
+# ------------------------------------------------------------------------------
+# 4. IDE & Editor Specific Files
+# ------------------------------------------------------------------------------
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# VS Code
+.vscode/
+
+# ------------------------------------------------------------------------------
+# 5. Python & Chaquopy Artifacts
+# ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Shared libraries (allow Android jniLibs binaries)
+*.so
+!**/src/main/jniLibs/**
+
+# ------------------------------------------------------------------------------
+# 6. OS & System Files
+# ------------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+
+# ------------------------------------------------------------------------------
+# 7. Logs & Crash Reports
+# ------------------------------------------------------------------------------
+*.log
+hs_err_pid*
+replay_pid*
+
+# ------------------------------------------------------------------------------
+# 8. Temporary & Scratch Files
+# ------------------------------------------------------------------------------
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# ------------------------------------------------------------------------------
+# 9. Local Documentation & Design Prototypes (Do Not Share)
+# ------------------------------------------------------------------------------
+SocialDL_Technical_Specification.md
+socialdl_material_3_mobile_downloader_app.html
