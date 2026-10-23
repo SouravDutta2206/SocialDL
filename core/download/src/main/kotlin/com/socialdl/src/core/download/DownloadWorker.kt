@@ -48,6 +48,7 @@ class DownloadWorker @AssistedInject constructor(
         const val KEY_HTTP_CHUNK_SIZE = "http_chunk_size"
         const val KEY_AUDIO_HTTP_CHUNK_SIZE = "audio_http_chunk_size"
         const val KEY_FORMAT_KIND = "format_kind"
+        const val KEY_GROUP_ID = "group_id"
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {

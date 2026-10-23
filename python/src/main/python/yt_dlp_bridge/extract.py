@@ -17,7 +17,7 @@ _AUTH_WALL_MARKERS = (
 
 def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None) -> str:
     """
-    Extracts metadata and direct stream URLs for YouTube videos via yt-dlp.
+    Extracts metadata and direct stream URLs for YouTube videos/playlists via yt-dlp.
     Metadata only (skip_download=True) - byte downloads and muxing happen in Kotlin/FFmpeg.
     """
     # node_dir is the directory containing whichever Node binary NodeBinaryProvider resolved.
@@ -25,13 +25,17 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
     if node_dir:
         os.environ["PATH"] = node_dir + os.pathsep + os.environ.get("PATH", "")
 
+    # Enable playlist extraction when 'list=' is present or URL is a playlist endpoint
+    is_playlist_url = "list=" in url or "/playlist" in url
+
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,       # metadata only — never triggers a download
-        "noplaylist": True,          # single video by default
-        "extract_flat": False,       # fully resolve formats, not a flat playlist stub
+        "noplaylist": not is_playlist_url,  # allow playlist extraction when list is present
+        "extract_flat": False,       # fully resolve formats for items
         "cookiefile": cookiefile,    # decrypted temp path if available
+        "playlistend": 50,           # safe limit for playlist items
     }
 
     try:
@@ -50,7 +54,7 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
 
     return json.dumps(_normalize(info))
 
-def _normalize(info: dict) -> dict:
+def _normalize_single_entry(info: dict) -> dict:
     thumbnails = sorted(
         info.get("thumbnails", []) or [],
         key=lambda t: (t.get("height") or 0),
@@ -92,10 +96,38 @@ def _normalize(info: dict) -> dict:
             "downloader_options": f.get("downloader_options"),  # e.g. http_chunk_size
         })
 
+    vid_id = info.get("id")
+    # Clean URL: strip anything starting with &list or ?list to ensure clean standalone URL
+    if vid_id:
+        clean_url = f"https://www.youtube.com/watch?v={vid_id}"
+    else:
+        raw_url = info.get("webpage_url") or info.get("url") or ""
+        clean_url = raw_url.split("&list=")[0].split("?list=")[0]
+
     return {
+        "id": vid_id,
+        "webpage_url": clean_url,
         "title": info.get("title") or "YouTube Video",
         "uploader": info.get("uploader") or info.get("channel") or "Unknown Channel",
         "duration": info.get("duration") or 0,        # seconds, int
         "thumbnail_url": best_thumb,
         "formats": formats,
     }
+
+def _normalize(info: dict) -> dict:
+    if info.get("_type") == "playlist" or "entries" in info:
+        entries = info.get("entries") or []
+        normalized_entries = []
+        for entry in entries:
+            if not entry:
+                continue
+            normalized_entries.append(_normalize_single_entry(entry))
+
+        return {
+            "is_playlist": True,
+            "title": info.get("title") or "YouTube Playlist",
+            "uploader": info.get("uploader") or info.get("channel") or "Unknown Channel",
+            "entries": normalized_entries,
+        }
+
+    return _normalize_single_entry(info)

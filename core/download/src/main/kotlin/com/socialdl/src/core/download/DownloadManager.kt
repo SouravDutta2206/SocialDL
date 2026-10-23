@@ -100,7 +100,8 @@ class DownloadManager @Inject constructor(
         selectedFormat: MediaFormat,
         container: String? = null,
         customTitle: String? = null,
-        customAuthor: String? = null
+        customAuthor: String? = null,
+        groupId: String? = null
     ): String {
         val taskId = UUID.randomUUID().toString()
         val finalContainer = if (!container.isNullOrBlank() && container != "Default") {
@@ -120,7 +121,7 @@ class DownloadManager @Inject constructor(
             null
         }
 
-        Logger.i(tag, "Enqueuing task $taskId for '${title}', format: ${selectedFormat.label}, container: $finalContainer, pairedAudio=${pairedAudio?.id}")
+        Logger.i(tag, "Enqueuing task $taskId for '${title}', format: ${selectedFormat.label}, container: $finalContainer, pairedAudio=${pairedAudio?.id}, groupId=$groupId")
 
         val inputData = workDataOf(
             DownloadWorker.KEY_TASK_ID to taskId,
@@ -138,7 +139,8 @@ class DownloadManager @Inject constructor(
             DownloadWorker.KEY_MUX_STRATEGY to (selectedFormat.muxStrategy?.name ?: ""),
             DownloadWorker.KEY_HTTP_CHUNK_SIZE to (selectedFormat.httpChunkSizeBytes ?: 0L),
             DownloadWorker.KEY_AUDIO_HTTP_CHUNK_SIZE to (pairedAudio?.httpChunkSizeBytes ?: 0L),
-            DownloadWorker.KEY_FORMAT_KIND to selectedFormat.kind.name
+            DownloadWorker.KEY_FORMAT_KIND to selectedFormat.kind.name,
+            DownloadWorker.KEY_GROUP_ID to (groupId ?: "")
         )
 
         val constraints = Constraints.Builder()

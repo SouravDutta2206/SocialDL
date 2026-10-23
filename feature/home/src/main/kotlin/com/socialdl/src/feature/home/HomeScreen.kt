@@ -1,22 +1,35 @@
 package com.socialdl.src.feature.home
 
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -26,11 +39,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
+import com.socialdl.src.core.ui.component.BatchDownloadBottomSheet
 import com.socialdl.src.core.ui.component.FormatBottomSheet
 import com.socialdl.src.core.ui.component.MediaCard
 import com.socialdl.src.core.ui.component.PillSearchBar
@@ -48,10 +66,12 @@ fun HomeScreen(
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
+    val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
     var selectedItemForSheet by remember { mutableStateOf<MediaItem?>(null) }
     var sheetInitialTab by remember { mutableStateOf(FormatKind.VIDEO) }
+    var showBatchSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(uiState.infoMessage) {
         uiState.infoMessage?.let { msg ->
@@ -174,7 +194,81 @@ fun HomeScreen(
                     viewModel.startDownload(item, format, container, title, author)
                     toastMessage = ToastMessage(message = "Download queued: $title (${format.label})")
                 }
+            )
+        }
 
+        // Floating Action Buttons (Clipboard & Download all) matching YTDLnis screenshot
+        if (uiState.mediaItems.size > 1) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = 24.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Clipboard Button (Square shape)
+                Surface(
+                    onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        val clipText = clipboard?.primaryClip?.getItemAt(0)?.text?.toString()
+                        if (!clipText.isNullOrBlank()) {
+                            viewModel.onQueryChange(clipText)
+                            viewModel.submitQuery(clipText)
+                        }
+                    },
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFF0D59C8),
+                    shadowElevation = 6.dp,
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.ContentPaste,
+                            contentDescription = "Paste and fetch",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                // Download all Pill Button
+                Button(
+                    onClick = { showBatchSheet = true },
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF0D59C8),
+                        contentColor = Color.White
+                    ),
+                    elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp),
+                    modifier = Modifier.height(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowDownward,
+                        contentDescription = "Download all",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Download all",
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    )
+                }
+            }
+        }
+
+        // Batch Download Bottom Sheet
+        if (showBatchSheet && uiState.mediaItems.isNotEmpty()) {
+            BatchDownloadBottomSheet(
+                items = uiState.mediaItems,
+                onDismiss = { showBatchSheet = false },
+                onConfirmDownload = { selectedPairs ->
+                    showBatchSheet = false
+                    viewModel.startBatchDownload(selectedPairs)
+                    toastMessage = ToastMessage(message = "Queued ${selectedPairs.size} downloads to queue")
+                }
             )
         }
 
