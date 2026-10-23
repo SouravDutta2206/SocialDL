@@ -27,6 +27,7 @@ class DownloadWorker @AssistedInject constructor(
     private val ffmpegProcessExecutor: FFmpegProcessExecutor,
     private val downloadDao: DownloadDao,
     private val eventBus: DownloadEventBus,
+    private val concurrencyGate: DownloadConcurrencyGate,
 ) : CoroutineWorker(appContext, workerParams) {
 
     private val tag = "DownloadWorker"
@@ -81,18 +82,19 @@ class DownloadWorker @AssistedInject constructor(
         scratchDir.mkdirs()
 
         try {
-            Logger.i(tag, "[$taskId] Starting download: title='$title', container=$container, requiresMuxing=$requiresMuxing")
-            eventBus.emit(
-                DownloadEvent.Running(
-                    taskId = taskId,
-                    progress = 0f,
-                    downloadedBytes = 0L,
-                    totalBytes = null,
-                    phase = DownloadPhase.DOWNLOADING
+            val success = concurrencyGate.withDownloadPermit {
+                Logger.i(tag, "[$taskId] Acquired download permit, starting: title='$title', container=$container, requiresMuxing=$requiresMuxing")
+                eventBus.emit(
+                    DownloadEvent.Running(
+                        taskId = taskId,
+                        progress = 0f,
+                        downloadedBytes = 0L,
+                        totalBytes = null,
+                        phase = DownloadPhase.DOWNLOADING
+                    )
                 )
-            )
 
-            val finalFile: File
+                val finalFile: File
 
             if (requiresMuxing && !audioDirectUrl.isNullOrBlank()) {
                 // Dual-stream download for YouTube video + audio muxing (§9)
@@ -190,7 +192,7 @@ class DownloadWorker @AssistedInject constructor(
                     val err = "FFmpeg muxing failed: $muxError"
                     Logger.e(tag, "[$taskId] $err")
                     eventBus.emit(DownloadEvent.Failed(taskId, err))
-                    return@withContext Result.failure()
+                    return@withDownloadPermit false
                 }
 
                 finalFile = muxedFile
@@ -251,7 +253,7 @@ class DownloadWorker @AssistedInject constructor(
             if (outputUri == null) {
                 Logger.e(tag, "[$taskId] Failed to write file to MediaStore")
                 eventBus.emit(DownloadEvent.Failed(taskId, "Failed to save file to system media storage"))
-                return@withContext Result.failure()
+                return@withDownloadPermit false
             }
 
             Logger.i(tag, "[$taskId] Download completed successfully: uri=$outputUri, size=${finalFile.length()}")
@@ -278,8 +280,10 @@ class DownloadWorker @AssistedInject constructor(
                 completedAt = System.currentTimeMillis()
             )
             downloadDao.insertHistory(historyEntity)
+                true
+            }
 
-            Result.success()
+            if (success) Result.success() else Result.failure()
         } catch (e: CancellationException) {
             Logger.i(tag, "[$taskId] Download task was cancelled")
             throw e

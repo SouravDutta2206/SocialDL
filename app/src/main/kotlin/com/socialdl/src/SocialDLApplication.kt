@@ -52,6 +52,15 @@ class SocialDLApplication : Application(), Configuration.Provider {
                 val pingResult = pingModule.callAttr("ping", "SocialDL Phase 0/2 Boot Check")
                 Logger.i("SocialDL_Boot", "Chaquopy Smoke Test OK: $pingResult")
 
+                // Pre-warm yt_dlp module so the first user search avoids Python import lag
+                try {
+                    val extractModule = py.getModule("yt_dlp_bridge.extract")
+                    extractModule.callAttr("warmup")
+                    Logger.i("SocialDL_Boot", "Chaquopy yt_dlp bridge pre-warmed")
+                } catch (e: Exception) {
+                    Logger.w("SocialDL_Boot", "yt_dlp bridge pre-warm non-critical error: ${e.message}")
+                }
+
                 // 2. FFmpeg binary smoke test per Phase 0 exit criteria
                 val ffmpegPath = ffmpegBinaryProvider.path()
                 val ffmpegFile = File(ffmpegPath)

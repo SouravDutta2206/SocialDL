@@ -15,6 +15,17 @@ _AUTH_WALL_MARKERS = (
     "the page needs to be reloaded",
 )
 
+def warmup():
+    """
+    Pre-warms yt-dlp and the YouTube extractor into memory.
+    Called during app startup on Dispatchers.IO to eliminate first-search latency.
+    """
+    try:
+        ydl = yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "no_warnings": True})
+        ydl.get_info_extractor("Youtube")
+    except Exception:
+        pass
+
 def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None) -> str:
     """
     Extracts metadata and direct stream URLs for YouTube videos/playlists via yt-dlp.
@@ -35,12 +46,17 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         "noplaylist": not is_playlist_url,  # allow playlist extraction when list is present
         "extract_flat": False,       # fully resolve formats for items
         "cookiefile": cookiefile,    # decrypted temp path if available
-        "playlistend": 50,           # safe limit for playlist items
+        "playlistend": 30,           # safe limit for playlist items
+        "no_check_certificates": True,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+            if not info:
+                return json.dumps({"error": "no_info", "detail": "No metadata returned by yt-dlp"})
+            return json.dumps(_normalize(info))
+
     except yt_dlp.utils.DownloadError as e:
         message = str(e).lower()
         if any(marker in message for marker in _AUTH_WALL_MARKERS):
@@ -48,11 +64,6 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         return json.dumps({"error": "unavailable", "detail": str(e)})
     except Exception as e:
         return json.dumps({"error": "exception", "detail": str(e)})
-
-    if not info:
-        return json.dumps({"error": "no_info", "detail": "No metadata returned by yt-dlp"})
-
-    return json.dumps(_normalize(info))
 
 def _normalize_single_entry(info: dict) -> dict:
     thumbnails = sorted(
