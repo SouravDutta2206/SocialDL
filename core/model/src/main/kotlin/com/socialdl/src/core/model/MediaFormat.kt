@@ -62,7 +62,35 @@ data class MediaFormat(
      * consumed at download time (Phase 9) to build the ffmpeg argument list.
      */
     val muxStrategy: MuxStrategy? = null,
-)
+) {
+    val isPlaceholder: Boolean
+        get() = id == PLACEHOLDER_BEST_VIDEO_ID || id == PLACEHOLDER_BEST_AUDIO_ID
+
+    companion object {
+        const val PLACEHOLDER_BEST_VIDEO_ID = "placeholder_best_video"
+        const val PLACEHOLDER_BEST_AUDIO_ID = "placeholder_best_audio"
+
+        val PLACEHOLDER_BEST_VIDEO = MediaFormat(
+            id = PLACEHOLDER_BEST_VIDEO_ID,
+            kind = FormatKind.VIDEO,
+            container = "MP4",
+            label = "BEST QUALITY",
+            codec = null,
+            approxSizeBytes = null,
+            isSizeEstimated = false
+        )
+
+        val PLACEHOLDER_BEST_AUDIO = MediaFormat(
+            id = PLACEHOLDER_BEST_AUDIO_ID,
+            kind = FormatKind.AUDIO,
+            container = "MP3",
+            label = "BEST AUDIO",
+            codec = null,
+            approxSizeBytes = null,
+            isSizeEstimated = false
+        )
+    }
+}
 
 /**
  * How ffmpeg should combine separate video + audio streams into a final .mp4 file.

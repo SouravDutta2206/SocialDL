@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -55,6 +56,7 @@ fun MediaCard(
     activeDownloadTask: DownloadTask? = null,
     onPauseResumeDownload: (() -> Unit)? = null,
     onCancelDownload: (() -> Unit)? = null,
+    isResolving: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -187,6 +189,31 @@ fun MediaCard(
                     onPauseResume = onPauseResumeDownload,
                     onCancel = onCancelDownload
                 )
+            }
+
+            // Loading overlay when fetching presets on-demand
+            if (isResolving) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.65f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            color = Color(0xFF0D59C8),
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Text(
+                            text = "Loading presets...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White
+                        )
+                    }
+                }
             }
         }
     }

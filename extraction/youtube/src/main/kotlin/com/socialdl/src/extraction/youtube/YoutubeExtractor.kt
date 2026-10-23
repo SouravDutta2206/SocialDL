@@ -217,6 +217,18 @@ class YoutubeExtractor @Inject constructor(
                 .thenByDescending { it.approxSizeBytes ?: 0L }
         )
 
+        val finalVideoFormats = if (videoFormats.isEmpty() && audioFormats.isEmpty()) {
+            listOf(MediaFormat.PLACEHOLDER_BEST_VIDEO)
+        } else {
+            videoFormats
+        }
+
+        val finalAudioFormats = if (videoFormats.isEmpty() && audioFormats.isEmpty()) {
+            listOf(MediaFormat.PLACEHOLDER_BEST_AUDIO)
+        } else {
+            audioFormats
+        }
+
         return MediaItem(
             platform = Platform.YOUTUBE,
             sourceUrl = itemUrl,
@@ -224,8 +236,8 @@ class YoutubeExtractor @Inject constructor(
             author = dto.uploader ?: "Unknown",
             durationSeconds = duration,
             thumbnailUrl = cachedThumb,
-            videoFormats = videoFormats,
-            audioFormats = audioFormats,
+            videoFormats = finalVideoFormats,
+            audioFormats = finalAudioFormats,
             isCarousel = false,
             carouselIndex = carouselIndex
         )

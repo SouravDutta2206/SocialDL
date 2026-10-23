@@ -68,10 +68,23 @@ fun HomeScreen(
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val resolvingItemId by viewModel.resolvingItemId.collectAsStateWithLifecycle()
     var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
     var selectedItemForSheet by remember { mutableStateOf<MediaItem?>(null) }
     var sheetInitialTab by remember { mutableStateOf(FormatKind.VIDEO) }
     var showBatchSheet by remember { mutableStateOf(false) }
+
+    fun handleOpenSheet(item: MediaItem, initialTab: FormatKind) {
+        if (item.isPlaceholder) {
+            viewModel.resolveItemFormats(item) { resolvedItem ->
+                sheetInitialTab = initialTab
+                selectedItemForSheet = resolvedItem
+            }
+        } else {
+            sheetInitialTab = initialTab
+            selectedItemForSheet = item
+        }
+    }
 
     LaunchedEffect(uiState.infoMessage) {
         uiState.infoMessage?.let { msg ->
@@ -90,7 +103,7 @@ fun HomeScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 8.dp),
+                    .padding(horizontal = 24.dp, vertical = 16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -165,17 +178,15 @@ fun HomeScreen(
                     ) { _, item ->
                         MediaCard(
                             item = item,
+                            isResolving = resolvingItemId == item.sourceUrl,
                             onCardClick = {
-                                sheetInitialTab = FormatKind.VIDEO
-                                selectedItemForSheet = item
+                                handleOpenSheet(item, FormatKind.VIDEO)
                             },
                             onQuickAudioDownload = {
-                                sheetInitialTab = FormatKind.AUDIO
-                                selectedItemForSheet = item
+                                handleOpenSheet(item, FormatKind.AUDIO)
                             },
                             onQuickVideoDownload = {
-                                sheetInitialTab = FormatKind.VIDEO
-                                selectedItemForSheet = item
+                                handleOpenSheet(item, FormatKind.VIDEO)
                             }
                         )
                     }

@@ -42,7 +42,46 @@ class HomeViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
+    private val _resolvingItemId = MutableStateFlow<String?>(null)
+    val resolvingItemId: StateFlow<String?> = _resolvingItemId.asStateFlow()
+
     private var extractionJob: Job? = null
+
+    fun resolveItemFormats(item: MediaItem, onResolved: (MediaItem) -> Unit) {
+        if (!item.isPlaceholder) {
+            onResolved(item)
+            return
+        }
+
+        viewModelScope.launch {
+            _resolvingItemId.value = item.sourceUrl
+            val extractor = extractorRegistry.resolve(item.sourceUrl)
+            if (extractor != null) {
+                when (val result = extractor.extract(item.sourceUrl)) {
+                    is ExtractionResult.Success -> {
+                        val resolvedItem = result.items.firstOrNull()?.copy(
+                            carouselIndex = item.carouselIndex
+                        ) ?: item
+                        _uiState.update { state ->
+                            val updatedList = state.mediaItems.map {
+                                if (it.sourceUrl == item.sourceUrl) resolvedItem else it
+                            }
+                            state.copy(mediaItems = updatedList)
+                        }
+                        _resolvingItemId.value = null
+                        onResolved(resolvedItem)
+                    }
+                    is ExtractionResult.Error -> {
+                        _resolvingItemId.value = null
+                        _uiState.update { it.copy(infoMessage = "Failed to load presets: ${result.cause.message}") }
+                    }
+                }
+            } else {
+                _resolvingItemId.value = null
+                onResolved(item)
+            }
+        }
+    }
 
     fun startDownload(
         mediaItem: MediaItem,

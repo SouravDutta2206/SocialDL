@@ -363,7 +363,7 @@ private fun BatchItemRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Size Chip
+                    // Size Chip or AUTO indicator
                     if (preset?.approxSizeBytes != null) {
                         Surface(
                             shape = RoundedCornerShape(4.dp),
@@ -379,15 +379,31 @@ private fun BatchItemRow(
                                 modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                             )
                         }
+                    } else if (preset?.isPlaceholder == true) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = SocialDLBadgeRoseBg
+                        ) {
+                            Text(
+                                text = "AUTO",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                color = SocialDLBadgeRoseText,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            )
+                        }
                     }
 
-                    // Resolution Preset Chip (e.g. 1080P)
+                    // Resolution Preset Chip (e.g. 1080P or BEST QUALITY)
                     if (preset != null) {
                         Surface(
                             shape = RoundedCornerShape(4.dp),
                             color = SocialDLBadgeBlueBg
                         ) {
                             val presetLabel = when {
+                                preset.isPlaceholder -> "BEST QUALITY"
                                 preset.label.contains("(") -> preset.label.substringBefore("(")
                                 else -> preset.label
                             }.trim()

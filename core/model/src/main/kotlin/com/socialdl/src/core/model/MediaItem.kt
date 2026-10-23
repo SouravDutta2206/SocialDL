@@ -39,4 +39,7 @@ data class MediaItem(
 
     /** Image formats — Instagram photo posts, Twitter photo tweets. */
     val imageFormats: List<MediaFormat> = emptyList(),
-)
+) {
+    val isPlaceholder: Boolean
+        get() = videoFormats.any { it.isPlaceholder } || audioFormats.any { it.isPlaceholder }
+}
