@@ -14,6 +14,10 @@ import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
 import com.socialdl.src.extraction.api.UrlPlatformResolver
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -142,11 +146,15 @@ class YoutubeExtractor @Inject constructor(
         }
 
         if (parsed.is_playlist && parsed.entries.isNotEmpty()) {
-            val mediaItems = parsed.entries.mapIndexed { index, entryDto ->
-                val cleanUrl = entryDto.webpage_url
-                    ?: entryDto.id?.let { "https://www.youtube.com/watch?v=$it" }
-                    ?: sourceUrl.substringBefore("&list").substringBefore("?list")
-                mapDtoToMediaItem(entryDto, cleanUrl, carouselIndex = index + 1)
+            val mediaItems = coroutineScope {
+                parsed.entries.mapIndexed { index, entryDto ->
+                    async(Dispatchers.Default) {
+                        val cleanUrl = entryDto.webpage_url
+                            ?: entryDto.id?.let { "https://www.youtube.com/watch?v=$it" }
+                            ?: sourceUrl.substringBefore("&list").substringBefore("?list")
+                        mapDtoToMediaItem(entryDto, cleanUrl, carouselIndex = index + 1)
+                    }
+                }.awaitAll()
             }
             return ExtractionResult.Success(mediaItems)
         } else {
