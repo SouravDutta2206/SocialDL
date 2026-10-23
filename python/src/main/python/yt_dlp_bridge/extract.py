@@ -44,9 +44,8 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         "no_warnings": True,
         "skip_download": True,       # metadata only — never triggers a download
         "noplaylist": not is_playlist_url,  # allow playlist extraction when list is present
-        "extract_flat": False,       # fully resolve formats for items
+        "extract_flat": "in_playlist" if is_playlist_url else False,  # fast flat metadata for playlists, deep for single videos
         "cookiefile": cookiefile,    # decrypted temp path if available
-        "playlistend": 30,           # safe limit for playlist items
         "no_check_certificates": True,
     }
 

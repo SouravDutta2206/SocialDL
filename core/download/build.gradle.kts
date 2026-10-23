@@ -31,6 +31,7 @@ dependencies {
     implementation(project(":core:ffmpeg"))
     implementation(project(":core:network"))
     implementation(project(":core:settings"))
+    implementation(project(":extraction:api"))
 
     implementation(libs.workmanager.runtime.ktx)
     implementation(libs.workmanager.hilt)

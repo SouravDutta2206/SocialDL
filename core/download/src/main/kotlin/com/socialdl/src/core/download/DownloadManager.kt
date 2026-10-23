@@ -140,7 +140,8 @@ class DownloadManager @Inject constructor(
             DownloadWorker.KEY_HTTP_CHUNK_SIZE to (selectedFormat.httpChunkSizeBytes ?: 0L),
             DownloadWorker.KEY_AUDIO_HTTP_CHUNK_SIZE to (pairedAudio?.httpChunkSizeBytes ?: 0L),
             DownloadWorker.KEY_FORMAT_KIND to selectedFormat.kind.name,
-            DownloadWorker.KEY_GROUP_ID to (groupId ?: "")
+            DownloadWorker.KEY_GROUP_ID to (groupId ?: ""),
+            DownloadWorker.KEY_IS_PLACEHOLDER to selectedFormat.isPlaceholder
         )
 
         val constraints = Constraints.Builder()

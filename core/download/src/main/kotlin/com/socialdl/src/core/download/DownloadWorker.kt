@@ -10,6 +10,8 @@ import com.socialdl.src.core.database.entity.DownloadHistoryEntity
 import com.socialdl.src.core.ffmpeg.FFmpegEvent
 import com.socialdl.src.core.ffmpeg.FFmpegProcessExecutor
 import com.socialdl.src.core.model.MuxStrategy
+import com.socialdl.src.extraction.api.ExtractionResult
+import com.socialdl.src.extraction.api.ExtractorRegistry
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
@@ -28,6 +30,7 @@ class DownloadWorker @AssistedInject constructor(
     private val downloadDao: DownloadDao,
     private val eventBus: DownloadEventBus,
     private val concurrencyGate: DownloadConcurrencyGate,
+    private val extractorRegistry: ExtractorRegistry,
 ) : CoroutineWorker(appContext, workerParams) {
 
     private val tag = "DownloadWorker"
@@ -50,6 +53,7 @@ class DownloadWorker @AssistedInject constructor(
         const val KEY_AUDIO_HTTP_CHUNK_SIZE = "audio_http_chunk_size"
         const val KEY_FORMAT_KIND = "format_kind"
         const val KEY_GROUP_ID = "group_id"
+        const val KEY_IS_PLACEHOLDER = "is_placeholder"
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -71,19 +75,96 @@ class DownloadWorker @AssistedInject constructor(
         val audioDirectUrl = inputData.getString(KEY_AUDIO_DIRECT_URL)
         val videoChunkSize = inputData.getLong(KEY_HTTP_CHUNK_SIZE, 0L)
         val audioChunkSize = inputData.getLong(KEY_AUDIO_HTTP_CHUNK_SIZE, 0L)
-
-        if (directUrl.isNullOrBlank()) {
-            Logger.e(tag, "[$taskId] Missing directUrl for download")
-            eventBus.emit(DownloadEvent.Failed(taskId, "Missing download stream URL"))
-            return@withContext Result.failure()
-        }
+        val isPlaceholder = inputData.getBoolean(KEY_IS_PLACEHOLDER, false)
 
         val scratchDir = File(appContext.cacheDir, "downloads/$taskId")
         scratchDir.mkdirs()
 
         try {
             val success = concurrencyGate.withDownloadPermit {
-                Logger.i(tag, "[$taskId] Acquired download permit, starting: title='$title', container=$container, requiresMuxing=$requiresMuxing")
+                var effectiveDirectUrl = directUrl
+                var effectiveAudioDirectUrl = audioDirectUrl
+                var effectiveRequiresMuxing = requiresMuxing
+                var effectiveVideoChunkSize = videoChunkSize
+                var effectiveAudioChunkSize = audioChunkSize
+                var effectiveMuxStrategy = muxStrategy
+                var effectiveContainer = container
+
+                // JIT Resolution for placeholder items (e.g. fast playlist items)
+                if (isPlaceholder || effectiveDirectUrl.isNullOrBlank()) {
+                    Logger.i(tag, "[$taskId] JIT resolving stream formats for: $sourceUrl")
+                    eventBus.emit(
+                        DownloadEvent.Running(
+                            taskId = taskId,
+                            progress = 0f,
+                            downloadedBytes = 0L,
+                            totalBytes = null,
+                            phase = DownloadPhase.DOWNLOADING
+                        )
+                    )
+
+                    val extractor = extractorRegistry.resolve(sourceUrl)
+                    if (extractor == null) {
+                        val err = "No extractor available for $sourceUrl"
+                        Logger.e(tag, "[$taskId] $err")
+                        eventBus.emit(DownloadEvent.Failed(taskId, err))
+                        return@withDownloadPermit false
+                    }
+
+                    when (val result = extractor.extract(sourceUrl)) {
+                        is ExtractionResult.Success -> {
+                            val resolvedItem = result.items.firstOrNull()
+                            if (resolvedItem == null) {
+                                val err = "No media item returned for $sourceUrl"
+                                Logger.e(tag, "[$taskId] $err")
+                                eventBus.emit(DownloadEvent.Failed(taskId, err))
+                                return@withDownloadPermit false
+                            }
+
+                            val isAudio = formatKind == "AUDIO"
+                            val resolvedFormat = if (isAudio) {
+                                resolvedItem.audioFormats.firstOrNull() ?: resolvedItem.videoFormats.firstOrNull()
+                            } else {
+                                resolvedItem.videoFormats.firstOrNull() ?: resolvedItem.audioFormats.firstOrNull()
+                            }
+
+                            if (resolvedFormat == null || resolvedFormat.directUrl.isNullOrBlank()) {
+                                val err = "No direct stream URL resolved for $sourceUrl"
+                                Logger.e(tag, "[$taskId] $err")
+                                eventBus.emit(DownloadEvent.Failed(taskId, err))
+                                return@withDownloadPermit false
+                            }
+
+                            effectiveDirectUrl = resolvedFormat.directUrl
+                            effectiveRequiresMuxing = resolvedFormat.requiresMuxing
+                            effectiveVideoChunkSize = resolvedFormat.httpChunkSizeBytes ?: 0L
+                            effectiveMuxStrategy = resolvedFormat.muxStrategy
+                            effectiveContainer = if (!container.isNullOrBlank() && container != "Default") container else resolvedFormat.container
+
+                            if (resolvedFormat.requiresMuxing) {
+                                val pairedAudio = resolvedItem.audioFormats.find { it.id == resolvedFormat.pairedAudioFormatId }
+                                    ?: resolvedItem.audioFormats.firstOrNull()
+                                effectiveAudioDirectUrl = pairedAudio?.directUrl
+                                effectiveAudioChunkSize = pairedAudio?.httpChunkSizeBytes ?: 0L
+                            }
+                        }
+                        is ExtractionResult.Error -> {
+                            val err = "JIT stream resolution failed: ${result.cause.message}"
+                            Logger.e(tag, "[$taskId] $err")
+                            eventBus.emit(DownloadEvent.Failed(taskId, err))
+                            return@withDownloadPermit false
+                        }
+                    }
+                }
+
+                if (effectiveDirectUrl.isNullOrBlank()) {
+                    val err = "Missing direct download URL"
+                    Logger.e(tag, "[$taskId] $err")
+                    eventBus.emit(DownloadEvent.Failed(taskId, err))
+                    return@withDownloadPermit false
+                }
+
+                Logger.i(tag, "[$taskId] Acquired download permit, starting: title='$title', container=$effectiveContainer, requiresMuxing=$effectiveRequiresMuxing")
                 eventBus.emit(
                     DownloadEvent.Running(
                         taskId = taskId,
@@ -96,43 +177,43 @@ class DownloadWorker @AssistedInject constructor(
 
                 val finalFile: File
 
-            if (requiresMuxing && !audioDirectUrl.isNullOrBlank()) {
-                // Dual-stream download for YouTube video + audio muxing (§9)
-                val videoTemp = File(scratchDir, "video.tmp")
-                val audioTemp = File(scratchDir, "audio.tmp")
+                if (effectiveRequiresMuxing && !effectiveAudioDirectUrl.isNullOrBlank()) {
+                    // Dual-stream download for YouTube video + audio muxing (§9)
+                    val videoTemp = File(scratchDir, "video.tmp")
+                    val audioTemp = File(scratchDir, "audio.tmp")
 
-                Logger.d(tag, "[$taskId] Downloading video stream (chunkSize=$videoChunkSize)...")
-                chunkedDownloader.download(
-                    url = directUrl,
-                    destination = videoTemp,
-                    chunkSizeBytes = videoChunkSize,
-                    platform = platform,
-                    isStopped = { isStopped }
-                ) { bytesWritten, totalBytes ->
-                    val progress = if (totalBytes != null && totalBytes > 0) {
-                        (bytesWritten.toFloat() / totalBytes) * 0.8f // Video accounts for 80% of download progress
-                    } else {
-                        0.2f
-                    }
-                    eventBus.tryEmit(
-                        DownloadEvent.Running(
-                            taskId = taskId,
-                            progress = progress,
-                            downloadedBytes = bytesWritten,
-                            totalBytes = totalBytes,
-                            phase = DownloadPhase.DOWNLOADING
+                    Logger.d(tag, "[$taskId] Downloading video stream (chunkSize=$effectiveVideoChunkSize)...")
+                    chunkedDownloader.download(
+                        url = effectiveDirectUrl,
+                        destination = videoTemp,
+                        chunkSizeBytes = effectiveVideoChunkSize,
+                        platform = platform,
+                        isStopped = { isStopped }
+                    ) { bytesWritten, totalBytes ->
+                        val progress = if (totalBytes != null && totalBytes > 0) {
+                            (bytesWritten.toFloat() / totalBytes) * 0.8f // Video accounts for 80% of download progress
+                        } else {
+                            0.2f
+                        }
+                        eventBus.tryEmit(
+                            DownloadEvent.Running(
+                                taskId = taskId,
+                                progress = progress,
+                                downloadedBytes = bytesWritten,
+                                totalBytes = totalBytes,
+                                phase = DownloadPhase.DOWNLOADING
+                            )
                         )
-                    )
-                }
+                    }
 
-                Logger.d(tag, "[$taskId] Downloading audio stream (chunkSize=$audioChunkSize)...")
-                chunkedDownloader.download(
-                    url = audioDirectUrl,
-                    destination = audioTemp,
-                    chunkSizeBytes = audioChunkSize,
-                    platform = platform,
-                    isStopped = { isStopped }
-                ) { bytesWritten, totalBytes ->
+                    Logger.d(tag, "[$taskId] Downloading audio stream (chunkSize=$effectiveAudioChunkSize)...")
+                    chunkedDownloader.download(
+                        url = effectiveAudioDirectUrl,
+                        destination = audioTemp,
+                        chunkSizeBytes = effectiveAudioChunkSize,
+                        platform = platform,
+                        isStopped = { isStopped }
+                    ) { bytesWritten, totalBytes ->
                     val progress = if (totalBytes != null && totalBytes > 0) {
                         0.8f + (bytesWritten.toFloat() / totalBytes) * 0.15f // Audio accounts for 15%
                     } else {
@@ -161,15 +242,15 @@ class DownloadWorker @AssistedInject constructor(
                     )
                 )
 
-                val ext = container.lowercase(Locale.ROOT)
+                val ext = effectiveContainer.lowercase(Locale.ROOT)
                 val muxedFile = File(scratchDir, "muxed.$ext")
 
                 val ffmpegArgs = buildMuxArgs(
                     videoFile = videoTemp,
                     audioFile = audioTemp,
                     outputFile = muxedFile,
-                    container = container,
-                    muxStrategy = muxStrategy
+                    container = effectiveContainer,
+                    muxStrategy = effectiveMuxStrategy
                 )
 
                 var muxSuccess = false
@@ -198,14 +279,14 @@ class DownloadWorker @AssistedInject constructor(
                 finalFile = muxedFile
             } else {
                 // Single-stream download (Progressive video, non-YouTube, or audio-only)
-                val ext = container.lowercase(Locale.ROOT)
+                val ext = effectiveContainer.lowercase(Locale.ROOT)
                 val mediaTemp = File(scratchDir, "media.tmp")
 
-                Logger.d(tag, "[$taskId] Downloading single media stream (chunkSize=$videoChunkSize)...")
+                Logger.d(tag, "[$taskId] Downloading single media stream (chunkSize=$effectiveVideoChunkSize)...")
                 chunkedDownloader.download(
-                    url = directUrl,
+                    url = effectiveDirectUrl,
                     destination = mediaTemp,
-                    chunkSizeBytes = videoChunkSize,
+                    chunkSizeBytes = effectiveVideoChunkSize,
                     platform = platform,
                     isStopped = { isStopped }
                 ) { bytesWritten, totalBytes ->
@@ -236,7 +317,7 @@ class DownloadWorker @AssistedInject constructor(
             // Export to MediaStore / Scoped Storage (§9.7)
             Logger.i(tag, "[$taskId] Exporting ${finalFile.length()} bytes to MediaStore...")
             val isAudioOnly = formatKind.equals("AUDIO", ignoreCase = true) ||
-                    container.uppercase(Locale.ROOT) in listOf("MP3", "M4A", "OPUS", "FLAC", "WAV", "AAC", "OGG") ||
+                    effectiveContainer.uppercase(Locale.ROOT) in listOf("MP3", "M4A", "OPUS", "FLAC", "WAV", "AAC", "OGG") ||
                     formatLabel.contains("MP3", ignoreCase = true) ||
                     formatLabel.contains("M4A", ignoreCase = true) ||
                     formatLabel.contains("OPUS", ignoreCase = true) ||
@@ -246,7 +327,7 @@ class DownloadWorker @AssistedInject constructor(
                 file = finalFile,
                 title = title,
                 author = author,
-                container = container,
+                container = effectiveContainer,
                 isAudio = isAudioOnly
             )
 
