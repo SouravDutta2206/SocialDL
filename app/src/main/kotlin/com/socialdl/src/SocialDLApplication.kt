@@ -30,6 +30,9 @@ class SocialDLApplication : Application(), Configuration.Provider {
     @Inject
     lateinit var nodeBinaryProvider: NodeBinaryProvider
 
+    @Inject
+    lateinit var notificationManager: com.socialdl.src.core.download.DownloadNotificationManager
+
     override val workManagerConfiguration: Configuration by lazy {
         Configuration.Builder()
             .setWorkerFactory(workerFactory)
@@ -51,6 +54,9 @@ class SocialDLApplication : Application(), Configuration.Provider {
         if (!Python.isStarted()) {
             Python.start(AndroidPlatform(this))
         }
+
+        // Foreground download notification channel (P1-1) — created once at app start.
+        notificationManager.ensureChannel()
 
         runDiagnosticsSmokeTest()
     }
