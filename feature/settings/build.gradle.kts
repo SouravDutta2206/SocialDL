@@ -23,6 +23,7 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:ui"))
     implementation(project(":core:settings"))
+    implementation(project(":core:cookies"))
 
     // Compose
     implementation(platform(libs.compose.bom))

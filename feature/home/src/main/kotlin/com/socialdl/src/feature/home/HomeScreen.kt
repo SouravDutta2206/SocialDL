@@ -66,6 +66,7 @@ import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 @Composable
 fun HomeScreen(
     onNavigateToSettings: () -> Unit,
+    onSignInWithYouTube: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
@@ -143,6 +144,13 @@ fun HomeScreen(
                 },
                 isLoading = uiState.isLoading
             )
+
+            // §2.6 recapture flow: the last extraction hit an auth wall — offer the
+            // direct "Sign in with YouTube" action; the navigation graph auto-retries
+            // the same URL when the capture screen completes successfully.
+            uiState.authWallUrl?.let {
+                AuthWallSignInCard(onSignInWithYouTube = onSignInWithYouTube)
+            }
 
             // Result Cards List or Empty State
             if (uiState.mediaItems.isEmpty()) {
@@ -307,5 +315,42 @@ fun HomeScreen(
             toast = toastMessage,
             onDismiss = { toastMessage = null }
         )
+    }
+}
+
+/** §2.6 recapture card: matches the mock's error-state offering a direct "Sign in" action. */
+@Composable
+private fun AuthWallSignInCard(onSignInWithYouTube: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = SocialDLBg,
+        border = androidx.compose.foundation.BorderStroke(1.dp, SocialDLAccent),
+        modifier = Modifier.padding(horizontal = 24.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "YouTube needs you signed in",
+                style = MaterialTheme.typography.titleSmall,
+                color = SocialDLOnSurface
+            )
+            Text(
+                text = "Age-restricted and bot-checked videos need a signed-in session. Sign in once with YouTube, then this video is retried automatically.",
+                style = MaterialTheme.typography.bodySmall,
+                color = SocialDLOnSurfaceVariant
+            )
+            Button(
+                onClick = onSignInWithYouTube,
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = SocialDLAccentButton,
+                    contentColor = Color.White
+                )
+            ) {
+                Text("Sign in with YouTube")
+            }
+        }
     }
 }

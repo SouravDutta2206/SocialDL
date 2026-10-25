@@ -2,6 +2,7 @@ package com.socialdl.src.extraction.youtube
 
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.ThumbnailCache
+import com.socialdl.src.core.cookies.CookieStore
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
@@ -28,6 +29,17 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Serializable
+internal data class YtDlpJsDiagnostics(
+    val runtime: String? = null,
+    val path: String? = null,
+    val version: String? = null,
+    val exec_ok: Boolean? = null,
+    val min_supported: String? = null,
+    val ejs_package: Boolean? = null,
+    val warnings: List<String> = emptyList(),
+)
+
+@Serializable
 internal data class YtDlpNormalizedResponse(
     val id: String? = null,
     val webpage_url: String? = null,
@@ -38,6 +50,14 @@ internal data class YtDlpNormalizedResponse(
     val formats: List<YtDlpFormatDto> = emptyList(),
     val error: String? = null,
     val detail: String? = null,
+    /** yt-dlp's own collected progress/warning lines — diagnostics only, on error envelopes. */
+    val debug_log: String? = null,
+    /**
+     * Present ONLY when the JS runtime chain is degraded (§2.6 troubleshooting):
+     * node invisible, exec-failing, solver distribution missing, or yt-dlp logged
+     * challenge-solving failures. The bridge omits it on healthy runs.
+     */
+    val js_diagnostics: YtDlpJsDiagnostics? = null,
     val is_playlist: Boolean = false,
     val entries: List<YtDlpNormalizedResponse> = emptyList(),
 )
@@ -71,6 +91,7 @@ class YoutubeExtractor @Inject constructor(
     private val pythonEngine: PythonEngine,
     private val nodeBinaryProvider: NodeBinaryProvider,
     private val thumbnailCache: ThumbnailCache,
+    private val cookieStore: CookieStore,
 ) : MediaExtractor {
 
     private val tag = "YoutubeExtractor"
@@ -110,13 +131,18 @@ class YoutubeExtractor @Inject constructor(
         Logger.d(tag, "Extracting YouTube metadata for $normalizedUrl (nodeDir=$nodeDir)")
 
         return try {
-            val rawJson = pythonEngine.run(
-                module = "yt_dlp_bridge.extract",
-                function = "extract",
-                normalizedUrl,
-                null, // cookieFilePath if present
-                nodeDir
-            ) { it }
+            // §2.6 bridge: decrypt the stored jar into a throwaway cacheDir file for
+            // the duration of this one PythonEngine call, or pass null when the user
+            // never signed in — missing cookies must not become a new failure mode.
+            val rawJson = cookieStore.withYoutubeCookieFile { cookieFilePath: String? ->
+                pythonEngine.run(
+                    module = "yt_dlp_bridge.extract",
+                    function = "extract",
+                    normalizedUrl,
+                    cookieFilePath,
+                    nodeDir
+                ) { it }
+            }
 
             parseYtDlpJson(rawJson, normalizedUrl)
         } catch (e: Exception) {
@@ -138,7 +164,33 @@ class YoutubeExtractor @Inject constructor(
             return ExtractionResult.Error(ExtractionError.ParsingFailed("Malformed yt-dlp JSON: ${e.message}"))
         }
 
+        parsed.js_diagnostics?.let { diag ->
+            Logger.e(
+                "JsRuntime",
+                "yt-dlp JS runtime chain DEGRADED — n/sig challenge solving will fail and " +
+                    "stream formats may be silently missing.\n" +
+                    "  runtime=${diag.runtime ?: "<none visible>"} " +
+                    "version=${diag.version ?: "?"} exec_ok=${diag.exec_ok} " +
+                    "min_supported=${diag.min_supported ?: "?"} " +
+                    "ejs_package=${diag.ejs_package}\n" +
+                    "  path=${diag.path ?: "<none>"}\n" +
+                    "  warnings:\n    " + diag.warnings.joinToString("\n    ") + "\n" +
+                    "Troubleshooting (§2.5.2 hot-swap / yt-dlp update regression): verify " +
+                    "core/node's bundled libnode.so is executable at nativeLibraryDir, its version is >= " +
+                    "${diag.min_supported ?: "22.0.0"}, and extract.py's _resolve_node_runtime() " +
+                    "locates it (bin/node symlink → libnode.so → PATH). Watch for this tag: " +
+                    "adb logcat -s SocialDL:JsRuntime"
+            )
+        }
+
         if (parsed.error != null) {
+            // Log the envelope verbatim (error text only, never cookie values) — this
+            // is the ground truth needed to distinguish "cookies not loaded" from
+            // "session rejected" from "age-gate even with cookies" in the wild.
+            Logger.w(tag, "yt-dlp error envelope: ${parsed.error} | ${parsed.detail}")
+            parsed.debug_log?.takeIf { it.isNotBlank() }?.let {
+                Logger.w(tag, "yt-dlp debug_log:\n$it")
+            }
             return when (parsed.error) {
                 "auth_wall" -> ExtractionResult.Error(ExtractionError.AuthWallDetected(Platform.YOUTUBE, parsed.detail ?: "Sign-in required"))
                 "rate_limited" -> ExtractionResult.Error(ExtractionError.RateLimited())

@@ -22,6 +22,7 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:model"))
     implementation(project(":core:python"))
+    implementation(project(":core:cookies"))
     implementation(project(":core:ffmpeg"))
     implementation(project(":core:node"))
 
