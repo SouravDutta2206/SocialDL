@@ -67,6 +67,7 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:ui"))
     implementation(project(":core:settings"))
+    implementation(project(":core:cookies"))
     implementation(project(":core:python"))
     implementation(project(":core:network"))
     implementation(project(":core:database"))

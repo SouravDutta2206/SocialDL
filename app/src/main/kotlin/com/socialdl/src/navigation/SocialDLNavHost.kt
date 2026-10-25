@@ -5,6 +5,8 @@ import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import com.socialdl.src.BuildConfig
+import com.socialdl.src.core.cookies.navigation.cookieCaptureScreen
+import com.socialdl.src.core.cookies.navigation.navigateToCookieCapture
 import com.socialdl.src.feature.downloads.navigation.downloadsScreen
 import com.socialdl.src.feature.home.navigation.HOME_ROUTE
 import com.socialdl.src.feature.home.navigation.homeScreen
@@ -23,7 +25,8 @@ fun SocialDLNavHost(
         modifier = modifier
     ) {
         homeScreen(
-            onNavigateToSettings = { navController.navigateToSettings() }
+            onNavigateToSettings = { navController.navigateToSettings() },
+            onNavigateToSignInYouTube = { navController.navigateToCookieCapture() }
         )
 
         downloadsScreen(
@@ -32,7 +35,12 @@ fun SocialDLNavHost(
 
         settingsScreen(
             onNavigateBack = { navController.popBackStack() },
+            onNavigateToCookieCapture = { navController.navigateToCookieCapture() },
             appVersion = BuildConfig.VERSION_NAME
         )
+
+        // §2.6 — full-screen WebView cookie capture; registered once, launched from
+        // both the Home auth-wall card and Settings → Cookies.
+        cookieCaptureScreen(navController)
     }
 }

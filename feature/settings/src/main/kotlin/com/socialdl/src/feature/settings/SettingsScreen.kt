@@ -24,15 +24,21 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -59,14 +65,30 @@ private enum class SettingsSection { GENERAL, FOLDERS, COOKIES, LOGS, ABOUT }
 @Composable
 fun SettingsScreen(
     onNavigateBack: () -> Unit,
+    onNavigateToCookieCapture: () -> Unit = {},
     appVersion: String = "",
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val cookiesUiState by viewModel.cookiesUiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     var expandedSection by remember { mutableStateOf<SettingsSection?>(null) }
+    var showClearCookiesDialog by remember { mutableStateOf(false) }
+
+    // Cookie-capture round-trip: when we come back from the WebView route the
+    // encrypted jar may have changed — re-read status exactly once per return.
+    LaunchedEffect(cookiesUiState.lastRefreshedAt, cookiesUiState.present) {
+        viewModel.refreshCookiesStatus()
+    }
+
+    // Manual cookies.txt import picker (§2.6 fallback)
+    val cookiesFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let(viewModel::importCookies)
+    }
 
     // Back collapses the expanded panel first.
     BackHandler(enabled = expandedSection != null) {
@@ -208,7 +230,16 @@ fun SettingsScreen(
                     )
                 }
                 if (expandedSection == SettingsSection.COOKIES) {
-                    item { ComingSoonPanel(text = "Cookie import lands with the core:cookies module.") }
+                    item {
+                        CookiesSettingsPanel(
+                            present = cookiesUiState.present,
+                            lastRefreshedAt = cookiesUiState.lastRefreshedAt,
+                            actionMessage = cookiesUiState.actionMessage,
+                            onSignIn = onNavigateToCookieCapture,
+                            onImport = { cookiesFilePicker.launch(arrayOf("*/*")) },
+                            onClear = { showClearCookiesDialog = true }
+                        )
+                    }
                 }
 
                 item {
@@ -252,6 +283,17 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+
+    // §2.6: Clear cookies is a destructive action — confirmation dialog first.
+    if (showClearCookiesDialog) {
+        ClearCookiesConfirmDialog(
+            onDismiss = { showClearCookiesDialog = false },
+            onConfirm = {
+                showClearCookiesDialog = false
+                viewModel.clearCookies()
+            }
+        )
     }
 }
 
@@ -419,6 +461,114 @@ private fun ComingSoonPanel(text: String) {
         )
     }
 }
+
+/** §2.6 Settings UI: status, "Sign in with WebView" primary, import secondary, clear destructive. */
+@Composable
+private fun CookiesSettingsPanel(
+    present: Boolean,
+    lastRefreshedAt: Long?,
+    actionMessage: String?,
+    onSignIn: () -> Unit,
+    onImport: () -> Unit,
+    onClear: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(SocialDLBg)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // Status row
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = when {
+                    present && lastRefreshedAt != null ->
+                        "Signed in · refreshed ${relativeCookieAge(lastRefreshedAt)}"
+                    present -> "Signed in"
+                    else -> "Not signed in"
+                },
+                style = MaterialTheme.typography.titleSmall,
+                color = SocialDLOnSurface,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Text(
+            text = if (present) {
+                "Captured cookies keep yt-dlp signed in for age-restricted and member-only videos."
+            } else {
+                "Sign in once, or import a browser-exported cookies.txt. Encrypted at rest."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = SocialDLOnSurfaceVariant
+        )
+
+        Button(
+            onClick = onSignIn,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = SocialDLAccent,
+                contentColor = SocialDLOnSurface
+            )
+        ) {
+            Text("Sign in with YouTube")
+        }
+        OutlinedButton(
+            onClick = onImport,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text("Import cookies.txt")
+        }
+        TextButton(
+            onClick = onClear,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text = "Clear cookies",
+                color = SocialDLAccent
+            )
+        }
+
+        actionMessage?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = SocialDLOnSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun ClearCookiesConfirmDialog(
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Clear YouTube cookies?") },
+        text = {
+            Text(
+                "Age-restricted and member-only downloads will stop working until you sign in again. Encrypted cookies are deleted from this device.",
+                style = MaterialTheme.typography.bodySmall
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Clear", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+private fun relativeCookieAge(timestampMillis: Long): String =
+    android.text.format.DateUtils.getRelativeTimeSpanString(timestampMillis).toString()
 
 @Composable
 private fun AboutPanel(appVersion: String) {

@@ -1,6 +1,32 @@
 import json
 import os
+import shutil
+import subprocess
 import yt_dlp
+
+
+class _DebugLogCollector:
+    """
+    Collects yt-dlp's own progress/warning/error messages so a failed extraction's
+    error envelope can carry the client-skip diagnostics (e.g. 'web_creator requires
+    a PO token', 'requiring account age-verification') instead of just the final
+    playability reason. Always attached; only ever emitted on error envelopes.
+    """
+
+    def __init__(self):
+        self.lines = []
+
+    def debug(self, msg):
+        self.lines.append(str(msg))
+
+    def info(self, msg):
+        self.lines.append(str(msg))
+
+    def warning(self, msg):
+        self.lines.append("[warn] " + str(msg))
+
+    def error(self, msg):
+        self.lines.append("[error] " + str(msg))
 
 # Substrings of yt-dlp's DownloadError message that specifically mean
 # "this needs a logged-in session", not just "something went wrong" —
@@ -32,6 +58,144 @@ _NETWORK_MARKERS = (
     "network",
 )
 
+def _locate_native_runtime():
+    """Finds the Kotlin-side native runtime (NativeRuntime.ensureExtracted output).
+
+    Our module is imported from <filesDir>/chaquopy/AssetFinder/app/<pkg>/..., so
+    walking up to the directory literally named 'files' recovers filesDir without
+    relying on TMPDIR/HOME being set in the Chaquopy process env.
+    Returns (bin_dir, usr_lib) or (None, None).
+    """
+    try:
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        d = module_dir
+        for _ in range(6):
+            d = os.path.dirname(d)
+            if os.path.basename(d) == "files":
+                native_runtime = os.path.join(d, "native_runtime")
+                bin_dir = os.path.join(native_runtime, "bin")
+                usr_lib = os.path.join(native_runtime, "usr", "lib")
+                if os.path.isdir(bin_dir) and os.path.isdir(usr_lib):
+                    return bin_dir, usr_lib
+                break
+    except Exception:
+        pass
+    return None, None
+
+
+def _resolve_node_runtime(node_dir):
+    """Finds the bundled Node binary for yt-dlp's js_runtimes option, or None.
+
+    Preference order: NativeRuntime's bin/node symlink (already exec-proven by the
+    boot smoke test) → nativeLibraryDir/libnode.so → `node` on PATH (desktop/dev).
+    """
+    bin_dir, _ = _locate_native_runtime()
+    if bin_dir:
+        candidate = os.path.join(bin_dir, "node")
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    if node_dir:
+        candidate = os.path.join(node_dir, "libnode.so")
+        if os.path.isfile(candidate):
+            return candidate
+    return shutil.which("node")
+
+
+def _ensure_native_env(node_dir):
+    """Spawns of node/ffmpeg must see the support libraries extracted from
+    libnode.zip.so (e.g. libz.so.1) — mirrors NativeRuntime.environment()."""
+    _, usr_lib = _locate_native_runtime()
+    if not usr_lib:
+        return
+    ld = usr_lib + os.pathsep + (node_dir or "") + os.pathsep + "/system/lib64"
+    existing = os.environ.get("LD_LIBRARY_PATH")
+    os.environ["LD_LIBRARY_PATH"] = ld + (os.pathsep + existing if existing else "")
+    os.environ["OPENSSL_CONF"] = "/dev/null"
+
+
+def _is_playlist_url(url: str) -> bool:
+    return "list=" in url or "/playlist" in url
+
+
+# Log lines (from yt-dlp via the logger collector) that mean the JS runtime chain
+# is degraded: challenge solving cannot run, so GVS formats get dropped — often
+# silently, because jsless clients still serve most public videos.
+_JS_DEGRADATION_MARKERS = (
+    "challenge solving failed",
+    "No supported JavaScript runtime could be found",
+    "Ignoring unsupported JavaScript runtime",
+    "Remote component challenge solver script",
+)
+
+_JS_RUNTIME_PROBE_CACHE = {}
+
+
+def _probe_js_runtime(node_dir):
+    """Resolves + exec-verifies the bundled node runtime. Memoized per node_dir
+    (a §2.5.2 hot-swap changes the path, which re-probes).
+
+    Returns a dict: runtime (name or None), path, version, exec_ok, min_supported
+    (yt-dlp's own minimum for node), ejs_package (solver distribution present).
+    """
+    cache_key = node_dir or ""
+    cached = _JS_RUNTIME_PROBE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        from yt_dlp.utils._jsruntime import NodeJsRuntime
+        min_supported = ".".join(map(str, NodeJsRuntime.MIN_SUPPORTED_VERSION))
+    except Exception:
+        min_supported = None
+
+    diag = {
+        "runtime": None,
+        "path": None,
+        "version": None,
+        "exec_ok": None,
+        "min_supported": min_supported,
+        "ejs_package": False,
+    }
+    try:
+        import yt_dlp_ejs  # noqa: F401 — solver script distribution probe
+        diag["ejs_package"] = True
+    except Exception:
+        pass
+
+    node_bin = _resolve_node_runtime(node_dir)
+    if node_bin:
+        diag["runtime"] = "node"
+        diag["path"] = node_bin
+        try:
+            proc = subprocess.run(
+                [node_bin, "--version"], capture_output=True, text=True, timeout=10)
+            version = (proc.stdout or "").strip()
+            diag["exec_ok"] = proc.returncode == 0 and version.startswith("v")
+            diag["version"] = version or None
+        except Exception:
+            diag["exec_ok"] = False
+
+    _JS_RUNTIME_PROBE_CACHE[cache_key] = diag
+    return diag
+
+
+def _js_runtime_degraded(diag, debug_logger):
+    """True when the runtime chain can't run the challenge solver: no runtime at
+    all, a runtime that fails exec/versions, or degradation warnings in yt-dlp's
+    own log lines."""
+    warnings = [
+        line for line in debug_logger.lines
+        if any(marker in line for marker in _JS_DEGRADATION_MARKERS)
+    ]
+    degraded = (
+        diag["runtime"] is None
+        or diag["exec_ok"] is False
+        or diag.get("ejs_package") is not True
+        or bool(warnings)
+    )
+    return degraded, warnings
+
+
 def warmup():
     """
     Pre-warms yt-dlp and the YouTube extractor into memory.
@@ -48,41 +212,72 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
     Extracts metadata and direct stream URLs for YouTube videos/playlists via yt-dlp.
     Metadata only (skip_download=True) - byte downloads and muxing happen in Kotlin/FFmpeg.
     """
-    # node_dir is the directory containing whichever Node binary NodeBinaryProvider resolved.
-    # Prepended to PATH so yt-dlp-ejs and yt-dlp's JS engine find it automatically.
-    if node_dir:
-        os.environ["PATH"] = node_dir + os.pathsep + os.environ.get("PATH", "")
-
-    # Enable playlist extraction when 'list=' is present or URL is a playlist endpoint
-    is_playlist_url = "list=" in url or "/playlist" in url
-
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,       # metadata only — never triggers a download
-        "noplaylist": not is_playlist_url,  # allow playlist extraction when list is present
-        "extract_flat": "in_playlist" if is_playlist_url else False,  # fast flat metadata for playlists, deep for single videos
+        "noplaylist": not _is_playlist_url(url),  # allow playlist extraction when list is present
+        "extract_flat": "in_playlist" if _is_playlist_url(url) else False,  # fast flat metadata for playlists, deep for single videos
         "cookiefile": cookiefile,    # decrypted temp path if available
     }
+
+    node_bin = _resolve_node_runtime(node_dir)
+    if node_bin:
+        # yt-dlp 2026.10+ enables ONLY deno by default (utils/_jsruntime.py); node
+        # must be registered explicitly via the `js_runtimes` option, else the
+        # n/sig challenges fail and every GVS format is dropped. The path accepts
+        # a direct file path, so Android's nativeLibraryDir/libnode.so works as-is.
+        ydl_opts["js_runtimes"] = {"node": {"path": node_bin}}
+        _ensure_native_env(node_dir)
+
+    js_diag = _probe_js_runtime(node_dir)
+    debug_logger = _DebugLogCollector()
+    ydl_opts["logger"] = debug_logger
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
                 return json.dumps({"error": "no_info", "detail": "No metadata returned by yt-dlp"})
-            return json.dumps(_normalize(info))
+            return json.dumps(_maybe_attach_js_diagnostics(_normalize(info), js_diag, debug_logger))
 
     except yt_dlp.utils.DownloadError as e:
         message = str(e).lower()
         if any(marker in message for marker in _AUTH_WALL_MARKERS):
-            return json.dumps({"error": "auth_wall", "detail": str(e)})
+            return json.dumps({"error": "auth_wall", "detail": str(e), "debug_log": _tail(debug_logger),
+                               **_js_diagnostics(js_diag, debug_logger)})
         if any(marker in message for marker in _RATE_LIMIT_MARKERS):
-            return json.dumps({"error": "rate_limited", "detail": str(e)})
+            return json.dumps({"error": "rate_limited", "detail": str(e), "debug_log": _tail(debug_logger),
+                               **_js_diagnostics(js_diag, debug_logger)})
         if any(marker in message for marker in _NETWORK_MARKERS):
-            return json.dumps({"error": "network", "detail": str(e)})
-        return json.dumps({"error": "unavailable", "detail": str(e)})
+            return json.dumps({"error": "network", "detail": str(e), "debug_log": _tail(debug_logger),
+                               **_js_diagnostics(js_diag, debug_logger)})
+        return json.dumps({"error": "unavailable", "detail": str(e), "debug_log": _tail(debug_logger),
+                           **_js_diagnostics(js_diag, debug_logger)})
     except Exception as e:
-        return json.dumps({"error": "exception", "detail": str(e)})
+        return json.dumps({"error": "exception", "detail": str(e), "debug_log": _tail(debug_logger),
+                           **_js_diagnostics(js_diag, debug_logger)})
+
+
+def _js_diagnostics(js_diag, debug_logger):
+    """{js_diagnostics: {...}} payload only when the runtime chain is degraded;
+    an empty dict (no-op spread) on healthy runs."""
+    degraded, warnings = _js_runtime_degraded(js_diag, debug_logger)
+    if not degraded:
+        return {}
+    return {"js_diagnostics": {**js_diag, "warnings": warnings[-10:]}}
+
+
+def _maybe_attach_js_diagnostics(payload, js_diag, debug_logger):
+    degraded, warnings = _js_runtime_degraded(js_diag, debug_logger)
+    if degraded:
+        payload["js_diagnostics"] = {**js_diag, "warnings": warnings[-10:]}
+    return payload
+
+
+def _tail(logger: _DebugLogCollector, n: int = 40) -> str:
+    """Last n collected yt-dlp messages, newline-joined; diagnostics only."""
+    return "\n".join(logger.lines[-n:])
 
 def _normalize_single_entry(info: dict) -> dict:
     thumbnails = sorted(
