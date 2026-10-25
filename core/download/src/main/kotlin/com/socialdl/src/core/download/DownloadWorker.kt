@@ -3,6 +3,7 @@ package com.socialdl.src.core.download
 import android.content.Context
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.database.entity.DownloadJobEntity
@@ -51,6 +52,7 @@ class DownloadWorker @AssistedInject constructor(
     private val eventBus: DownloadEventBus,
     private val concurrencyGate: DownloadConcurrencyGate,
     private val extractorRegistry: ExtractorRegistry,
+    private val notificationManager: DownloadNotificationManager,
 ) : CoroutineWorker(appContext, workerParams) {
 
     /** Effective stream configuration after optional JIT resolution of a placeholder format. */
@@ -66,9 +68,78 @@ class DownloadWorker @AssistedInject constructor(
 
     private val tag = "DownloadWorker"
 
+    /** Foreground-service notification promotion state (P1-1). */
+    private var isForeground = false
+    private var lastNotifiedPercent = -1
+
     companion object {
         /** The ONLY work input: everything else lives in the Room job row. */
         const val KEY_JOB_ID = "job_id"
+    }
+
+    override suspend fun getForegroundInfo(): ForegroundInfo {
+        val jobId = inputData.getString(KEY_JOB_ID).orEmpty()
+        val job = runCatching { jobRepository.getJob(jobId) }.getOrNull()
+        return notificationManager.buildForegroundInfo(
+            jobId = jobId,
+            title = job?.title ?: "Downloading media",
+            status = DownloadStatus.DOWNLOADING,
+            progress = 0f,
+            downloadedBytes = 0L,
+            totalBytes = job?.totalBytes
+        )
+    }
+
+    /**
+     * Promotes the download to a foreground dataSync notification early in the
+     * pipeline so work continues while the app is backgrounded (P1-1). The
+     * notification carries a Cancel action using the same instant-deletion
+     * semantics as the UI. All FGS errors are non-fatal: a failed promotion
+     * must never kill the download.
+     */
+    private suspend fun promoteToForeground(job: DownloadJobEntity) {
+        try {
+            setForeground(
+                notificationManager.buildForegroundInfo(
+                    jobId = job.id,
+                    title = job.title,
+                    status = DownloadStatus.DOWNLOADING,
+                    progress = 0f,
+                    downloadedBytes = 0L,
+                    totalBytes = job.totalBytes
+                )
+            )
+            isForeground = true
+        } catch (e: Exception) {
+            Logger.w(tag, "[${job.id}] Foreground promotion failed (continuing in background)", e)
+        }
+    }
+
+    /**
+     * Updates the foreground notification on progress ticks when the integer
+     * percent changes, and on phase transitions. Throttled by percent to keep
+     * notification churn sane under high-frequency Room ticks.
+     */
+    private suspend fun maybeRefreshForeground(jobId: String) {
+        if (!isForeground) return
+        val job = jobRepository.getJob(jobId) ?: return
+        val percent = (job.progress.coerceIn(0f, 1f) * 100).toInt()
+        if (percent == lastNotifiedPercent && job.status == DownloadStatus.DOWNLOADING) return
+        lastNotifiedPercent = percent
+        try {
+            setForeground(
+                notificationManager.buildForegroundInfo(
+                    jobId = job.id,
+                    title = job.title,
+                    status = job.status,
+                    progress = job.progress,
+                    downloadedBytes = job.downloadedBytes,
+                    totalBytes = job.totalBytes
+                )
+            )
+        } catch (e: Exception) {
+            Logger.w(tag, "[$jobId] Foreground notification refresh failed", e)
+        }
     }
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
@@ -110,6 +181,7 @@ class DownloadWorker @AssistedInject constructor(
 
     /** Returns true when the job exported + persisted successfully; false otherwise (FAILED already written when applicable). */
     private suspend fun runPipeline(job: DownloadJobEntity, scratchDir: File): Boolean {
+        promoteToForeground(job)
         val resolved = resolveEffectiveFormats(job)
         if (resolved == null) return false // failure already written
 
@@ -495,6 +567,7 @@ class DownloadWorker @AssistedInject constructor(
             downloadedBytes = downloadedBytes,
             totalBytes = totalBytes
         )
+        maybeRefreshForeground(jobId)
     }
 
     private fun buildMuxArgs(
