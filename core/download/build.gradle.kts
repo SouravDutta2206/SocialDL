@@ -39,6 +39,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
 
+    // Room KTX (withTransaction) — :core:database keeps room-ktx `implementation`,
+    // so dependents need it explicitly for the RoomDatabase.withTransaction extension.
+    implementation(libs.room.ktx)
+
     // Hilt
     implementation(libs.hilt.android)
     ksp(libs.hilt.android.compiler)

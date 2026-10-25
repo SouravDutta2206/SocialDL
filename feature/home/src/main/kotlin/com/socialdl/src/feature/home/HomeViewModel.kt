@@ -6,7 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.download.DownloadManager
-import com.socialdl.src.core.model.DownloadTask
+import com.socialdl.src.core.model.DownloadProgressInfo
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
@@ -59,18 +59,18 @@ class HomeViewModel @Inject constructor(
     val resolvingItemId: StateFlow<String?> = _resolvingItemId.asStateFlow()
 
     /**
-     * Active download tasks keyed per MediaItem with the shared [uiKey] formula so
-     * MediaCard can render its inline progress overlay for the item that is downloading.
+     * Active download jobs keyed by the shared [uiKey] identity formula so
+     * MediaCard can render its inline progress overlay for the item that is
+     * downloading. Backed by the Room job flow, so dedup survives process death
+     * and cancelled rows vanish instantly (P0-4).
      */
-    val activeTasksBySourceKey: StateFlow<Map<String, DownloadTask>> = downloadManager.activeTasks
-        .map { tasks ->
-            tasks.values.associateBy { it.mediaItem.uiKey() }
-        }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = emptyMap()
-        )
+    val activeTasksBySourceKey: StateFlow<Map<String, DownloadProgressInfo>> =
+        downloadManager.progressInfoByKey
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyMap()
+            )
 
     private var extractionJob: Job? = null
 
@@ -114,7 +114,7 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    fun startDownload(
+    suspend fun startDownload(
         mediaItem: MediaItem,
         selectedFormat: MediaFormat,
         container: String? = null,
@@ -130,7 +130,7 @@ class HomeViewModel @Inject constructor(
         )
     }
 
-    fun startBatchDownload(items: List<Pair<MediaItem, MediaFormat>>): List<String> {
+    suspend fun startBatchDownload(items: List<Pair<MediaItem, MediaFormat>>): List<String> {
         val groupId = java.util.UUID.randomUUID().toString()
         // Enqueue items individually: a mid-loop failure must not silently lose the
         // remaining items after the caller announced selectedPairs.size. Return the
@@ -154,7 +154,9 @@ class HomeViewModel @Inject constructor(
     }
 
     fun cancelDownload(taskId: String) {
-        downloadManager.cancelDownload(taskId)
+        viewModelScope.launch {
+            downloadManager.cancelDownload(taskId)
+        }
     }
 
 

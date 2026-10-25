@@ -31,8 +31,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.socialdl.src.core.common.util.toHumanReadableSize
+import com.socialdl.src.core.model.DownloadProgressInfo
 import com.socialdl.src.core.model.DownloadStatus
-import com.socialdl.src.core.model.DownloadTask
 import com.socialdl.src.core.ui.theme.SocialDLAccent
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
@@ -43,13 +43,13 @@ import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
  */
 @Composable
 fun ProgressOverlayCard(
-    task: DownloadTask,
+    info: DownloadProgressInfo,
     onPauseResume: (() -> Unit)?,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val animatedProgress by animateFloatAsState(
-        targetValue = task.progress.coerceIn(0f, 1f),
+        targetValue = info.progress.coerceIn(0f, 1f),
         label = "DownloadProgress"
     )
 
@@ -72,10 +72,11 @@ fun ProgressOverlayCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = when (task.status) {
+                    text = when (info.status) {
                         DownloadStatus.QUEUED -> "Queued..."
                         DownloadStatus.DOWNLOADING -> "Downloading..."
                         DownloadStatus.MUXING -> "Finalizing & Muxing..."
+                        DownloadStatus.EXPORTING -> "Exporting..."
                         DownloadStatus.COMPLETED -> "Completed"
                         DownloadStatus.FAILED -> "Failed"
                         DownloadStatus.PAUSED -> "Paused"
@@ -110,7 +111,7 @@ fun ProgressOverlayCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "${task.downloadedBytes.toHumanReadableSize()} / ${task.totalBytes.toHumanReadableSize()}",
+                    text = "${info.downloadedBytes.toHumanReadableSize()} / ${info.totalBytes.toHumanReadableSize()}",
                     style = MaterialTheme.typography.bodySmall,
                     color = SocialDLOnSurfaceVariant
                 )
@@ -127,8 +128,8 @@ fun ProgressOverlayCard(
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
-                                    imageVector = if (task.status == DownloadStatus.PAUSED) Icons.Default.PlayArrow else Icons.Default.Pause,
-                                    contentDescription = if (task.status == DownloadStatus.PAUSED) "Resume" else "Pause",
+                                    imageVector = if (info.status == DownloadStatus.PAUSED) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                    contentDescription = if (info.status == DownloadStatus.PAUSED) "Resume" else "Pause",
                                     tint = SocialDLOnSurface,
                                     modifier = Modifier.size(16.dp)
                                 )

@@ -3,7 +3,6 @@ package com.socialdl.src.feature.downloads
 import android.content.Context
 import android.database.ContentObserver
 import android.net.Uri
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
@@ -13,8 +12,11 @@ import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.MediaStorageUtils
 import com.socialdl.src.core.database.dao.DownloadDao
 import com.socialdl.src.core.database.entity.DownloadHistoryEntity
+import com.socialdl.src.core.database.entity.DownloadJobEntity
+import com.socialdl.src.core.download.DownloadEvent
+import com.socialdl.src.core.download.DownloadEventBus
 import com.socialdl.src.core.download.DownloadManager
-import com.socialdl.src.core.model.DownloadTask
+import com.socialdl.src.core.model.DownloadStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -28,24 +30,29 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 
 data class DownloadsUiState(
-    val activeTasks: List<DownloadTask> = emptyList(),
+    val activeJobs: List<DownloadJobEntity> = emptyList(),
     val historyItems: List<DownloadHistoryEntity> = emptyList(),
 )
+
 @HiltViewModel
 class DownloadsViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val downloadManager: DownloadManager,
     private val downloadDao: DownloadDao,
+    private val eventBus: DownloadEventBus,
 ) : ViewModel() {
 
     private val tag = "DownloadsViewModel"
     private val refreshTrigger = MutableStateFlow(0)
     private val isPurgingStale = AtomicBoolean(false)
+
+    // One-shot user message (e.g. deletion failures) consumed by the Screen as a toast.
+    private val _userMessage = MutableStateFlow<String?>(null)
+    val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
 
     // Debounce handler for MediaStore change notifications (they can fire in rapid bursts).
     private val handler = Handler(Looper.getMainLooper())
@@ -75,6 +82,16 @@ class DownloadsViewModel @Inject constructor(
             Logger.w(tag, "Could not register MediaStore content observer", e)
         }
         purgeStaleRecords()
+
+        // One-shot "Download completed" toasts (Room is the lifecycle truth; the bus
+        // carries no status — see DownloadEventBus KDoc).
+        viewModelScope.launch {
+            eventBus.events.collect { event ->
+                if (event is DownloadEvent.Completed) {
+                    _userMessage.value = "Download completed: ${event.title}"
+                }
+            }
+        }
     }
 
     private fun purgeStaleRecords() {
@@ -98,7 +115,7 @@ class DownloadsViewModel @Inject constructor(
 
     /**
      * History validity scan runs only when the history table or the refresh trigger changes.
-     * Progress ticks from [combine]d activeTasks below no longer re-run the disk IO scan.
+     * Progress ticks from the (Room-driven) activeJobs flow no longer re-run the disk IO scan.
      */
     private val validHistoryFlow = combine(
         downloadDao.getAllHistory(),
@@ -112,15 +129,17 @@ class DownloadsViewModel @Inject constructor(
     }
 
     val uiState: StateFlow<DownloadsUiState> = combine(
-        downloadManager.activeTasks,
+        downloadManager.jobs,
         validHistoryFlow
-    ) { activeMap, validHistory ->
+    ) { activeJobs, validHistory ->
         // Pure filter/map only — no IO on this path.
         val completedIds = validHistory.map { it.id }.toSet()
-        val filteredActive = activeMap.values.filterNot { it.id in completedIds }
+        // FAILED cards are removable records; only non-terminal jobs hide while a
+        // duplicate history row exists (defensive — success deletes the job row).
+        val filteredJobs = activeJobs.filterNot { it.id in completedIds && it.status != DownloadStatus.FAILED }
 
         DownloadsUiState(
-            activeTasks = filteredActive,
+            activeJobs = filteredJobs,
             historyItems = validHistory
         )
     }.stateIn(
@@ -134,13 +153,22 @@ class DownloadsViewModel @Inject constructor(
         purgeStaleRecords()
     }
 
-    fun cancelTask(taskId: String) {
-        downloadManager.cancelDownload(taskId)
+    /**
+     * The "X" on any live card. Instant-deletion semantics: FAILED cards have no
+     * background work left (kill-on-fail), so the X just removes the record;
+     * anything else also cancels the WorkManager job.
+     */
+    fun cancelTask(jobId: String, status: DownloadStatus? = null) {
+        viewModelScope.launch {
+            if (status == DownloadStatus.FAILED) {
+                downloadManager.removeFailedJob(jobId)
+            } else {
+                downloadManager.cancelDownload(jobId)
+            }
+        }
     }
 
-    // One-shot user message (e.g. deletion failures) consumed by the Screen as a toast.
-    private val _userMessage = MutableStateFlow<String?>(null)
-    val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
+    // One-shot user message declared at the top of the class (before init).
 
     fun clearUserMessage() {
         _userMessage.value = null

@@ -56,8 +56,8 @@ import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.MediaStorageUtils
 import com.socialdl.src.core.common.util.toHumanReadableSize
 import com.socialdl.src.core.database.entity.DownloadHistoryEntity
+import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadStatus
-import com.socialdl.src.core.model.DownloadTask
 import com.socialdl.src.core.ui.theme.SocialDLAccent
 import com.socialdl.src.core.ui.theme.SocialDLBg
 import com.socialdl.src.core.ui.theme.SocialDLCard
@@ -126,7 +126,7 @@ fun DownloadsScreen(
                 )
             }
 
-            if (uiState.activeTasks.isEmpty() && uiState.historyItems.isEmpty()) {
+            if (uiState.activeJobs.isEmpty() && uiState.historyItems.isEmpty()) {
                 // Empty State Placeholder
                 Box(
                     modifier = Modifier
@@ -165,20 +165,20 @@ fun DownloadsScreen(
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     // Active Tasks Section
-                    if (uiState.activeTasks.isNotEmpty()) {
+                    if (uiState.activeJobs.isNotEmpty()) {
                         item(key = "header_active") {
                             Text(
-                                text = "Active Queue (${uiState.activeTasks.size})",
+                                text = "Active Queue (${uiState.activeJobs.size})",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                                 color = SocialDLAccent,
                                 modifier = Modifier.padding(vertical = 4.dp)
                             )
                         }
 
-                        items(uiState.activeTasks, key = { "active_${it.id}" }) { task ->
+                        items(uiState.activeJobs, key = { "active_${it.id}" }) { job ->
                             ActiveDownloadCard(
-                                task = task,
-                                onCancel = { viewModel.cancelTask(task.id) }
+                                job = job,
+                                onCancel = { viewModel.cancelTask(job.id, job.status) }
                             )
                         }
                     }
@@ -243,12 +243,15 @@ fun DownloadsScreen(
 
 @Composable
 private fun ActiveDownloadCard(
-    task: DownloadTask,
+    job: DownloadJobEntity,
     onCancel: () -> Unit
 ) {
+    val isFailed = job.status == DownloadStatus.FAILED
     Card(
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = SocialDLCard),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isFailed) SocialDLOnSurfaceVariant.copy(alpha = 0.08f) else SocialDLCard
+        ),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -258,7 +261,7 @@ private fun ActiveDownloadCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = task.mediaItem.title,
+                        text = job.title,
                         style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                         color = SocialDLOnSurface,
                         maxLines = 1,
@@ -266,16 +269,18 @@ private fun ActiveDownloadCard(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "${task.selectedFormat.label} • ${task.status.name}",
+                        text = "${job.formatLabel} • ${job.status.name}",
                         style = MaterialTheme.typography.labelSmall,
                         color = SocialDLAccent
                     )
                 }
 
+                // Single "X" action: instant-deletion for any live phase; record
+                // removal for FAILED cards (background job is already dead).
                 IconButton(onClick = onCancel) {
                     Icon(
                         imageVector = Icons.Default.Close,
-                        contentDescription = "Cancel",
+                        contentDescription = if (isFailed) "Remove" else "Cancel",
                         tint = SocialDLOnSurfaceDim
                     )
                 }
@@ -283,33 +288,46 @@ private fun ActiveDownloadCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            LinearProgressIndicator(
-                progress = { task.progress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(6.dp)
-                    .clip(CircleShape),
-                color = SocialDLAccent,
-                trackColor = SocialDLCard.copy(alpha = 0.5f)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                val percentage = (task.progress * 100).toInt()
+            if (isFailed) {
+                // Typed, user-facing error message (DownloadError.userMessage).
                 Text(
-                    text = if (task.status == DownloadStatus.MUXING) "Muxing streams..." else "$percentage%",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = SocialDLOnSurfaceVariant
+                    text = job.errorMessage ?: "Download failed",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = SocialDLOnSurfaceDim,
+                    maxLines = 2
                 )
-                Text(
-                    text = task.downloadedBytes.toHumanReadableSize() + (task.totalBytes?.let { " / " + it.toHumanReadableSize() } ?: ""),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = SocialDLOnSurfaceDim
+            } else {
+                LinearProgressIndicator(
+                    progress = { job.progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(CircleShape),
+                    color = SocialDLAccent,
+                    trackColor = SocialDLCard.copy(alpha = 0.5f)
                 )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    val percentage = (job.progress * 100).toInt()
+                    Text(
+                        text = if (job.status == DownloadStatus.MUXING) "Muxing streams..."
+                        else if (job.status == DownloadStatus.EXPORTING) "Exporting..."
+                        else if (job.status == DownloadStatus.QUEUED) "Queued..."
+                        else "$percentage%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = SocialDLOnSurfaceVariant
+                    )
+                    Text(
+                        text = job.downloadedBytes.toHumanReadableSize() + (job.totalBytes?.let { " / " + it.toHumanReadableSize() } ?: ""),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = SocialDLOnSurfaceDim
+                    )
+                }
             }
         }
     }
