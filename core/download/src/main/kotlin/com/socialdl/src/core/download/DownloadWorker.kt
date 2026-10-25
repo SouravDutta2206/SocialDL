@@ -512,7 +512,20 @@ class DownloadWorker @AssistedInject constructor(
             title = job.title,
             author = job.author,
             container = job.container,
-            isAudio = isAudioOnly
+            isAudio = isAudioOnly,
+            onPendingRowCreated = { pendingUri ->
+                // P1-3: record the pending MediaStore row durably, and re-check the
+                // cancellation guard right after row creation so cancels mid-copy
+                // abort before the (long) file copy starts.
+                val current = jobRepository.getJob(jobId)
+                if (current == null) {
+                    Logger.i(tag, "[$jobId] Job row missing after pending-row creation — cancelled")
+                    return@export false
+                }
+                // Full-row update; status stays EXPORTING (same-status write is allowed).
+                jobRepository.updateJob(current.copy(pendingUri = pendingUri.toString()))
+                true
+            }
         )
 
         if (outputUri == null) {
