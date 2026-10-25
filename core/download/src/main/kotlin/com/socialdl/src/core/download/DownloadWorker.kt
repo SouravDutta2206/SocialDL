@@ -285,6 +285,15 @@ class DownloadWorker @AssistedInject constructor(
             return null
         }
 
+        // P0-3 gate: a mux-required format with no audio track must fail before any
+        // bytes are downloaded — never silently fall through to a video-only export.
+        if (effectiveRequiresMuxing && effectiveAudioDirectUrl.isNullOrBlank()) {
+            val err = "Format requires muxing but no audio stream was resolved"
+            Logger.e(tag, "[$taskId] $err")
+            eventBus.emit(DownloadEvent.Failed(taskId, DownloadError.MissingAudioStream.userMessage))
+            return null
+        }
+
         return ResolvedStreams(
             directUrl = effectiveDirectUrl,
             audioDirectUrl = effectiveAudioDirectUrl,
