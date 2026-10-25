@@ -21,7 +21,6 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.FormatListNumbered
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -46,25 +45,28 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.font.FontFamily
+
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-import com.socialdl.src.core.common.util.toHumanReadableSize
+
 import com.socialdl.src.core.common.util.toTimeString
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
-import com.socialdl.src.core.ui.theme.SocialDLBadgeBlueBg
-import com.socialdl.src.core.ui.theme.SocialDLBadgeBlueText
-import com.socialdl.src.core.ui.theme.SocialDLBadgeCodecBg
-import com.socialdl.src.core.ui.theme.SocialDLBadgeRoseBg
-import com.socialdl.src.core.ui.theme.SocialDLBadgeRoseText
+import com.socialdl.src.core.model.uiKey
+
+
+
+import com.socialdl.src.core.ui.theme.SocialDLBadgeDark
+
+
 import com.socialdl.src.core.ui.theme.SocialDLIndicator
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
+import com.socialdl.src.core.ui.theme.SocialDLSheetHeader
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerHigh
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerLow
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceVariant
@@ -85,9 +87,9 @@ fun BatchDownloadBottomSheet(
     onConfirmDownload: (List<Pair<MediaItem, MediaFormat>>) -> Unit,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 ) {
-    // Default selection: all items selected
+    // Default selection: all items selected (shared uiKey formula)
     var selectedUrls by remember(items) {
-        mutableStateOf(items.mapIndexed { index, it -> "${it.sourceUrl}_${it.carouselIndex ?: index}" }.toSet())
+        mutableStateOf(items.mapIndexed { index, it -> it.uiKey(fallbackIndex = index) }.toSet())
     }
 
     val isAllSelected = selectedUrls.size == items.size && items.isNotEmpty()
@@ -104,13 +106,13 @@ fun BatchDownloadBottomSheet(
         selectedUrls = if (isAllSelected) {
             emptySet()
         } else {
-            items.mapIndexed { index, it -> "${it.sourceUrl}_${it.carouselIndex ?: index}" }.toSet()
+            items.mapIndexed { index, it -> it.uiKey(fallbackIndex = index) }.toSet()
         }
     }
 
     fun handleConfirm() {
         val selectedPairs = items.mapIndexedNotNull { index, item ->
-            val key = "${item.sourceUrl}_${item.carouselIndex ?: index}"
+            val key = item.uiKey(fallbackIndex = index)
             if (selectedUrls.contains(key)) {
                 val bestFormat = item.videoFormats.firstOrNull() ?: item.audioFormats.firstOrNull()
                 bestFormat?.let { Pair(item, it) }
@@ -169,7 +171,7 @@ fun BatchDownloadBottomSheet(
                     enabled = selectedUrls.isNotEmpty(),
                     shape = CircleShape,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF353E54),
+                        containerColor = SocialDLSheetHeader,
                         contentColor = SocialDLOnSurface
                     )
                 ) {
@@ -217,14 +219,6 @@ fun BatchDownloadBottomSheet(
                             tint = SocialDLOnSurfaceVariant
                         )
                     }
-
-                    IconButton(onClick = { /* More options menu hook */ }) {
-                        Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "More",
-                            tint = SocialDLOnSurfaceVariant
-                        )
-                    }
                 }
             }
 
@@ -237,9 +231,9 @@ fun BatchDownloadBottomSheet(
             ) {
                 itemsIndexed(
                     items = items,
-                    key = { index, item -> "${item.sourceUrl}_${item.carouselIndex ?: index}" }
+                    key = { index, item -> item.uiKey(fallbackIndex = index) }
                 ) { index, item ->
-                    val key = "${item.sourceUrl}_${item.carouselIndex ?: index}"
+                    val key = item.uiKey(fallbackIndex = index)
                     val isChecked = selectedUrls.contains(key)
                     val defaultPreset = item.videoFormats.firstOrNull() ?: item.audioFormats.firstOrNull()
 
@@ -293,7 +287,7 @@ private fun BatchItemRow(
             // Index Badge (1, 2, 3...)
             Surface(
                 shape = RoundedCornerShape(6.dp),
-                color = Color(0xFF282732),
+                color = SocialDLBadgeDark,
                 modifier = Modifier.size(24.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
@@ -363,80 +357,12 @@ private fun BatchItemRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Size Chip or AUTO indicator
-                    if (preset?.approxSizeBytes != null) {
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = SocialDLBadgeRoseBg
-                        ) {
-                            Text(
-                                text = (if (preset.isSizeEstimated) "~" else "") + preset.approxSizeBytes.toHumanReadableSize(),
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                color = SocialDLBadgeRoseText,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
-                    } else if (preset?.isPlaceholder == true) {
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = SocialDLBadgeRoseBg
-                        ) {
-                            Text(
-                                text = "AUTO",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                color = SocialDLBadgeRoseText,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
-                    }
-
-                    // Resolution Preset Chip (e.g. 1080P or BEST QUALITY)
-                    if (preset != null) {
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = SocialDLBadgeBlueBg
-                        ) {
-                            val presetLabel = when {
-                                preset.isPlaceholder -> "BEST QUALITY"
-                                preset.label.contains("(") -> preset.label.substringBefore("(")
-                                else -> preset.label
-                            }.trim()
-                            Text(
-                                text = presetLabel,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                color = SocialDLBadgeBlueText,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
-                    }
-
-                    // Codec Chip
-                    val codec = preset?.codec
-                    if (!codec.isNullOrEmpty()) {
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = SocialDLBadgeCodecBg
-                        ) {
-                            Text(
-                                text = codec,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontSize = 9.sp,
-                                    fontFamily = FontFamily.Monospace
-                                ),
-                                color = SocialDLOnSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
-                                maxLines = 1
-                            )
-                        }
+                    // Size Chip or AUTO indicator, preset label chip, codec chip (shared markup)
+                    preset?.let {
+                        FormatChips(
+                            format = it,
+                            chips = listOf(FormatChip.SIZE, FormatChip.LABEL, FormatChip.CODEC)
+                        )
                     }
                 }
             }

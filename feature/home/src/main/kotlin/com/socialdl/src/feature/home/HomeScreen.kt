@@ -1,7 +1,5 @@
 package com.socialdl.src.feature.home
 
-import android.content.ClipboardManager
-import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,8 +44,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.socialdl.src.core.common.util.readClipboardText
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
+import com.socialdl.src.core.model.uiKey
 import com.socialdl.src.core.ui.component.BatchDownloadBottomSheet
 import com.socialdl.src.core.ui.component.FormatBottomSheet
 import com.socialdl.src.core.ui.component.MediaCard
@@ -55,6 +55,7 @@ import com.socialdl.src.core.ui.component.PillSearchBar
 import com.socialdl.src.core.ui.component.SocialDLToastHost
 import com.socialdl.src.core.ui.component.ToastMessage
 import com.socialdl.src.core.ui.theme.SocialDLAccent
+import com.socialdl.src.core.ui.theme.SocialDLAccentButton
 import com.socialdl.src.core.ui.theme.SocialDLBg
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
@@ -69,6 +70,7 @@ fun HomeScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val resolvingItemId by viewModel.resolvingItemId.collectAsStateWithLifecycle()
+    val activeTasksBySourceKey by viewModel.activeTasksBySourceKey.collectAsStateWithLifecycle()
     var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
     var selectedItemForSheet by remember { mutableStateOf<MediaItem?>(null) }
     var sheetInitialTab by remember { mutableStateOf(FormatKind.VIDEO) }
@@ -174,8 +176,9 @@ fun HomeScreen(
                 ) {
                     itemsIndexed(
                         items = uiState.mediaItems,
-                        key = { index, item -> "${item.sourceUrl}_${item.carouselIndex ?: index}" }
+                        key = { index, item -> item.uiKey(fallbackIndex = index) }
                     ) { _, item ->
+                        val activeTask = activeTasksBySourceKey[item.uiKey()]
                         MediaCard(
                             item = item,
                             isResolving = resolvingItemId == item.sourceUrl,
@@ -187,6 +190,14 @@ fun HomeScreen(
                             },
                             onQuickVideoDownload = {
                                 handleOpenSheet(item, FormatKind.VIDEO)
+                            },
+                            // Inline progress + cancel for the item that is downloading.
+                            // Pause/resume left unset: WorkManager has no real pause.
+                            activeDownloadTask = activeTask,
+                            onCancelDownload = if (activeTask != null) {
+                                { viewModel.cancelDownload(activeTask.id) }
+                            } else {
+                                null
                             }
                         )
                     }
@@ -208,46 +219,45 @@ fun HomeScreen(
             )
         }
 
-        // Floating Action Buttons (Clipboard & Download all) matching YTDLnis screenshot
-        if (uiState.mediaItems.size > 1) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 20.dp, bottom = 24.dp),
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // Clipboard Button (Square shape)
-                Surface(
-                    onClick = {
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                        val clipText = clipboard?.primaryClip?.getItemAt(0)?.text?.toString()
-                        if (!clipText.isNullOrBlank()) {
-                            viewModel.onQueryChange(clipText)
-                            viewModel.submitQuery(clipText)
-                        }
-                    },
-                    shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFF0D59C8),
-                    shadowElevation = 6.dp,
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            imageVector = Icons.Default.ContentPaste,
-                            contentDescription = "Paste and fetch",
-                            tint = Color.White,
-                            modifier = Modifier.size(22.dp)
-                        )
+        // Floating Action Buttons (Clipboard & Download all) matching YTDLnis screenshot.
+        // Paste stays available even with no media loaded — that is its most useful moment.
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 20.dp, bottom = 24.dp),
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Clipboard Button (Square shape)
+            Surface(
+                onClick = {
+                    val clipText = readClipboardText(context)
+                    if (!clipText.isNullOrBlank()) {
+                        viewModel.submitQuery(clipText)
                     }
+                },
+                shape = RoundedCornerShape(16.dp),
+                color = SocialDLAccentButton,
+                shadowElevation = 6.dp,
+                modifier = Modifier.size(48.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.ContentPaste,
+                        contentDescription = "Paste and fetch",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
+            }
 
-                // Download all Pill Button
+            // Download all Pill Button
+            if (uiState.mediaItems.size > 1) {
                 Button(
                     onClick = { showBatchSheet = true },
                     shape = CircleShape,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF0D59C8),
+                        containerColor = SocialDLAccentButton,
                         contentColor = Color.White
                     ),
                     elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp),
@@ -277,8 +287,10 @@ fun HomeScreen(
                 onDismiss = { showBatchSheet = false },
                 onConfirmDownload = { selectedPairs ->
                     showBatchSheet = false
-                    viewModel.startBatchDownload(selectedPairs)
-                    toastMessage = ToastMessage(message = "Queued ${selectedPairs.size} downloads to queue")
+                    // Report the ACTUAL enqueued count — a mid-loop enqueue failure
+                    // should not overstate what landed in the queue.
+                    val taskIds = viewModel.startBatchDownload(selectedPairs)
+                    toastMessage = ToastMessage(message = "Queued ${taskIds.size} downloads to queue")
                 }
             )
         }

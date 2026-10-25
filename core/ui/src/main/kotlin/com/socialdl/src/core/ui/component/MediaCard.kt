@@ -39,6 +39,7 @@ import com.socialdl.src.core.model.DownloadTask
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.ui.theme.SocialDLCard
+import com.socialdl.src.core.ui.theme.SocialDLAccentButton
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 
@@ -183,7 +184,7 @@ fun MediaCard(
             }
 
             // Inline Download Progress Overlay (if actively downloading)
-            if (activeDownloadTask != null && onPauseResumeDownload != null && onCancelDownload != null) {
+            if (activeDownloadTask != null && onCancelDownload != null) {
                 ProgressOverlayCard(
                     task = activeDownloadTask,
                     onPauseResume = onPauseResumeDownload,
@@ -204,7 +205,7 @@ fun MediaCard(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         CircularProgressIndicator(
-                            color = Color(0xFF0D59C8),
+                            color = SocialDLAccentButton,
                             modifier = Modifier.size(32.dp)
                         )
                         Text(

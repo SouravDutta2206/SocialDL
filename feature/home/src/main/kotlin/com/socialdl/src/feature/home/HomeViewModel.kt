@@ -1,23 +1,31 @@
 package com.socialdl.src.feature.home
 
+import android.content.Context
+import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.socialdl.src.core.common.util.Logger
+import com.socialdl.src.core.download.DownloadManager
+import com.socialdl.src.core.model.DownloadTask
+import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
-import com.socialdl.src.core.python.PythonEngine
+import com.socialdl.src.core.model.uiKey
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.ExtractorRegistry
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.UrlPlatformResolver
-import com.socialdl.src.core.download.DownloadManager
-import com.socialdl.src.core.model.MediaFormat
+import com.socialdl.src.feature.home.R
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -32,18 +40,37 @@ data class HomeUiState(
 
 @HiltViewModel
 class HomeViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
     private val extractorRegistry: ExtractorRegistry,
-    private val pythonEngine: PythonEngine,
     private val downloadManager: DownloadManager,
 ) : ViewModel() {
 
     private val tag = "HomeViewModel"
+
+    // Display copy lives in res/values/strings.xml (R-F.2); the VM resolves it at
+    // string-build time. A deeper UiText-based redesign is deferred (see plan R-F.2).
+    private fun stringRes(@StringRes resId: Int, vararg args: Any): String =
+        appContext.getString(resId, *args)
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     private val _resolvingItemId = MutableStateFlow<String?>(null)
     val resolvingItemId: StateFlow<String?> = _resolvingItemId.asStateFlow()
+
+    /**
+     * Active download tasks keyed per MediaItem with the shared [uiKey] formula so
+     * MediaCard can render its inline progress overlay for the item that is downloading.
+     */
+    val activeTasksBySourceKey: StateFlow<Map<String, DownloadTask>> = downloadManager.activeTasks
+        .map { tasks ->
+            tasks.values.associateBy { it.mediaItem.uiKey() }
+        }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = emptyMap()
+        )
 
     private var extractionJob: Job? = null
 
@@ -64,7 +91,9 @@ class HomeViewModel @Inject constructor(
                         ) ?: item
                         _uiState.update { state ->
                             val updatedList = state.mediaItems.map {
-                                if (it.sourceUrl == item.sourceUrl) resolvedItem else it
+                                // Match the exact carousel slot; matching only by sourceUrl would collapse
+                                // N carousel cards into one and crash LazyColumn (duplicate keys).
+                                if (it.sourceUrl == item.sourceUrl && it.carouselIndex == item.carouselIndex) resolvedItem else it
                             }
                             state.copy(mediaItems = updatedList)
                         }
@@ -73,7 +102,9 @@ class HomeViewModel @Inject constructor(
                     }
                     is ExtractionResult.Error -> {
                         _resolvingItemId.value = null
-                        _uiState.update { it.copy(infoMessage = "Failed to load presets: ${result.cause.message}") }
+                        _uiState.update {
+                            it.copy(infoMessage = stringRes(R.string.home_error_presets_failed, result.cause.message))
+                        }
                     }
                 }
             } else {
@@ -101,16 +132,29 @@ class HomeViewModel @Inject constructor(
 
     fun startBatchDownload(items: List<Pair<MediaItem, MediaFormat>>): List<String> {
         val groupId = java.util.UUID.randomUUID().toString()
-        return items.map { (item, format) ->
-            downloadManager.enqueueDownload(
-                mediaItem = item,
-                selectedFormat = format,
-                container = format.container,
-                customTitle = item.title,
-                customAuthor = item.author,
-                groupId = groupId
-            )
+        // Enqueue items individually: a mid-loop failure must not silently lose the
+        // remaining items after the caller announced selectedPairs.size. Return the
+        // ACTUAL enqueued IDs so toasts report a truthful count.
+        val enqueued = mutableListOf<String>()
+        items.forEach { (item, format) ->
+            try {
+                enqueued += downloadManager.enqueueDownload(
+                    mediaItem = item,
+                    selectedFormat = format,
+                    container = format.container,
+                    customTitle = item.title,
+                    customAuthor = item.author,
+                    groupId = groupId
+                )
+            } catch (e: Exception) {
+                Logger.e(tag, "Failed to enqueue batch item '${item.title}'", e)
+            }
         }
+        return enqueued
+    }
+
+    fun cancelDownload(taskId: String) {
+        downloadManager.cancelDownload(taskId)
     }
 
 
@@ -135,11 +179,11 @@ class HomeViewModel @Inject constructor(
                 extractMedia(extractor, trimmed)
             } else {
                 Logger.w(tag, "submitQuery: url='$trimmed' platform=$platform but no extractor found")
-                _uiState.update { it.copy(infoMessage = "No extractor registered for $platform") }
+                _uiState.update { it.copy(infoMessage = stringRes(R.string.home_error_no_extractor, platform)) }
             }
         } else {
             _uiState.update {
-                it.copy(infoMessage = "Unsupported link. Please enter a valid YouTube, Instagram, Twitter, or Threads URL.")
+                it.copy(infoMessage = stringRes(R.string.home_error_unsupported_link))
             }
         }
     }
@@ -156,8 +200,13 @@ class HomeViewModel @Inject constructor(
                             current.copy(
                                 isLoading = false,
                                 query = "", // Clear search bar on successful extraction
-                                mediaItems = result.items,
-                                infoMessage = "Loaded: ${result.items.firstOrNull()?.title ?: "media"}"
+                                // Defense-in-depth: guarantee unique (sourceUrl, carouselIndex) pairs so
+                                // LazyColumn keys can never collide.
+                                mediaItems = result.items.distinctBy { "${it.sourceUrl}_${it.carouselIndex}" },
+                                infoMessage = stringRes(
+                                    R.string.home_info_loaded,
+                                    result.items.firstOrNull()?.title ?: "media"
+                                )
                             )
                         }
                     }
@@ -181,39 +230,7 @@ class HomeViewModel @Inject constructor(
                     it.copy(
                         isLoading = false,
                         mediaItems = emptyList(),
-                        infoMessage = "Extraction error: ${e.message}"
-                    )
-                }
-            }
-        }
-    }
-
-    /**
-     * Executes Python smoke test end-to-end per Phase 2 exit criteria.
-     */
-    fun runPythonPing(msg: String = "ping") {
-        viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
-            try {
-                val result = pythonEngine.run(
-                    module = "common.ping",
-                    function = "ping",
-                    msg
-                ) { json -> json }
-
-                Logger.d(tag, "Python ping succeeded: $result")
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        infoMessage = "Python Engine OK: $result"
-                    )
-                }
-            } catch (e: Exception) {
-                Logger.e(tag, "Python ping failed", e)
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        infoMessage = "Python Error: ${e.message}"
+                        infoMessage = stringRes(R.string.home_error_extraction, e.message ?: "unknown")
                     )
                 }
             }

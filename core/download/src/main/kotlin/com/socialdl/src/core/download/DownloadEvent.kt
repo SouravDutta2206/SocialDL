@@ -25,6 +25,6 @@ sealed interface DownloadEvent {
         val taskId: String,
         val error: String
     ) : DownloadEvent
-    data class Paused(val taskId: String) : DownloadEvent
+    // NOTE: no Paused event — WorkManager has no pause path (truth lives in _activeTasks).
     data class Cancelled(val taskId: String) : DownloadEvent
 }

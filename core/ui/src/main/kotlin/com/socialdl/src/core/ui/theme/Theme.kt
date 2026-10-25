@@ -1,6 +1,5 @@
 package com.socialdl.src.core.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -46,7 +45,6 @@ val SocialDLShapes = Shapes(
  */
 @Composable
 fun SocialDLTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {
     // We enforce our sleek dark palette as the default per spec §1 & §2.2

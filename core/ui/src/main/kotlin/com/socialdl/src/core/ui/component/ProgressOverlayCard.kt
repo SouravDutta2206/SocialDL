@@ -44,7 +44,7 @@ import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 @Composable
 fun ProgressOverlayCard(
     task: DownloadTask,
-    onPauseResume: () -> Unit,
+    onPauseResume: (() -> Unit)?,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -116,19 +116,23 @@ fun ProgressOverlayCard(
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Surface(
-                        onClick = onPauseResume,
-                        shape = CircleShape,
-                        color = Color.White.copy(alpha = 0.1f),
-                        modifier = Modifier.size(32.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = if (task.status == DownloadStatus.PAUSED) Icons.Default.PlayArrow else Icons.Default.Pause,
-                                contentDescription = if (task.status == DownloadStatus.PAUSED) "Resume" else "Pause",
-                                tint = SocialDLOnSurface,
-                                modifier = Modifier.size(16.dp)
-                            )
+                    // WorkManager has no real pause; the pause/resume affordance is only
+                    // rendered when a handler is wired.
+                    if (onPauseResume != null) {
+                        Surface(
+                            onClick = onPauseResume,
+                            shape = CircleShape,
+                            color = Color.White.copy(alpha = 0.1f),
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = if (task.status == DownloadStatus.PAUSED) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                    contentDescription = if (task.status == DownloadStatus.PAUSED) "Resume" else "Pause",
+                                    tint = SocialDLOnSurface,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
                     }
 

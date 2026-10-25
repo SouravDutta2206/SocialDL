@@ -88,24 +88,30 @@ object MediaStorageUtils {
 
     /**
      * Deletes a media file from MediaStore (Scoped Storage) or local filesystem.
+     *
+     * @return true when the entry was actually deleted (or already absent), false when
+     *         deletion failed and a ghost file remains. Callers must check the result
+     *         before dropping their DB record.
      */
-    fun deleteMediaFromStorage(context: Context, uriString: String?) {
-        if (uriString.isNullOrBlank()) return
-        try {
+    fun deleteMediaFromStorage(context: Context, uriString: String?): Boolean {
+        if (uriString.isNullOrBlank()) return true
+        return try {
             val uri = Uri.parse(uriString)
             when (uri.scheme) {
                 "content" -> {
-                    context.contentResolver.delete(uri, null, null)
+                    context.contentResolver.delete(uri, null, null) > 0
                 }
                 "file" -> {
-                    uri.path?.let { File(it).delete() }
+                    val path = uri.path ?: return true
+                    File(path).delete() || !File(path).exists()
                 }
                 else -> {
-                    File(uriString).delete()
+                    File(uriString).delete() || !File(uriString).exists()
                 }
             }
         } catch (e: Exception) {
             Logger.e(TAG, "Failed to delete storage file for uri: $uriString", e)
+            false
         }
     }
 }

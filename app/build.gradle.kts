@@ -1,12 +1,9 @@
-import java.io.File
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
-    alias(libs.plugins.chaquopy)
 }
 
 android {
@@ -24,14 +21,6 @@ android {
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-        }
-    }
-
-    sourceSets {
-        getByName("main") {
-            (this as ExtensionAware).extensions.getByName("python").let { py ->
-                py.javaClass.getMethod("srcDir", Any::class.java).invoke(py, File(rootDir, "python/src/main/python"))
-            }
         }
     }
 
@@ -71,22 +60,6 @@ android {
     }
 }
 
-
-chaquopy {
-    defaultConfig {
-        val uvPython = File(System.getProperty("user.home"), "AppData/Roaming/uv/python/cpython-3.11.12-windows-x86_64-none/python.exe")
-        if (uvPython.exists()) {
-            buildPython(uvPython.absolutePath)
-        }
-        version = "3.11"
-        pip {
-            install("yt-dlp==2026.10.21")
-            install("yt-dlp-ejs==0.8.0")
-            install("instaloader==4.13.1")
-            install("requests==2.32.3")
-        }
-    }
-}
 
 dependencies {
     // Core modules

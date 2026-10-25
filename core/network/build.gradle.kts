@@ -26,11 +26,9 @@ android {
 dependencies {
     implementation(project(":core:common"))
 
+    // Only an OkHttpClient provider — kept minimal (R-E.4); re-add Retrofit
+    // dependencies when a real Retrofit client actually appears in this module.
     implementation(libs.okhttp)
-    implementation(libs.okhttp.logging)
-    implementation(libs.retrofit)
-    implementation(libs.retrofit.kotlinx.serialization)
-    implementation(libs.kotlinx.serialization.json)
 
     // Hilt
     implementation(libs.hilt.android)

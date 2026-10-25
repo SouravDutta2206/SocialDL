@@ -4,7 +4,6 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,6 +35,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +54,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.MediaStorageUtils
+import com.socialdl.src.core.common.util.toHumanReadableSize
 import com.socialdl.src.core.database.entity.DownloadHistoryEntity
 import com.socialdl.src.core.model.DownloadStatus
 import com.socialdl.src.core.model.DownloadTask
@@ -63,8 +64,6 @@ import com.socialdl.src.core.ui.theme.SocialDLCard
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 
 @Composable
@@ -74,8 +73,17 @@ fun DownloadsScreen(
     viewModel: DownloadsViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val userMessage by viewModel.userMessage.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Surface one-shot messages (e.g. deletion failures) as a system toast.
+    LaunchedEffect(userMessage) {
+        userMessage?.let {
+            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+            viewModel.clearUserMessage()
+        }
+    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -234,7 +242,7 @@ fun DownloadsScreen(
 }
 
 @Composable
-fun ActiveDownloadCard(
+private fun ActiveDownloadCard(
     task: DownloadTask,
     onCancel: () -> Unit
 ) {
@@ -298,7 +306,7 @@ fun ActiveDownloadCard(
                     color = SocialDLOnSurfaceVariant
                 )
                 Text(
-                    text = formatBytes(task.downloadedBytes) + (task.totalBytes?.let { " / " + formatBytes(it) } ?: ""),
+                    text = task.downloadedBytes.toHumanReadableSize() + (task.totalBytes?.let { " / " + it.toHumanReadableSize() } ?: ""),
                     style = MaterialTheme.typography.labelSmall,
                     color = SocialDLOnSurfaceDim
                 )
@@ -308,7 +316,7 @@ fun ActiveDownloadCard(
 }
 
 @Composable
-fun CompletedDownloadCard(
+private fun CompletedDownloadCard(
     entity: DownloadHistoryEntity,
     onOpen: () -> Unit,
     onShare: () -> Unit,
@@ -355,7 +363,7 @@ fun CompletedDownloadCard(
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = (entity.author ?: entity.platform) + " • " + formatBytes(entity.fileSizeBytes),
+                    text = (entity.author ?: entity.platform) + " • " + entity.fileSizeBytes.toHumanReadableSize(),
                     style = MaterialTheme.typography.labelSmall,
                     color = SocialDLOnSurfaceDim
                 )
@@ -407,11 +415,3 @@ fun CompletedDownloadCard(
     }
 }
 
-private fun formatBytes(bytes: Long): String {
-    if (bytes <= 0) return "0 B"
-    val units = arrayOf("B", "KB", "MB", "GB")
-    val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt()
-    val group = digitGroups.coerceIn(0, units.size - 1)
-    val value = bytes / Math.pow(1024.0, group.toDouble())
-    return String.format(Locale.US, "%.1f %s", value, units[group])
-}

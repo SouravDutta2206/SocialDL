@@ -23,11 +23,16 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.socialdl.src.core.ui.theme.SocialDLSuccess
+import com.socialdl.src.core.ui.theme.SocialDLToastBg
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLError
 import com.socialdl.src.core.ui.theme.SocialDLIndicator
@@ -55,8 +60,13 @@ fun SocialDLToastHost(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Keep the last toast around so AnimatedVisibility can animate it out
+    // after toast becomes null (otherwise the content vanishes instantly).
+    var lastToast by remember { mutableStateOf<ToastMessage?>(null) }
+
     LaunchedEffect(toast) {
         if (toast != null) {
+            lastToast = toast
             delay(toast.durationMs)
             onDismiss()
         }
@@ -71,10 +81,10 @@ fun SocialDLToastHost(
             enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
             exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 })
         ) {
-            if (toast != null) {
+            lastToast?.let { current ->
                 Surface(
                     shape = CircleShape,
-                    color = Color(0xFF1E293B).copy(alpha = 0.95f),
+                    color = SocialDLToastBg.copy(alpha = 0.95f),
                     shadowElevation = 8.dp,
                     modifier = Modifier.padding(bottom = 80.dp)
                 ) {
@@ -83,12 +93,12 @@ fun SocialDLToastHost(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        val icon = when (toast.type) {
+                        val icon = when (current.type) {
                             ToastType.SUCCESS -> Icons.Default.CheckCircle
                             ToastType.ERROR -> Icons.Default.Error
                             ToastType.INFO -> Icons.Default.Info
                         }
-                        val tint = when (toast.type) {
+                        val tint = when (current.type) {
                             ToastType.SUCCESS -> SocialDLSuccess
                             ToastType.ERROR -> SocialDLError
                             ToastType.INFO -> SocialDLIndicator
@@ -102,7 +112,7 @@ fun SocialDLToastHost(
                         )
 
                         Text(
-                            text = toast.message,
+                            text = current.message,
                             style = MaterialTheme.typography.labelMedium,
                             color = SocialDLOnSurface
                         )

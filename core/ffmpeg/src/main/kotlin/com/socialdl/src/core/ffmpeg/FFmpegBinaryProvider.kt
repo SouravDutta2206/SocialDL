@@ -18,13 +18,28 @@ import javax.inject.Singleton
  */
 @Singleton
 open class FFmpegBinaryProvider @Inject constructor(
+    // Nullable only as a JVM-test seam (fakes pass null and override every
+    // context-touching member); Dagger always supplies the real application context.
     @ApplicationContext private val context: Context?
 ) {
     private val tag = "FFmpegBinaryProvider"
 
+    /**
+     * Wraps [NativeRuntime.ensureExtracted] and surfaces extraction failure loudly
+     * instead of silently returning a broken runtime.
+     */
+    internal fun resolveRuntime(): NativeRuntime.Paths? {
+        if (context == null) return null
+        val paths = NativeRuntime.ensureExtracted(context)
+        if (paths.extractionFailed) {
+            Logger.e(tag, "native runtime extraction failed; ffmpeg binary may not work")
+        }
+        return paths
+    }
+
     open fun path(): String {
         if (context == null) return "ffmpeg"
-        val paths = NativeRuntime.ensureExtracted(context)
+        val paths = resolveRuntime() ?: return "ffmpeg"
         val binaryFile = File(paths.ffmpegPath)
 
         if (binaryFile.exists() && binaryFile.canExecute()) {
@@ -44,16 +59,16 @@ open class FFmpegBinaryProvider @Inject constructor(
 
     open fun ensureExtracted(): String? {
         if (context == null) return null
-        return NativeRuntime.ensureExtracted(context).usrLibDir
+        return resolveRuntime()?.usrLibDir
     }
 
     open fun librarySearchPath(): String {
         if (context == null) return ""
-        return NativeRuntime.ensureExtracted(context).ldLibraryPath
+        return resolveRuntime()?.ldLibraryPath ?: ""
     }
 
     open fun environment(): Map<String, String> {
         if (context == null) return emptyMap()
-        return NativeRuntime.ensureExtracted(context).environment
+        return resolveRuntime()?.environment ?: emptyMap()
     }
 }

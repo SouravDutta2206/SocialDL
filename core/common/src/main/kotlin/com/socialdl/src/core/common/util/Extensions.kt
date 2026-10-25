@@ -1,5 +1,8 @@
 package com.socialdl.src.core.common.util
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import java.util.Locale
 
 /**
@@ -54,5 +57,30 @@ fun String.ensureHttps(): String {
         trimmed.startsWith("https://") -> trimmed
         trimmed.startsWith("http://") -> trimmed.replaceFirst("http://", "https://")
         else -> "https://$trimmed"
+    }
+}
+
+/**
+ * Safely reads the primary clipboard text.
+ *
+ * Unlike raw `primaryClip.getItemAt(0).text` access, this never crashes on
+ * description-only clips (whose items have no text), never NPEs when no clipboard
+ * service or clip exists, and falls back to coercing non-text items (URIs, intents).
+ *
+ * @return the clipboard text, or null when unavailable/blank.
+ */
+fun readClipboardText(context: Context): String? {
+    return try {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        val clip = clipboard?.primaryClip ?: return null
+        if (clip.itemCount == 0) return null
+        for (index in 0 until clip.itemCount) {
+            val item: ClipData.Item = clip.getItemAt(index) ?: continue
+            val text = item.coerceToText(context)?.toString()
+            if (!text.isNullOrBlank()) return text
+        }
+        null
+    } catch (_: Exception) {
+        null
     }
 }

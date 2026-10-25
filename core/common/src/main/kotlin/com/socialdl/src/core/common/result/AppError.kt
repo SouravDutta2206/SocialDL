@@ -32,10 +32,12 @@ sealed class AppError(
         override val cause: Throwable? = null,
     ) : AppError(message, cause)
 
-    fun toException(): Exception = when (this) {
-        is NetworkError -> RuntimeException(message, cause)
-        is StorageError -> RuntimeException(message, cause)
-        is PythonError -> RuntimeException("$message\n$traceback", cause)
-        is Unknown -> RuntimeException(message, cause)
-    }
+    /**
+     * Wraps this sealed error into a real exception so `throw`-based APIs don't
+     * flatten the typed error hierarchy into a bare RuntimeException.
+     */
+    fun toException(): Exception = AppErrorException(this)
 }
+
+/** Exception carrying its [AppError] cause, used by [AppResult.getOrThrow]. */
+class AppErrorException(val error: AppError) : Exception(error.message, error.cause)

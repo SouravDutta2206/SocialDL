@@ -21,6 +21,9 @@ android {
 
     sourceSets {
         getByName("main") {
+            // Chaquopy 15.0.1 has no type-safe Kotlin-DSL accessor for the per-source-set
+            // "python" extension, so we resolve it reflectively. This is now the ONLY
+            // reflective call in the build — do not copy it to other modules.
             (this as ExtensionAware).extensions.getByName("python").let { py ->
                 py.javaClass.getMethod("srcDir", Any::class.java).invoke(py, File(rootDir, "python/src/main/python"))
             }
@@ -40,11 +43,23 @@ android {
 
 chaquopy {
     defaultConfig {
-        val uvPython = File(System.getProperty("user.home"), "AppData/Roaming/uv/python/cpython-3.11.12-windows-x86_64-none/python.exe")
-        if (uvPython.exists()) {
-            buildPython(uvPython.absolutePath)
+        // Machine-specific interpreter path comes from gradle.properties (socialdl.python.buildPython);
+        // empty/unset or missing file → Chaquopy falls back to `python` on PATH.
+        val configuredPython = providers.gradleProperty("socialdl.python.buildPython").orNull?.trim()
+        if (!configuredPython.isNullOrBlank() && File(configuredPython).exists()) {
+            buildPython(configuredPython)
+        } else {
+            logger.lifecycle("socialdl.python.buildPython not set; Chaquopy will use Python from PATH.")
         }
         version = "3.11"
+
+        // Single source of truth for pip deps (R-E.3): the bridge module owns the pins.
+        pip {
+            File(rootDir, "python/requirements.txt")
+                .readLines()
+                .filter { it.isNotBlank() && !it.startsWith("#") }
+                .forEach { install(it) }
+        }
     }
 }
 

@@ -34,10 +34,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.socialdl.src.core.common.util.readClipboardText
 import com.socialdl.src.core.ui.theme.SocialDLButton
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
@@ -56,10 +57,9 @@ fun PillSearchBar(
     onSearch: () -> Unit,
     isLoading: Boolean = false,
     modifier: Modifier = Modifier,
-    placeholderText: String = "Paste link or search...",
-    onPasteClicked: (() -> Unit)? = null,
+    placeholderText: String = "Paste link or search..."
 ) {
-    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
 
     Column(
         modifier = modifier
@@ -148,13 +148,9 @@ fun PillSearchBar(
                         .clip(RoundedCornerShape(12.dp))
                         .background(SocialDLSurfaceHover)
                         .clickable {
-                            if (onPasteClicked != null) {
-                                onPasteClicked()
-                            } else {
-                                val text = clipboardManager.getText()?.text
-                                if (!text.isNullOrBlank()) {
-                                    onQueryChange(text)
-                                }
+                            val text = readClipboardText(context)
+                            if (!text.isNullOrBlank()) {
+                                onQueryChange(text)
                             }
                         }
                         .padding(horizontal = 10.dp, vertical = 6.dp),

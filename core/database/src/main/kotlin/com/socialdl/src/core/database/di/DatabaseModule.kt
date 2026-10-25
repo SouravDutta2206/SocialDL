@@ -22,7 +22,11 @@ object DatabaseModule {
             context,
             SocialDLDatabase::class.java,
             "socialdl.db"
-        ).fallbackToDestructiveMigration().build()
+        // v1→v2 shipped without any Migration, so only versions at or below 1 may be
+        // destructively recreated. Future version bumps must ship a real Migration —
+        // otherwise Room fails loudly instead of silently wiping download history.
+        // (Room 2.6.1 supports the vararg `fallbackToDestructiveMigrationFrom` overload.)
+        ).fallbackToDestructiveMigrationFrom(1).build()
     }
 
     @Provides

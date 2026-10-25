@@ -11,14 +11,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
+
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+
+
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,11 +26,11 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.Check
+
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.MusicNote
+
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -64,21 +64,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.socialdl.src.core.common.util.toHumanReadableSize
+
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.ui.theme.SocialDLBadgeBlue
-import com.socialdl.src.core.ui.theme.SocialDLBadgeBlueBg
-import com.socialdl.src.core.ui.theme.SocialDLBadgeBlueText
-import com.socialdl.src.core.ui.theme.SocialDLBadgeCodecBg
-import com.socialdl.src.core.ui.theme.SocialDLBadgeRoseBg
-import com.socialdl.src.core.ui.theme.SocialDLBadgeRoseText
+
+
+
+
+
 import com.socialdl.src.core.ui.theme.SocialDLButton
 import com.socialdl.src.core.ui.theme.SocialDLIndicator
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
+import com.socialdl.src.core.ui.theme.SocialDLSheetHeader
 import com.socialdl.src.core.ui.theme.SocialDLSurface
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerHigh
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerLow
@@ -226,7 +227,7 @@ private fun MainDownloadSheetView(
                     onClick = onDownload,
                     shape = CircleShape,
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF353E54),
+                        containerColor = SocialDLSheetHeader,
                         contentColor = SocialDLOnSurface
                     )
                 ) {
@@ -475,7 +476,11 @@ private fun MainDownloadSheetView(
 
         // Quality Picker Card (Clicking opens format submenu)
         Text(
-            text = if (selectedTab == 0) "Audio quality" else "Video quality",
+            text = when (selectedFormat?.kind) {
+                FormatKind.AUDIO -> "Audio quality"
+                FormatKind.IMAGE -> "Image quality"
+                else -> "Video quality"
+            },
             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
             color = SocialDLOnSurface
         )
@@ -538,33 +543,10 @@ private fun MainDownloadSheetView(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                if (selectedFormat.codec != null) {
-                                    Surface(
-                                        shape = RoundedCornerShape(4.dp),
-                                        color = SocialDLBadgeCodecBg
-                                    ) {
-                                        Text(
-                                            text = selectedFormat.codec!!,
-                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontFamily = FontFamily.Monospace),
-                                            color = SocialDLOnSurfaceVariant,
-                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                        )
-                                    }
-                                }
-
-                                if (selectedFormat.approxSizeBytes != null) {
-                                    Surface(
-                                        shape = RoundedCornerShape(4.dp),
-                                        color = SocialDLBadgeRoseBg
-                                    ) {
-                                        Text(
-                                            text = (if (selectedFormat.isSizeEstimated) "~" else "") + selectedFormat.approxSizeBytes.toHumanReadableSize(),
-                                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
-                                            color = SocialDLBadgeRoseText,
-                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                        )
-                                    }
-                                }
+                                FormatChips(
+                                    format = selectedFormat,
+                                    chips = listOf(FormatChip.CODEC, FormatChip.SIZE)
+                                )
                             }
                         }
                     }
@@ -585,182 +567,5 @@ private fun MainDownloadSheetView(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-    }
-}
-
-@Composable
-private fun FormatSubmenuView(
-    item: MediaItem,
-    selectedFormat: MediaFormat?,
-    onSelectFormat: (MediaFormat) -> Unit,
-    onBack: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // Submenu Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    text = "Format",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = SocialDLOnSurface
-                )
-                Text(
-                    text = "Select format",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = SocialDLOnSurfaceVariant
-                )
-            }
-
-            Button(
-                onClick = onBack,
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF353E54),
-                    contentColor = SocialDLOnSurface
-                )
-            ) {
-                Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(text = "OK", style = MaterialTheme.typography.labelLarge)
-            }
-        }
-
-        // Single scrollable stream list with Video Section then Audio Section
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(380.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (item.videoFormats.isNotEmpty()) {
-                item {
-                    Text(
-                        text = "VIDEO STREAMS",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = SocialDLIndicator,
-                        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
-                    )
-                }
-                items(item.videoFormats) { fmt ->
-                    FormatItemRow(
-                        format = fmt,
-                        isSelected = fmt.id == selectedFormat?.id,
-                        onClick = { onSelectFormat(fmt) }
-                    )
-                }
-            }
-
-            if (item.audioFormats.isNotEmpty()) {
-                item {
-                    Text(
-                        text = "AUDIO STREAMS",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = SocialDLIndicator,
-                        modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)
-                    )
-                }
-                items(item.audioFormats) { fmt ->
-                    FormatItemRow(
-                        format = fmt,
-                        isSelected = fmt.id == selectedFormat?.id,
-                        onClick = { onSelectFormat(fmt) }
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun FormatItemRow(
-    format: MediaFormat,
-    isSelected: Boolean,
-    onClick: () -> Unit
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(12.dp),
-        color = if (isSelected) SocialDLSurfaceContainerHigh else SocialDLSurfaceContainerLow
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = format.label,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = SocialDLOnSurface
-                    )
-                    Text(
-                        text = "id: ${format.id}",
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                        color = SocialDLOnSurfaceDim
-                    )
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Surface(shape = RoundedCornerShape(4.dp), color = SocialDLBadgeBlueBg) {
-                        Text(
-                            text = format.container,
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                            color = SocialDLBadgeBlueText,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                        )
-                    }
-
-                    val itemCodec = format.codec
-                    if (itemCodec != null) {
-                        Surface(shape = RoundedCornerShape(4.dp), color = SocialDLBadgeCodecBg) {
-                            Text(
-                                text = itemCodec,
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                                color = SocialDLOnSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
-                    }
-
-                    if (format.approxSizeBytes != null) {
-                        Surface(shape = RoundedCornerShape(4.dp), color = SocialDLBadgeRoseBg) {
-                            Text(
-                                text = (if (format.isSizeEstimated) "~" else "") + format.approxSizeBytes.toHumanReadableSize(),
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                                color = SocialDLBadgeRoseText,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
-                            )
-                        }
-                    }
-                }
-            }
-
-            if (isSelected) {
-                Icon(
-                    imageVector = Icons.Default.Check,
-                    contentDescription = "Selected",
-                    tint = SocialDLIndicator,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-        }
     }
 }

@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
+import com.socialdl.src.BuildConfig
 import com.socialdl.src.feature.downloads.navigation.downloadsScreen
 import com.socialdl.src.feature.home.navigation.HOME_ROUTE
 import com.socialdl.src.feature.home.navigation.homeScreen
@@ -30,7 +31,8 @@ fun SocialDLNavHost(
         )
 
         settingsScreen(
-            onNavigateBack = { navController.popBackStack() }
+            onNavigateBack = { navController.popBackStack() },
+            appVersion = BuildConfig.VERSION_NAME
         )
     }
 }
