@@ -414,4 +414,3 @@ private fun CompletedDownloadCard(
         }
     }
 }
-

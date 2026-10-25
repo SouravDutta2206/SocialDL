@@ -63,7 +63,6 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         "noplaylist": not is_playlist_url,  # allow playlist extraction when list is present
         "extract_flat": "in_playlist" if is_playlist_url else False,  # fast flat metadata for playlists, deep for single videos
         "cookiefile": cookiefile,    # decrypted temp path if available
-        "no_check_certificates": True,
     }
 
     try:
