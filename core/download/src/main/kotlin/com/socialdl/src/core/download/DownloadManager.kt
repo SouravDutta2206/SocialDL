@@ -183,6 +183,13 @@ class DownloadManager @Inject constructor(
                 }
                 if (!workAlive) {
                     Logger.i(tag, "Reconciling dead job ${job.id} (${job.status}) as FAILED(INTERRUPTED)")
+                    // P1-3 sweep: a MediaStore row created with IS_PENDING=1 during an
+                    // interrupted export is deleted if still pending.
+                    job.pendingUri?.let { uri ->
+                        if (deleteIfStillPending(uri)) {
+                            Logger.i(tag, "Swept orphaned pending MediaStore row for job ${job.id}")
+                        }
+                    }
                     jobRepository.markInterruptedIfNotFailed(job.id)
                 }
             }
@@ -198,4 +205,21 @@ class DownloadManager @Inject constructor(
             Logger.e(tag, "Startup reconciliation failed", e)
         }
     }
+
+    /**
+     * P1-3: deletes a MediaStore row only when it is still IS_PENDING=1 — a row
+     * that already finished its export belongs to the user and is left alone.
+     */
+    private fun deleteIfStillPending(pendingUri: String): Boolean = runCatching {
+        val uri = android.net.Uri.parse(pendingUri)
+        val isPending = context.contentResolver
+            .query(uri, arrayOf(android.provider.MediaStore.MediaColumns.IS_PENDING), null, null, null)
+            ?.use { cursor -> cursor.moveToFirst() && cursor.getInt(0) == 1 } ?: false
+        if (isPending) {
+            com.socialdl.src.core.common.util.MediaStorageUtils.deleteMediaFromStorage(context, pendingUri)
+        } else {
+            false
+        }
+    }.onFailure { e -> Logger.w(tag, "Pending-row sweep failed for $pendingUri", e) }
+        .getOrDefault(false)
 }
