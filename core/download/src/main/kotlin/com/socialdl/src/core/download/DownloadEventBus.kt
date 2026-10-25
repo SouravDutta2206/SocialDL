@@ -7,20 +7,17 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Transient in-process signal channel from DownloadWorker to DownloadManager.
+ * One-shot UI toast signal channel from [DownloadWorker] to feature ViewModels.
  *
  * Contract:
  * - `replay = 0` on purpose: the bus is a fire-and-forget signal, never truth.
- *   [DownloadManager] holds the only authoritative state in `_activeTasks`;
- *   lifecycle entry (Queued) and exit (Cancelled) are written there directly and
- *   are NOT evented. Only worker-observed transitions (Running/Completed/Failed)
- *   flow through the bus.
- * - [emit] (suspend) is for state-critical worker transitions (Completed, Failed,
- *   and phase-progress updates) — the worker must wait for delivery, else the UI
- *   could miss a terminal state.
- * - [tryEmit] is only acceptable for high-frequency progress ticks where dropping
- *   a sample is harmless (the next tick corrects the UI).
- * - The sole subscriber is [DownloadManager]; do not add lifecycle-truth events here.
+ *   Room (via [DownloadJobRepository]) is the SINGLE source of truth for the
+ *   download lifecycle — no status/progress/queue events may flow through here.
+ * - The only event type is [DownloadEvent.Completed], emitted right before the
+ *   success transaction commits so the UI can toast "Download completed".
+ * - Subscribers must treat events as best-effort: if no ViewModel is subscribed
+ *   (app backgrounded), the toast is simply dropped — the durable row/history
+ *   state is unaffected.
  */
 @Singleton
 class DownloadEventBus @Inject constructor() {

@@ -35,7 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.socialdl.src.core.common.util.toTimeString
-import com.socialdl.src.core.model.DownloadTask
+import com.socialdl.src.core.model.DownloadProgressInfo
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.ui.theme.SocialDLCard
@@ -54,7 +54,7 @@ fun MediaCard(
     onCardClick: () -> Unit,
     onQuickAudioDownload: () -> Unit,
     onQuickVideoDownload: () -> Unit,
-    activeDownloadTask: DownloadTask? = null,
+    activeDownload: DownloadProgressInfo? = null,
     onPauseResumeDownload: (() -> Unit)? = null,
     onCancelDownload: (() -> Unit)? = null,
     isResolving: Boolean = false,
@@ -184,9 +184,9 @@ fun MediaCard(
             }
 
             // Inline Download Progress Overlay (if actively downloading)
-            if (activeDownloadTask != null && onCancelDownload != null) {
+            if (activeDownload != null && onCancelDownload != null) {
                 ProgressOverlayCard(
-                    task = activeDownloadTask,
+                    info = activeDownload,
                     onPauseResume = onPauseResumeDownload,
                     onCancel = onCancelDownload
                 )

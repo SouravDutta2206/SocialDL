@@ -7,9 +7,9 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.socialdl.src.core.common.util.Logger
-import com.socialdl.src.core.database.dao.DownloadDao
+import com.socialdl.src.core.database.entity.DownloadJobEntity
+import com.socialdl.src.core.model.DownloadProgressInfo
 import com.socialdl.src.core.model.DownloadStatus
-import com.socialdl.src.core.model.DownloadTask
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -17,87 +17,51 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * Facade for enqueueing/cancelling downloads. Room (via [DownloadJobRepository])
+ * is the source of truth for the lifecycle; WorkManager Data carries only the
+ * job id (P0-4 / P1-2), so signed CDN URLs live in the Room row exclusively.
+ */
 @Singleton
 class DownloadManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val eventBus: DownloadEventBus,
-    private val downloadDao: DownloadDao,
+    private val jobRepository: DownloadJobRepository,
 ) {
     private val tag = "DownloadManager"
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e ->
-            Logger.e(tag, "Uncaught error in DownloadManager event collection", e)
+            Logger.e(tag, "Uncaught error in DownloadManager scope", e)
         }
     )
 
-    // Single source of truth for visible download tasks. Direct writes (enqueueDownload/cancelDownload)
-    // own lifecycle entry/exit; worker events (Running/Completed/Failed) are the other writer.
-    // The event bus itself carries no lifecycle truth — see DownloadEventBus KDoc.
-    private val _activeTasks = MutableStateFlow<Map<String, DownloadTask>>(emptyMap())
-    val activeTasks: StateFlow<Map<String, DownloadTask>> = _activeTasks.asStateFlow()
+    /** Live jobs (non-terminal + FAILED cards) straight from Room. */
+    val jobs: Flow<List<DownloadJobEntity>> = jobRepository.observeJobs
+
+    /** UI projection flow (used by Home for inline overlays keyed by [DownloadJobEntity.uiKey]). */
+    val progressInfos: Flow<List<DownloadProgressInfo>> = jobRepository.observeProgressInfos
+
+    /** Same as [progressInfos], keyed by the MediaItem uiKey identity formula. */
+    val progressInfoByKey: Flow<Map<String, DownloadProgressInfo>> =
+        jobRepository.observeProgressInfoByKey
 
     init {
-        scope.launch {
-            eventBus.events.collect { event ->
-                handleEvent(event)
-            }
-        }
+        scope.launch { reconcileOnStartup() }
     }
 
-    private fun handleEvent(event: DownloadEvent) {
-        when (event) {
-            // No-op: enqueueDownload registers the task directly in _activeTasks (see below),
-            // so the collector must not double-write it. Queued events are no longer emitted.
-            is DownloadEvent.Queued -> Unit
-            is DownloadEvent.Running -> {
-                _activeTasks.update { current ->
-                    val existing = current[event.taskId] ?: return@update current
-                    val newStatus = when (event.phase) {
-                        DownloadPhase.DOWNLOADING -> DownloadStatus.DOWNLOADING
-                        DownloadPhase.MUXING -> DownloadStatus.MUXING
-                    }
-                    val updated = existing.copy(
-                        status = newStatus,
-                        progress = event.progress,
-                        downloadedBytes = event.downloadedBytes,
-                        totalBytes = event.totalBytes ?: existing.totalBytes
-                    )
-                    current + (event.taskId to updated)
-                }
-            }
-            is DownloadEvent.Completed -> {
-                _activeTasks.update { current ->
-                    current - event.taskId
-                }
-            }
-            is DownloadEvent.Failed -> {
-                // Failed tasks intentionally stay in the map with status FAILED so the UI shows the failure.
-                // They are dismissible via cancelDownload(taskId), which removes them from the map.
-                _activeTasks.update { current ->
-                    val existing = current[event.taskId] ?: return@update current
-                    val failedTask = existing.copy(
-                        status = DownloadStatus.FAILED,
-                        errorMessage = event.error
-                    )
-                    current + (event.taskId to failedTask)
-                }
-            }
-            // No-op: cancelDownload removes the entry directly from _activeTasks.
-            // The worker never emits Cancelled (cancellation kills it before it could).
-            is DownloadEvent.Cancelled -> Unit
-        }
-    }
-
-    fun enqueueDownload(
+    /**
+     * Builds the durable job row, writes it to Room FIRST, then enqueues a
+     * WorkRequest whose input contains only KEY_JOB_ID. The worker reads its
+     * entire config from the row, so enqueue-before-insert must never happen.
+     */
+    suspend fun enqueueDownload(
         mediaItem: MediaItem,
         selectedFormat: MediaFormat,
         container: String? = null,
@@ -105,7 +69,7 @@ class DownloadManager @Inject constructor(
         customAuthor: String? = null,
         groupId: String? = null
     ): String {
-        val taskId = UUID.randomUUID().toString()
+        val jobId = UUID.randomUUID().toString()
         val finalContainer = if (!container.isNullOrBlank() && container != "Default") {
             container
         } else {
@@ -115,7 +79,8 @@ class DownloadManager @Inject constructor(
         val title = customTitle ?: mediaItem.title
         val author = customAuthor ?: mediaItem.author
 
-        // If format requires muxing, resolve paired audio stream
+        // If format requires muxing, resolve paired audio stream upfront
+        // (non-placeholder path; placeholders re-resolve in the worker via JIT).
         val pairedAudio = if (selectedFormat.requiresMuxing) {
             mediaItem.audioFormats.find { it.id == selectedFormat.pairedAudioFormatId }
                 ?: mediaItem.audioFormats.firstOrNull()
@@ -123,62 +88,114 @@ class DownloadManager @Inject constructor(
             null
         }
 
-        Logger.i(tag, "Enqueuing task $taskId for '${title}', format: ${selectedFormat.label}, container: $finalContainer, pairedAudio=${pairedAudio?.id}, groupId=$groupId")
-
-        val inputData = workDataOf(
-            DownloadWorker.KEY_TASK_ID to taskId,
-            DownloadWorker.KEY_SOURCE_URL to mediaItem.sourceUrl,
-            DownloadWorker.KEY_TITLE to title,
-            DownloadWorker.KEY_AUTHOR to author,
-            DownloadWorker.KEY_THUMBNAIL_URL to mediaItem.thumbnailUrl,
-            DownloadWorker.KEY_PLATFORM to mediaItem.platform.name,
-            DownloadWorker.KEY_CONTAINER to finalContainer,
-            DownloadWorker.KEY_FORMAT_LABEL to selectedFormat.label,
-            DownloadWorker.KEY_DIRECT_URL to (selectedFormat.directUrl ?: ""),
-            DownloadWorker.KEY_REQUIRES_MUXING to selectedFormat.requiresMuxing,
-            DownloadWorker.KEY_AUDIO_DIRECT_URL to (pairedAudio?.directUrl ?: ""),
-            DownloadWorker.KEY_AUDIO_CONTAINER to (pairedAudio?.container ?: "M4A"),
-            DownloadWorker.KEY_MUX_STRATEGY to (selectedFormat.muxStrategy?.name ?: ""),
-            DownloadWorker.KEY_HTTP_CHUNK_SIZE to (selectedFormat.httpChunkSizeBytes ?: 0L),
-            DownloadWorker.KEY_AUDIO_HTTP_CHUNK_SIZE to (pairedAudio?.httpChunkSizeBytes ?: 0L),
-            DownloadWorker.KEY_FORMAT_KIND to selectedFormat.kind.name,
-            DownloadWorker.KEY_GROUP_ID to (groupId ?: ""),
-            DownloadWorker.KEY_IS_PLACEHOLDER to selectedFormat.isPlaceholder
+        Logger.i(
+            tag,
+            "Enqueuing job $jobId for '$title', format: ${selectedFormat.label}, container: $finalContainer, " +
+                "pairedAudio=${pairedAudio?.id}, groupId=$groupId"
         )
 
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-
-        val workRequest = OneTimeWorkRequestBuilder<DownloadWorker>()
-            .setInputData(inputData)
-            .setConstraints(constraints)
-            .addTag(taskId)
-            .build()
-
-        val task = DownloadTask(
-            id = taskId,
-            mediaItem = mediaItem,
-            selectedFormat = selectedFormat,
+        val job = DownloadJobEntity(
+            id = jobId,
+            sourceUrl = mediaItem.sourceUrl,
+            title = title,
+            author = author,
+            thumbnailUrl = mediaItem.thumbnailUrl,
+            platform = mediaItem.platform.name,
+            carouselIndex = mediaItem.carouselIndex ?: 0,
+            formatLabel = selectedFormat.label,
+            formatKind = selectedFormat.kind.name,
+            container = finalContainer,
+            groupId = groupId,
             status = DownloadStatus.QUEUED,
             progress = 0f,
-            totalBytes = selectedFormat.approxSizeBytes
+            totalBytes = selectedFormat.approxSizeBytes,
+            directUrl = selectedFormat.directUrl?.takeIf { it.isNotBlank() },
+            requiresMuxing = selectedFormat.requiresMuxing,
+            audioDirectUrl = pairedAudio?.directUrl?.takeIf { it.isNotBlank() },
+            audioContainer = pairedAudio?.container ?: "M4A",
+            muxStrategy = selectedFormat.muxStrategy?.name,
+            videoChunkSize = selectedFormat.httpChunkSizeBytes ?: 0L,
+            audioChunkSize = pairedAudio?.httpChunkSizeBytes ?: 0L,
+            isPlaceholder = selectedFormat.isPlaceholder,
+            createdAt = System.currentTimeMillis(),
+            updatedAt = System.currentTimeMillis()
         )
 
-        // Register the task synchronously (before WorkManager.enqueue) so the UI never misses
-        // the Queued state even if a Running/Failed/Cancelled update arrives out of order.
-        // This direct write is the ONLY Queued registration — no Queued event is emitted;
-        // _activeTasks is the single source of truth for lifecycle entry/exit (see DownloadEventBus KDoc).
-        _activeTasks.update { it + (taskId to task) }
+        jobRepository.insertJob(job)
 
-        WorkManager.getInstance(context).enqueue(workRequest)
+        val workRequest = OneTimeWorkRequestBuilder<DownloadWorker>()
+            .setInputData(workDataOf(DownloadWorker.KEY_JOB_ID to jobId))
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build()
+            )
+            .addTag(jobId)
+            .build()
 
-        return taskId
+        try {
+            WorkManager.getInstance(context).enqueue(workRequest)
+        } catch (e: Exception) {
+            // Do not leave a QUEUED zombie row: delete it and rethrow so callers
+            // (batch counting) report a truthful enqueued count.
+            Logger.e(tag, "WorkManager enqueue failed for job $jobId; deleting row", e)
+            jobRepository.deleteJob(jobId)
+            throw e
+        }
+        return jobId
     }
 
-    fun cancelDownload(taskId: String) {
-        WorkManager.getInstance(context).cancelAllWorkByTag(taskId)
-        // Direct removal — no Cancelled event is emitted; the collector no longer mirrors it.
-        _activeTasks.update { it - taskId }
+    /**
+     * Instant cancellation (P0-4): delete the Room row FIRST — the active-jobs
+     * flow drops the row and the UI item vanishes immediately — then cancel the
+     * WorkManager job. A worker already running discovers the missing row via its
+     * guard read and aborts; scratch is cleaned in its finally block.
+     */
+    suspend fun cancelDownload(jobId: String) {
+        Logger.i(tag, "Cancel requested for job $jobId")
+        jobRepository.deleteJob(jobId)
+        WorkManager.getInstance(context).cancelAllWorkByTag(jobId)
+    }
+
+    /** Same deletion for the FAILED card's "X" (background work is already dead). */
+    suspend fun removeFailedJob(jobId: String) {
+        jobRepository.deleteJob(jobId)
+    }
+
+    /**
+     * Startup reconciliation:
+     * 1. Non-terminal Room jobs whose WorkManager work is missing or finished
+     *    (process death, system kill) are marked FAILED(INTERRUPTED) — they
+     *    surface as normal FAILED cards (X removable), consistent with kill-on-fail.
+     * 2. Orphan scratch dirs (`cache/downloads/<id>` with no job row) are swept.
+     */
+    private suspend fun reconcileOnStartup() {
+        try {
+            val workManager = WorkManager.getInstance(context)
+            val jobs = jobRepository.getActiveJobs()
+            jobs.forEach { job ->
+                val workAlive = try {
+                    workManager.getWorkInfosByTag(job.id).get()
+                        .any { !it.state.isFinished }
+                } catch (e: Exception) {
+                    Logger.w(tag, "WorkManager lookup failed for job ${job.id}", e)
+                    false
+                }
+                if (!workAlive) {
+                    Logger.i(tag, "Reconciling dead job ${job.id} (${job.status}) as FAILED(INTERRUPTED)")
+                    jobRepository.markInterruptedIfNotFailed(job.id)
+                }
+            }
+
+            val knownIds = jobRepository.getActiveJobs().map { it.id }.toSet()
+            File(context.cacheDir, "downloads").listFiles()?.forEach { dir ->
+                if (dir.name !in knownIds) {
+                    Logger.i(tag, "Sweeping orphan scratch dir ${dir.name}")
+                    dir.deleteRecursively()
+                }
+            }
+        } catch (e: Exception) {
+            Logger.e(tag, "Startup reconciliation failed", e)
+        }
     }
 }

@@ -1,30 +1,15 @@
 package com.socialdl.src.core.download
 
-import com.socialdl.src.core.model.DownloadTask
-
-enum class DownloadPhase {
-    DOWNLOADING,
-    MUXING,
-}
-
 sealed interface DownloadEvent {
-    data class Queued(val task: DownloadTask) : DownloadEvent
-    data class Running(
-        val taskId: String,
-        val progress: Float,
-        val downloadedBytes: Long,
-        val totalBytes: Long?,
-        val phase: DownloadPhase
-    ) : DownloadEvent
+    /**
+     * One-shot UI toast signal emitted right before the success transaction commits.
+     * Room [DownloadJobRepository.observeJobs] is the lifecycle truth; this bus
+     * carries NO lifecycle state and must never be used for status.
+     */
     data class Completed(
-        val taskId: String,
+        val jobId: String,
+        val title: String,
         val outputUri: String,
         val fileSizeBytes: Long
     ) : DownloadEvent
-    data class Failed(
-        val taskId: String,
-        val error: String
-    ) : DownloadEvent
-    // NOTE: no Paused event — WorkManager has no pause path (truth lives in _activeTasks).
-    data class Cancelled(val taskId: String) : DownloadEvent
 }

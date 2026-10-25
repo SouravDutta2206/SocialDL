@@ -27,8 +27,25 @@ enum class DownloadStatus {
     QUEUED,
     DOWNLOADING,
     MUXING,
+    EXPORTING,
     COMPLETED,
     FAILED,
     PAUSED,
     CANCELLED,
 }
+
+/**
+ * Minimal UI projection of an active download job. Lets core:ui composables and
+ * feature screens render progress without depending on the database layer
+ * (Room's [com.socialdl.src.core.database.entity.DownloadJobEntity] maps to this
+ * via the DownloadJobRepository mapper in core:download).
+ */
+@Serializable
+data class DownloadProgressInfo(
+    val id: String,
+    val status: DownloadStatus,
+    val progress: Float = 0f,
+    val downloadedBytes: Long = 0L,
+    val totalBytes: Long? = null,
+    val errorMessage: String? = null,
+)

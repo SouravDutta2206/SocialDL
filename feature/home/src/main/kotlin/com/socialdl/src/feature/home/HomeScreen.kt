@@ -34,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.socialdl.src.core.common.util.readClipboardText
+import kotlinx.coroutines.launch
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.uiKey
@@ -71,6 +73,7 @@ fun HomeScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val resolvingItemId by viewModel.resolvingItemId.collectAsStateWithLifecycle()
     val activeTasksBySourceKey by viewModel.activeTasksBySourceKey.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
     var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
     var selectedItemForSheet by remember { mutableStateOf<MediaItem?>(null) }
     var sheetInitialTab by remember { mutableStateOf(FormatKind.VIDEO) }
@@ -193,7 +196,7 @@ fun HomeScreen(
                             },
                             // Inline progress + cancel for the item that is downloading.
                             // Pause/resume left unset: WorkManager has no real pause.
-                            activeDownloadTask = activeTask,
+                            activeDownload = activeTask,
                             onCancelDownload = if (activeTask != null) {
                                 { viewModel.cancelDownload(activeTask.id) }
                             } else {
@@ -213,7 +216,9 @@ fun HomeScreen(
                 onDismiss = { selectedItemForSheet = null },
                 onConfirmDownload = { format, container, title, author ->
                     selectedItemForSheet = null
-                    viewModel.startDownload(item, format, container, title, author)
+                    scope.launch {
+                        viewModel.startDownload(item, format, container, title, author)
+                    }
                     toastMessage = ToastMessage(message = "Download queued: $title (${format.label})")
                 }
             )
@@ -289,8 +294,10 @@ fun HomeScreen(
                     showBatchSheet = false
                     // Report the ACTUAL enqueued count — a mid-loop enqueue failure
                     // should not overstate what landed in the queue.
-                    val taskIds = viewModel.startBatchDownload(selectedPairs)
-                    toastMessage = ToastMessage(message = "Queued ${taskIds.size} downloads to queue")
+                    scope.launch {
+                        val taskIds = viewModel.startBatchDownload(selectedPairs)
+                        toastMessage = ToastMessage(message = "Queued ${taskIds.size} downloads to queue")
+                    }
                 }
             )
         }

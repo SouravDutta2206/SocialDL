@@ -47,7 +47,7 @@ class ChunkedDownloader @Inject constructor(
         chunkSizeBytes: Long,
         platform: String,
         isStopped: () -> Boolean,
-        onProgress: (bytesWritten: Long, totalBytes: Long?) -> Unit
+        onProgress: suspend (bytesWritten: Long, totalBytes: Long?) -> Unit
     ) {
         val effectiveChunkSize = when {
             chunkSizeBytes > 0L -> chunkSizeBytes
@@ -67,7 +67,7 @@ class ChunkedDownloader @Inject constructor(
         destination: File,
         chunkSize: Long,
         isStopped: () -> Boolean,
-        onProgress: (bytesWritten: Long, totalBytes: Long?) -> Unit
+        onProgress: suspend (bytesWritten: Long, totalBytes: Long?) -> Unit
     ) {
         if (destination.exists()) {
             destination.delete()
@@ -199,7 +199,7 @@ class ChunkedDownloader @Inject constructor(
         url: String,
         destination: File,
         isStopped: () -> Boolean,
-        onProgress: (bytesWritten: Long, totalBytes: Long?) -> Unit
+        onProgress: suspend (bytesWritten: Long, totalBytes: Long?) -> Unit
     ) {
         val request = Request.Builder()
             .url(url)
@@ -222,12 +222,12 @@ class ChunkedDownloader @Inject constructor(
         }
     }
 
-    private fun copyStreamWithProgress(
+    private suspend fun copyStreamWithProgress(
         input: java.io.InputStream,
         output: java.io.OutputStream,
         totalBytes: Long?,
         isStopped: () -> Boolean,
-        onProgress: (bytesWritten: Long, totalBytes: Long?) -> Unit
+        onProgress: suspend (bytesWritten: Long, totalBytes: Long?) -> Unit
     ) {
         val buffer = ByteArray(64 * 1024)
         var bytesRead: Int
