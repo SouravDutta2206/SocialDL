@@ -17,23 +17,29 @@ import javax.inject.Singleton
  * Support libraries are extracted from libnode.zip.so via NativeRuntime.
  */
 @Singleton
-open class NodeBinaryProvider private constructor(
-    private val context: Context?,
-    private val customBinaryPath: String?
+open class NodeBinaryProvider @Inject constructor(
+    // Nullable only as a JVM-test seam (fakes pass null and override the
+    // context-touching members); Dagger always supplies the real application context.
+    @ApplicationContext private val context: Context?
 ) {
-    @Inject
-    constructor(@ApplicationContext context: Context) : this(context, null)
-
-    constructor(customBinaryPath: String) : this(null, customBinaryPath)
-
-    constructor() : this(null, null)
-
     private val tag = "NodeBinaryProvider"
 
-    open fun path(): String {
-        if (customBinaryPath != null) return customBinaryPath
-        if (context == null) return "node"
+    /**
+     * Wraps [NativeRuntime.ensureExtracted] and surfaces extraction failure loudly
+     * instead of silently returning a broken runtime.
+     */
+    internal fun resolveRuntime(): NativeRuntime.Paths? {
+        if (context == null) return null
         val paths = NativeRuntime.ensureExtracted(context)
+        if (paths.extractionFailed) {
+            Logger.e(tag, "native runtime extraction failed; node binary may not work")
+        }
+        return paths
+    }
+
+    open fun path(): String {
+        if (context == null) return "node"
+        val paths = resolveRuntime() ?: return "node"
         val binaryFile = File(paths.nodePath)
 
         if (binaryFile.exists() && binaryFile.canExecute()) {
@@ -46,9 +52,8 @@ open class NodeBinaryProvider private constructor(
     }
 
     open fun isAvailable(): Boolean {
-        if (customBinaryPath != null) return true
         if (context == null) return false
-        val paths = NativeRuntime.ensureExtracted(context)
+        val paths = resolveRuntime() ?: return false
         val binaryFile = File(paths.nodePath)
         return binaryFile.exists() && binaryFile.canExecute()
     }
@@ -59,6 +64,6 @@ open class NodeBinaryProvider private constructor(
 
     open fun environment(): Map<String, String> {
         if (context == null) return emptyMap()
-        return NativeRuntime.ensureExtracted(context).environment
+        return resolveRuntime()?.environment ?: emptyMap()
     }
 }

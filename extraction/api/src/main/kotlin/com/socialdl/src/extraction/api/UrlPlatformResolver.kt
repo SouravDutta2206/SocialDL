@@ -14,17 +14,17 @@ import java.util.regex.Pattern
 object UrlPlatformResolver {
 
     private val YOUTUBE_REGEX = Pattern.compile(
-        """^(?:https?://)?(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/)|youtu\.be/)([\w\-]+)""",
+        """^(?:https?://)?(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/|live/|playlist\?)|youtu\.be/)([\w\-]+)""",
         Pattern.CASE_INSENSITIVE
     )
 
     private val INSTAGRAM_REGEX = Pattern.compile(
-        """^(?:https?://)?(?:www\.)?instagram\.com/(?:p|reel|tv|stories)/([\w\-]+)""",
+        """^(?:https?://)?(?:www\.)?instagram\.com/(?:p|reels?|tv|stories)/([\w\-]+)""",
         Pattern.CASE_INSENSITIVE
     )
 
     private val TWITTER_REGEX = Pattern.compile(
-        """^(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/(?:i/status/|[\w]+/status/|status/)([\d]+)""",
+        """^(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/(?:i(?:/web)?/status|[\w]+/status|status)/([\d]+)""",
         Pattern.CASE_INSENSITIVE
     )
 

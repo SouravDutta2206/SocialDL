@@ -141,6 +141,10 @@ class YoutubeExtractor @Inject constructor(
         if (parsed.error != null) {
             return when (parsed.error) {
                 "auth_wall" -> ExtractionResult.Error(ExtractionError.AuthWallDetected(Platform.YOUTUBE, parsed.detail ?: "Sign-in required"))
+                "rate_limited" -> ExtractionResult.Error(ExtractionError.RateLimited())
+                "network" -> ExtractionResult.Error(
+                    ExtractionError.NetworkFailure(message = parsed.detail ?: "Network failure during extraction")
+                )
                 else -> ExtractionResult.Error(ExtractionError.ContentUnavailable(parsed.detail ?: "Content unavailable"))
             }
         }
@@ -210,20 +214,25 @@ class YoutubeExtractor @Inject constructor(
             videoFormats.add(mapVideoOnlyFormat(vDto, duration, bestAudio))
         }
 
-        // Sort video formats by height descending, then fps descending
+        // Sort video formats by height descending, then fps, then size — using typed
+        // fields, never parsing display strings.
         videoFormats.sortWith(
-            compareByDescending<MediaFormat> { extractHeight(it.label) }
+            compareByDescending<MediaFormat> { it.height ?: 0 }
                 .thenByDescending { it.fps ?: 0 }
                 .thenByDescending { it.approxSizeBytes ?: 0L }
         )
 
-        val finalVideoFormats = if (videoFormats.isEmpty() && audioFormats.isEmpty()) {
+        // Derive final lists from the raw parsed buckets (not the post-mutation lists):
+        // - no video formats at all → placeholder video so JIT resolution has a target
+        //   (audio-only items would otherwise be silently masked);
+        // - no audio formats → placeholder audio.
+        val finalVideoFormats = if (videoFormats.isEmpty()) {
             listOf(MediaFormat.PLACEHOLDER_BEST_VIDEO)
         } else {
             videoFormats
         }
 
-        val finalAudioFormats = if (videoFormats.isEmpty() && audioFormats.isEmpty()) {
+        val finalAudioFormats = if (audioFormats.isEmpty()) {
             listOf(MediaFormat.PLACEHOLDER_BEST_AUDIO)
         } else {
             audioFormats
@@ -245,8 +254,15 @@ class YoutubeExtractor @Inject constructor(
 
     private fun mapAudioFormat(dto: YtDlpFormatDto, durationSeconds: Int): MediaFormat {
         val container = dto.ext?.uppercase() ?: "M4A"
-        val abr = dto.abr?.toInt() ?: 128
-        val label = "${abr}kbps $container"
+        // Do not guess a numeric bitrate: label the reported abr when present, fall back
+        // to tbr marked as approximate, and omit the number entirely when neither exists.
+        // (Previously opus streams without abr were mislabeled "128kbps".)
+        val reportedAbr = dto.abr?.toInt()
+        val label = when {
+            reportedAbr != null -> "${reportedAbr}kbps $container"
+            dto.tbr != null -> "~${dto.tbr.toInt()}kbps $container"
+            else -> container
+        }
         val sampleRate = dto.asr?.let {
             if (it % 1000 == 0) "${it / 1000}kHz" else String.format(java.util.Locale.US, "%.1fkHz", it / 1000.0)
         }
@@ -282,6 +298,7 @@ class YoutubeExtractor @Inject constructor(
             approxSizeBytes = size.first,
             isSizeEstimated = size.second,
             fps = dto.fps,
+            height = dto.height,
             isHdr = isHdrFormat(dto.dynamic_range),
             directUrl = dto.url,
             requiresMuxing = false,
@@ -316,6 +333,7 @@ class YoutubeExtractor @Inject constructor(
             approxSizeBytes = totalSize,
             isSizeEstimated = isEstimated || (bestAudio?.isSizeEstimated == true),
             fps = dto.fps,
+            height = dto.height,
             isHdr = isHdr,
             directUrl = dto.url,
             requiresMuxing = true,
@@ -372,10 +390,5 @@ class YoutubeExtractor @Inject constructor(
     private fun extractChunkSize(dto: YtDlpFormatDto): Long? {
         val options = dto.downloader_options?.jsonObject ?: return null
         return options["http_chunk_size"]?.jsonPrimitive?.longOrNull
-    }
-
-    private fun extractHeight(label: String): Int {
-        val match = Regex("""(\d+)P""").find(label)
-        return match?.groupValues?.get(1)?.toIntOrNull() ?: 0
     }
 }

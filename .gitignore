@@ -42,6 +42,7 @@ build/
 **/build/
 .gradle/
 .kotlin/
+docs/
 
 # Android binary outputs
 *.apk

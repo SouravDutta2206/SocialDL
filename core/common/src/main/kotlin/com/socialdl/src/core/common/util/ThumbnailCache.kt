@@ -9,6 +9,7 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -17,19 +18,33 @@ import javax.inject.Singleton
  * retain valid image references even if the source URL later expires or is deleted.
  */
 @Singleton
-open class ThumbnailCache(
-    private val cacheDirectory: File?
+open class ThumbnailCache @Inject constructor(
+    // Nullable only as a JVM-test seam (fakes pass null and override store());
+    // Dagger always supplies the real application context.
+    @ApplicationContext private val context: Context?
 ) {
-    @Inject
-    constructor(@ApplicationContext context: Context) : this(File(context.cacheDir, "thumbnails"))
-
-    constructor() : this(null as File?)
-
     private val tag = "ThumbnailCache"
-    private val maxCacheSizeBytes = 50L * 1024L * 1024L // 50MB LRU cap
+    // 50MB LRU cap; internal var so tests can shrink it.
+    internal var maxCacheSizeBytes = 50L * 1024L * 1024L
+
+    /** Test seam (same module only): points the cache at a scratch directory. */
+    internal fun useDirectoryForTest(directory: File) {
+        explicitDirectory = directory
+    }
+
+    private var explicitDirectory: File? = null
+
+    // Per-hash lock: concurrent store() calls for the same URL serialize on the lock,
+    // while different URLs proceed in parallel.
+    private val urlLocks = ConcurrentHashMap<String, Any>()
 
     private val dir: File by lazy {
-        (cacheDirectory ?: File(System.getProperty("java.io.tmpdir"), "socialdl_thumbnails")).apply { mkdirs() }
+        (explicitDirectory ?: File(getRealDir(), "thumbnails")).apply { mkdirs() }
+    }
+
+    private fun getRealDir(): File {
+        val ctx = requireNotNull(context) { "ThumbnailCache (test fake, no context) had dir accessed" }
+        return ctx.cacheDir
     }
 
     /**
@@ -43,52 +58,70 @@ open class ThumbnailCache(
         }
 
         val hash = sha256(sourceUrl)
+        // Fast path: already cached. The lock section re-checks to guard the race
+        // where two callers both miss the cache for the same URL.
         val existing = dir.listFiles { _, name -> name.startsWith(hash) && !name.endsWith(".tmp") }?.firstOrNull()
         if (existing != null && existing.length() > 0) {
             return@withContext "file://${existing.absolutePath}"
         }
 
-        try {
-            val url = URL(sourceUrl)
-            val connection = url.openConnection() as HttpURLConnection
-            connection.connectTimeout = 10_000
-            connection.readTimeout = 15_000
-            connection.instanceFollowRedirects = true
-            connection.connect()
+        val lock = urlLocks.computeIfAbsent(hash) { Any() }
+        return@withContext synchronized(lock) {
+            // Re-check under the lock: another caller may have stored it while we were racing.
+            val cachedNow = dir.listFiles { _, name -> name.startsWith(hash) && !name.endsWith(".tmp") }?.firstOrNull()
+            if (cachedNow != null && cachedNow.length() > 0) {
+                return@synchronized "file://${cachedNow.absolutePath}"
+            }
 
-            if (connection.responseCode in 200..299) {
-                val mime = connection.contentType?.substringBefore(';') ?: ""
-                val ext = when {
-                    mime.contains("png", ignoreCase = true) || sourceUrl.contains(".png", ignoreCase = true) -> "png"
-                    mime.contains("webp", ignoreCase = true) || sourceUrl.contains(".webp", ignoreCase = true) -> "webp"
-                    mime.contains("gif", ignoreCase = true) || sourceUrl.contains(".gif", ignoreCase = true) -> "gif"
-                    else -> "jpg"
-                }
-                val cachedFile = File(dir, "$hash.$ext")
-                val tempFile = File(dir, "$hash.tmp")
-                connection.inputStream.use { input ->
-                    FileOutputStream(tempFile).use { output ->
-                        input.copyTo(output)
+            var connection: HttpURLConnection? = null
+            var tempFile: File? = null
+            try {
+                val url = URL(sourceUrl)
+                connection = url.openConnection() as HttpURLConnection
+                connection.connectTimeout = 10_000
+                connection.readTimeout = 15_000
+                connection.instanceFollowRedirects = true
+                connection.connect()
+
+                if (connection.responseCode in 200..299) {
+                    val mime = connection.contentType?.substringBefore(';') ?: ""
+                    val ext = when {
+                        mime.contains("png", ignoreCase = true) || sourceUrl.contains(".png", ignoreCase = true) -> "png"
+                        mime.contains("webp", ignoreCase = true) || sourceUrl.contains(".webp", ignoreCase = true) -> "webp"
+                        mime.contains("gif", ignoreCase = true) || sourceUrl.contains(".gif", ignoreCase = true) -> "gif"
+                        else -> "jpg"
+                    }
+                    val cachedFile = File(dir, "$hash.$ext")
+                    val tmp = File(dir, "$hash.tmp")
+                    tempFile = tmp
+                    connection.inputStream.use { input ->
+                        FileOutputStream(tmp).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    if (tmp.renameTo(cachedFile)) {
+                        enforceCacheCap()
+                        return@synchronized "file://${cachedFile.absolutePath}"
+                    } else if (cachedFile.exists()) {
+                        return@synchronized "file://${cachedFile.absolutePath}"
                     }
                 }
-                if (tempFile.renameTo(cachedFile)) {
-                    enforceCacheCap()
-                    return@withContext "file://${cachedFile.absolutePath}"
-                } else if (cachedFile.exists()) {
-                    tempFile.delete()
-                    return@withContext "file://${cachedFile.absolutePath}"
-                }
+            } catch (e: Exception) {
+                Logger.w(tag, "Failed to download thumbnail $sourceUrl: ${e.message}")
+            } finally {
+                runCatching { connection?.disconnect() }
+                // renameTo() already consumed the temp file, so this is a no-op on success.
+                tempFile?.delete()
             }
-        } catch (e: Exception) {
-            Logger.w(tag, "Failed to download thumbnail $sourceUrl: ${e.message}")
-        }
 
-        sourceUrl
+            sourceUrl
+        }
     }
 
-    private fun enforceCacheCap() {
+    internal fun enforceCacheCap() {
         try {
-            val files = dir.listFiles() ?: return
+            // Never evict a .tmp file: it may belong to an in-flight download.
+            val files = dir.listFiles { _, name -> !name.endsWith(".tmp") } ?: return
             var totalSize = files.sumOf { it.length() }
             if (totalSize <= maxCacheSizeBytes) return
 

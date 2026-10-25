@@ -22,7 +22,9 @@ object NativeRuntime {
         val ldLibraryPath: String,
         val ffmpegPath: String,
         val nodePath: String,
-        val environment: Map<String, String>
+        val environment: Map<String, String>,
+        /** True when extraction threw and the runtime contents may be incomplete. */
+        val extractionFailed: Boolean = false
     )
 
     fun ensureExtracted(context: Context): Paths = synchronized(lock) {
@@ -44,6 +46,7 @@ object NativeRuntime {
 
         val ffmpegPath = File(nativeDir, "libffmpeg.so").absolutePath
         val nodePath = File(nativeDir, "libnode.so").absolutePath
+        var extractionFailed = false
 
         if (readyMarker.exists() && usrLibDir.exists() && (usrLibDir.list()?.isNotEmpty() == true)) {
             return@synchronized Paths(
@@ -78,10 +81,14 @@ object NativeRuntime {
 
             readyMarker.createNewFile()
             Logger.d(TAG, "Native runtime extracted successfully to ${runtimeDir.absolutePath}")
+            extractionFailed = false
         } catch (e: Exception) {
             Logger.e(TAG, "Failed during native runtime extraction", e)
+            extractionFailed = true
         }
 
+        // Surface the failure instead of reporting as-if-success: callers can
+        // distinguish a working runtime from a broken one.
         Paths(
             runtimeDir = runtimeDir.absolutePath,
             usrLibDir = usrLibDir.absolutePath,
@@ -89,7 +96,8 @@ object NativeRuntime {
             ldLibraryPath = ldLibraryPath,
             ffmpegPath = ffmpegPath,
             nodePath = nodePath,
-            environment = defaultEnv
+            environment = defaultEnv,
+            extractionFailed = extractionFailed
         )
     }
 
@@ -99,10 +107,18 @@ object NativeRuntime {
             return
         }
         Logger.d(TAG, "Unzipping ${zipFile.name}...")
+        val destDirCanonical = destDir.canonicalPath + File.separator
         ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
             var entry = zis.nextEntry
             while (entry != null) {
                 val destFile = File(destDir, entry.name)
+                // Zip-slip guard: reject entries whose resolved path escapes the destination directory.
+                if (!destFile.canonicalPath.startsWith(destDirCanonical)) {
+                    Logger.w(TAG, "Skipping zip entry outside destination directory: ${entry.name}")
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                    continue
+                }
                 if (entry.isDirectory) {
                     destFile.mkdirs()
                 } else {

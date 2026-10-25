@@ -36,6 +36,9 @@ data class MediaFormat(
     /** Frames per second (video only). */
     val fps: Int? = null,
 
+    /** Video height in pixels. Typed field so ranking never parses display labels. */
+    val height: Int? = null,
+
     /** Audio sample rate string: "48kHz", "44.1kHz". Null for video-only. */
     val sampleRate: String? = null,
 

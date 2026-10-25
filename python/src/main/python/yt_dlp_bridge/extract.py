@@ -15,6 +15,23 @@ _AUTH_WALL_MARKERS = (
     "the page needs to be reloaded",
 )
 
+# Substrings of yt-dlp's DownloadError message that mean the platform is
+# throttling us (HTTP 429). UI can show a "wait and retry" state.
+_RATE_LIMIT_MARKERS = (
+    "http error 429",
+    "too many requests",
+)
+
+# Substrings of yt-dlp's DownloadError message that mean a transport-level
+# network failure (DNS, connection refused/reset, timeouts). UI can offer a retry.
+_NETWORK_MARKERS = (
+    "getaddrinfo",
+    "connection",
+    "timed out",
+    "unable to download webpage",
+    "network",
+)
+
 def warmup():
     """
     Pre-warms yt-dlp and the YouTube extractor into memory.
@@ -60,6 +77,10 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         message = str(e).lower()
         if any(marker in message for marker in _AUTH_WALL_MARKERS):
             return json.dumps({"error": "auth_wall", "detail": str(e)})
+        if any(marker in message for marker in _RATE_LIMIT_MARKERS):
+            return json.dumps({"error": "rate_limited", "detail": str(e)})
+        if any(marker in message for marker in _NETWORK_MARKERS):
+            return json.dumps({"error": "network", "detail": str(e)})
         return json.dumps({"error": "unavailable", "detail": str(e)})
     except Exception as e:
         return json.dumps({"error": "exception", "detail": str(e)})

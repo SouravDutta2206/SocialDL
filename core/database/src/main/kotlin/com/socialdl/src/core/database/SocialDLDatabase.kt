@@ -10,7 +10,7 @@ import com.socialdl.src.core.database.entity.DownloadHistoryEntity
         DownloadHistoryEntity::class
     ],
     version = 2,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class SocialDLDatabase : RoomDatabase() {
     abstract fun downloadDao(): DownloadDao

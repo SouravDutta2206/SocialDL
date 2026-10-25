@@ -13,6 +13,7 @@ import com.socialdl.src.core.model.DownloadTask
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,8 +33,15 @@ class DownloadManager @Inject constructor(
     private val downloadDao: DownloadDao,
 ) {
     private val tag = "DownloadManager"
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e ->
+            Logger.e(tag, "Uncaught error in DownloadManager event collection", e)
+        }
+    )
 
+    // Single source of truth for visible download tasks. Direct writes (enqueueDownload/cancelDownload)
+    // own lifecycle entry/exit; worker events (Running/Completed/Failed) are the other writer.
+    // The event bus itself carries no lifecycle truth — see DownloadEventBus KDoc.
     private val _activeTasks = MutableStateFlow<Map<String, DownloadTask>>(emptyMap())
     val activeTasks: StateFlow<Map<String, DownloadTask>> = _activeTasks.asStateFlow()
 
@@ -47,9 +55,9 @@ class DownloadManager @Inject constructor(
 
     private fun handleEvent(event: DownloadEvent) {
         when (event) {
-            is DownloadEvent.Queued -> {
-                _activeTasks.update { it + (event.task.id to event.task) }
-            }
+            // No-op: enqueueDownload registers the task directly in _activeTasks (see below),
+            // so the collector must not double-write it. Queued events are no longer emitted.
+            is DownloadEvent.Queued -> Unit
             is DownloadEvent.Running -> {
                 _activeTasks.update { current ->
                     val existing = current[event.taskId] ?: return@update current
@@ -72,6 +80,8 @@ class DownloadManager @Inject constructor(
                 }
             }
             is DownloadEvent.Failed -> {
+                // Failed tasks intentionally stay in the map with status FAILED so the UI shows the failure.
+                // They are dismissible via cancelDownload(taskId), which removes them from the map.
                 _activeTasks.update { current ->
                     val existing = current[event.taskId] ?: return@update current
                     val failedTask = existing.copy(
@@ -81,17 +91,9 @@ class DownloadManager @Inject constructor(
                     current + (event.taskId to failedTask)
                 }
             }
-            is DownloadEvent.Paused -> {
-                _activeTasks.update { current ->
-                    val existing = current[event.taskId] ?: return@update current
-                    current + (event.taskId to existing.copy(status = DownloadStatus.PAUSED))
-                }
-            }
-            is DownloadEvent.Cancelled -> {
-                _activeTasks.update { current ->
-                    current - event.taskId
-                }
-            }
+            // No-op: cancelDownload removes the entry directly from _activeTasks.
+            // The worker never emits Cancelled (cancellation kills it before it could).
+            is DownloadEvent.Cancelled -> Unit
         }
     }
 
@@ -163,15 +165,20 @@ class DownloadManager @Inject constructor(
             totalBytes = selectedFormat.approxSizeBytes
         )
 
+        // Register the task synchronously (before WorkManager.enqueue) so the UI never misses
+        // the Queued state even if a Running/Failed/Cancelled update arrives out of order.
+        // This direct write is the ONLY Queued registration — no Queued event is emitted;
+        // _activeTasks is the single source of truth for lifecycle entry/exit (see DownloadEventBus KDoc).
+        _activeTasks.update { it + (taskId to task) }
+
         WorkManager.getInstance(context).enqueue(workRequest)
-        eventBus.tryEmit(DownloadEvent.Queued(task))
 
         return taskId
     }
 
     fun cancelDownload(taskId: String) {
         WorkManager.getInstance(context).cancelAllWorkByTag(taskId)
+        // Direct removal — no Cancelled event is emitted; the collector no longer mirrors it.
         _activeTasks.update { it - taskId }
-        eventBus.tryEmit(DownloadEvent.Cancelled(taskId))
     }
 }

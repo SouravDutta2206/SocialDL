@@ -1,6 +1,7 @@
 package com.socialdl.src.core.ffmpeg
 
 import com.socialdl.src.core.common.util.Logger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -51,6 +52,20 @@ class FFmpegProcessExecutor @Inject constructor(
         }
 
         val errorBuffer = StringBuilder()
+        val stdoutBuffer = StringBuilder()
+
+        // Drain stdout so the child never blocks on a full pipe (which would hang waitFor() indefinitely).
+        val stdoutJob = launch(Dispatchers.IO) {
+            try {
+                process.inputStream.bufferedReader().forEachLine { line ->
+                    if (stdoutBuffer.length < 4096) {
+                        stdoutBuffer.appendLine(line)
+                    }
+                }
+            } catch (e: Exception) {
+                Logger.e(tag, "Error reading ffmpeg stdout", e)
+            }
+        }
 
         val stderrJob = launch(Dispatchers.IO) {
             try {
@@ -71,14 +86,22 @@ class FFmpegProcessExecutor @Inject constructor(
         val exitCode = withContext(Dispatchers.IO) {
             try {
                 process.waitFor()
+            } catch (e: CancellationException) {
+                Logger.d(tag, "Process wait cancelled; killing ffmpeg process")
+                process.destroyForcibly()
+                throw e
             } catch (e: Exception) {
-                Logger.w(tag, "Process wait interrupted", e)
+                Logger.w(tag, "Process wait failed", e)
                 -1
             }
         }
 
         try {
             stderrJob.join()
+        } catch (_: Exception) {
+        }
+        try {
+            stdoutJob.join()
         } catch (_: Exception) {
         }
 
@@ -95,6 +118,7 @@ class FFmpegProcessExecutor @Inject constructor(
 
         awaitClose {
             stderrJob.cancel()
+            stdoutJob.cancel()
             if (process.isAlive) {
                 Logger.d(tag, "Forcibly killing active ffmpeg process on flow cancel")
                 process.destroyForcibly()

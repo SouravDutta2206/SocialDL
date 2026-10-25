@@ -1,6 +1,7 @@
 package com.socialdl.src.extraction.instagram
 
 import com.socialdl.src.core.model.Platform
+import com.socialdl.src.extraction.api.ExtractionError
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
@@ -30,7 +31,11 @@ class InstagramExtractor @Inject constructor() : MediaExtractor {
     }
 
     override suspend fun extract(url: String): ExtractionResult {
-        // Placeholder for Phase 5 implementation
-        TODO("Phase 5: Instagram extraction via Instaloader Chaquopy bridge")
+        // Placeholder for Phase 5 implementation.
+        // Returns a typed error instead of TODO() which would throw NotImplementedError
+        // into the caller's coroutine.
+        return ExtractionResult.Error(
+            ExtractionError.ContentUnavailable("Instagram extraction is coming soon.")
+        )
     }
 }

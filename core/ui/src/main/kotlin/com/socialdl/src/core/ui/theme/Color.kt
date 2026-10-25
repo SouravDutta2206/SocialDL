@@ -45,3 +45,9 @@ val SocialDLBadgeCodecBg = Color(0xFF1E293B)      // slate-800 — codec badge b
 
 // ── Indicator ──
 val SocialDLIndicator = Color(0xFF8AB4F8)         // Blue tab indicator / active underline
+
+// ── Component-specific tokens ──
+val SocialDLAccentButton = Color(0xFF0D59C8)      // FAB / primary button blue
+val SocialDLSheetHeader = Color(0xFF353E54)       // Bottom-sheet header pill buttons
+val SocialDLBadgeDark = Color(0xFF282732)         // Batch list index badge bg
+val SocialDLToastBg = Color(0xFF1E293B)           // Toast pill background

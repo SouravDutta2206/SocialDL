@@ -1,6 +1,7 @@
 package com.socialdl.src.extraction.threads
 
 import com.socialdl.src.core.model.Platform
+import com.socialdl.src.extraction.api.ExtractionError
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
@@ -30,7 +31,11 @@ class ThreadsExtractor @Inject constructor() : MediaExtractor {
     }
 
     override suspend fun extract(url: String): ExtractionResult {
-        // Placeholder for Phase 7 implementation
-        TODO("Phase 7: Threads extraction via headless WebView pipeline")
+        // Placeholder for Phase 7 implementation.
+        // Returns a typed error instead of TODO() which would throw NotImplementedError
+        // into the caller's coroutine.
+        return ExtractionResult.Error(
+            ExtractionError.ContentUnavailable("Threads extraction is coming soon.")
+        )
     }
 }

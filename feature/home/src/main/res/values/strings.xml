@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Home screen info/error copy (R-F.2: extracted from HomeViewModel so the
+         wording lives in resources and can be localized later). -->
+    <string name="home_error_unsupported_link">Unsupported link. Please enter a valid YouTube, Instagram, Twitter, or Threads URL.</string>
+    <string name="home_error_no_extractor">No extractor registered for %1$s</string>
+    <string name="home_error_presets_failed">Failed to load presets: %1$s</string>
+    <string name="home_info_loaded">Loaded: %1$s</string>
+    <string name="home_error_extraction">Extraction error: %1$s</string>
+</resources>

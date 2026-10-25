@@ -43,3 +43,11 @@ data class MediaItem(
     val isPlaceholder: Boolean
         get() = videoFormats.any { it.isPlaceholder } || audioFormats.any { it.isPlaceholder }
 }
+
+/**
+ * Stable identity key for LazyColumn rows and download-task lookups.
+ * Carousel items use their carouselIndex; non-carousel items fall back to the provided
+ * list index (or null). ALWAYS build both sides of a lookup with this helper so the
+ * formulas cannot drift — desynced keys corrupt LazyColumn identity and batch selection.
+ */
+fun MediaItem.uiKey(fallbackIndex: Int? = null): String = "${sourceUrl}_${carouselIndex ?: fallbackIndex}"
