@@ -125,7 +125,14 @@ class YoutubeExtractor @Inject constructor(
         }
 
         val nodeDir = nodeBinaryProvider.binaryDir()
-        Logger.d(tag, "Extracting YouTube metadata for $normalizedUrl (nodeDir=$nodeDir)")
+        // the extracted native runtime paths are owned by NativeRuntime on
+        // the Kotlin side — passed to the bridge so Python never re-derives
+        // filesDir or rebuilds LD_LIBRARY_PATH with drift-prone merge semantics.
+        val runtimePaths = nodeBinaryProvider.resolveRuntime()
+        Logger.d(
+            tag,
+            "Extracting YouTube metadata for $normalizedUrl (nodeDir=$nodeDir, binDir=${runtimePaths?.binDir})"
+        )
 
         return try {
             // §2.6 bridge: decrypt the stored jar into a throwaway cacheDir file for
@@ -137,7 +144,9 @@ class YoutubeExtractor @Inject constructor(
                     function = "extract",
                     normalizedUrl,
                     cookieFilePath,
-                    nodeDir
+                    nodeDir,
+                    runtimePaths?.binDir,
+                    runtimePaths?.ldLibraryPath
                 ) { it }
             }
 

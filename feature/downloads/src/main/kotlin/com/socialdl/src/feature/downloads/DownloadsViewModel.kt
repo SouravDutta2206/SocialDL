@@ -10,6 +10,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.MediaStorageUtils
+import com.socialdl.src.core.common.util.UiMessage
+import com.socialdl.src.core.common.util.UiMessageBus
 import com.socialdl.src.core.database.dao.DownloadDao
 import com.socialdl.src.core.database.entity.DownloadHistoryEntity
 import com.socialdl.src.core.database.entity.DownloadJobEntity
@@ -21,6 +23,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -50,9 +53,10 @@ class DownloadsViewModel @Inject constructor(
     private val refreshTrigger = MutableStateFlow(0)
     private val isPurgingStale = AtomicBoolean(false)
 
-    // One-shot user message (e.g. deletion failures) consumed by the Screen as a toast.
-    private val _userMessage = MutableStateFlow<String?>(null)
-    val userMessage: StateFlow<String?> = _userMessage.asStateFlow()
+    // One-shot user messages (deletion failures, download completions) posted to a
+    // shared bus consumed by the Screen as styled toasts — same mechanism as Home.
+    private val messageBus = UiMessageBus()
+    val messages: SharedFlow<UiMessage> = messageBus.events
 
     // Debounce handler for MediaStore change notifications (they can fire in rapid bursts).
     private val handler = Handler(Looper.getMainLooper())
@@ -88,7 +92,7 @@ class DownloadsViewModel @Inject constructor(
         viewModelScope.launch {
             eventBus.events.collect { event ->
                 if (event is DownloadEvent.Completed) {
-                    _userMessage.value = "Download completed: ${event.title}"
+                    messageBus.post("Download completed: ${event.title}")
                 }
             }
         }
@@ -168,12 +172,6 @@ class DownloadsViewModel @Inject constructor(
         }
     }
 
-    // One-shot user message declared at the top of the class (before init).
-
-    fun clearUserMessage() {
-        _userMessage.value = null
-    }
-
     fun deleteHistory(item: DownloadHistoryEntity) {
         deleteHistory(item.id)
     }
@@ -190,7 +188,11 @@ class DownloadsViewModel @Inject constructor(
                 // silent dangling entry — the UI shows a toast and the record remains
                 // dismissible (and a later retry / stale purge can still clean it up).
                 Logger.w(tag, "File deletion failed for history $id; keeping DB record")
-                _userMessage.value = "Deleted entry but file could not be removed"
+                // Truthful copy: the ENTRY was NOT deleted — only the file removal failed.
+                messageBus.post(
+                    "Could not delete the file — the download entry was kept",
+                    isError = true
+                )
             }
         }
     }

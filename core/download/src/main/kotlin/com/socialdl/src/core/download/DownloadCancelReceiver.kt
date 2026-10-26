@@ -47,7 +47,7 @@ class DownloadCancelReceiver : BroadcastReceiver() {
             }
             return PendingIntent.getBroadcast(
                 context,
-                jobId.hashCode(),
+                jobIdNotificationId(jobId),
                 intent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )

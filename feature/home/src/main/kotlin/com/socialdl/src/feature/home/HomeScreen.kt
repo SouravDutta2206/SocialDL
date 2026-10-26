@@ -56,6 +56,7 @@ import com.socialdl.src.core.ui.component.MediaCard
 import com.socialdl.src.core.ui.component.PillSearchBar
 import com.socialdl.src.core.ui.component.SocialDLToastHost
 import com.socialdl.src.core.ui.component.ToastMessage
+import com.socialdl.src.core.ui.component.ToastType
 import com.socialdl.src.core.ui.theme.SocialDLAccent
 import com.socialdl.src.core.ui.theme.SocialDLAccentButton
 import com.socialdl.src.core.ui.theme.SocialDLBg
@@ -91,10 +92,14 @@ fun HomeScreen(
         }
     }
 
-    LaunchedEffect(uiState.infoMessage) {
-        uiState.infoMessage?.let { msg ->
-            toastMessage = ToastMessage(message = msg)
-            viewModel.clearInfoMessage()
+    LaunchedEffect(Unit) {
+        // One-shot messages from the VM (toasts); replay=0 so nothing re-shows
+        // after process restore or rotation.
+        viewModel.messages.collect { msg ->
+            toastMessage = ToastMessage(
+                message = msg.message,
+                type = if (msg.isError) ToastType.ERROR else ToastType.SUCCESS
+            )
         }
     }
 

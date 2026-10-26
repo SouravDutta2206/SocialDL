@@ -28,9 +28,15 @@ class ChunkedDownloader @Inject constructor(
 
     private val streamingClient by lazy {
         okHttpClient.newBuilder()
-            .connectTimeout(60, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
-            .writeTimeout(120, TimeUnit.SECONDS)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            // A media download is a continuous stream: any 15s with ZERO bytes
+            // means the path is dead (wifi "associated" but unroutable, dead
+            // radio, dropped NAT mapping). Waiting minutes for a huge socket
+            // timeout is what produced the "download hangs on network loss"
+            // state; the watchdog handles radio loss instantly, this handles
+            // the silently-stalled cases it can't see.
+            .readTimeout(15, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
     }

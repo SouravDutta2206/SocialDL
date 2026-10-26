@@ -37,6 +37,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.flow.collect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -58,6 +62,9 @@ import com.socialdl.src.core.common.util.toHumanReadableSize
 import com.socialdl.src.core.database.entity.DownloadHistoryEntity
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadStatus
+import com.socialdl.src.core.ui.component.SocialDLToastHost
+import com.socialdl.src.core.ui.component.ToastMessage
+import com.socialdl.src.core.ui.component.ToastType
 import com.socialdl.src.core.ui.theme.SocialDLAccent
 import com.socialdl.src.core.ui.theme.SocialDLBg
 import com.socialdl.src.core.ui.theme.SocialDLCard
@@ -73,15 +80,18 @@ fun DownloadsScreen(
     viewModel: DownloadsViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val userMessage by viewModel.userMessage.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
 
-    // Surface one-shot messages (e.g. deletion failures) as a system toast.
-    LaunchedEffect(userMessage) {
-        userMessage?.let {
-            Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
-            viewModel.clearUserMessage()
+    LaunchedEffect(Unit) {
+        // One-shot messages from the VM (deletion failures, download completions)
+        // surfaced as styled app toasts — same mechanism and look as Home.
+        viewModel.messages.collect { msg ->
+            toastMessage = ToastMessage(
+                message = msg.message,
+                type = if (msg.isError) ToastType.ERROR else ToastType.SUCCESS
+            )
         }
     }
 
@@ -238,6 +248,12 @@ fun DownloadsScreen(
                 }
             }
         }
+
+        // Floating Toast (styled pill, same as Home — replaces the old system toast)
+        SocialDLToastHost(
+            toast = toastMessage,
+            onDismiss = { toastMessage = null }
+        )
     }
 }
 
