@@ -48,6 +48,7 @@ class MediaStoreExporter @Inject constructor(
         author: String?,
         container: String,
         isAudio: Boolean,
+        isImage: Boolean = false,
         onPendingRowCreated: suspend (Uri) -> Boolean
     ): Uri? {
         val resolver = context.contentResolver
@@ -67,23 +68,37 @@ class MediaStoreExporter @Inject constructor(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(
                     MediaStore.MediaColumns.RELATIVE_PATH,
-                    if (isAudio) "${Environment.DIRECTORY_MUSIC}/SocialDL" else "${Environment.DIRECTORY_MOVIES}/SocialDL"
+                    when {
+                        isImage -> "${Environment.DIRECTORY_PICTURES}/SocialDL"
+                        isAudio -> "${Environment.DIRECTORY_MUSIC}/SocialDL"
+                        else -> "${Environment.DIRECTORY_MOVIES}/SocialDL"
+                    }
                 )
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
         }
 
-        val collection = if (isAudio) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            } else {
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        val collection = when {
+            isImage -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                } else {
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                }
             }
-        } else {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            } else {
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            isAudio -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                } else {
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+                }
+            }
+            else -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                } else {
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                }
             }
         }
 

@@ -33,6 +33,8 @@ open class PythonEngine @Inject constructor(
      * @param function The function name to call.
      * @param args Positional arguments to pass to the function.
      * @param timeoutMs Timeout in milliseconds (default 60 seconds).
+     * @param redactArgs When true, arguments are omitted from the log line — use for
+     *   credential-bearing calls (Instagram login). Never log secrets.
      * @param parse Function to parse the returned JSON string into type [T].
      */
     open suspend fun <T> run(
@@ -40,12 +42,17 @@ open class PythonEngine @Inject constructor(
         function: String,
         vararg args: Any?,
         timeoutMs: Long = 60_000L,
+        redactArgs: Boolean = false,
         parse: (String) -> T
     ): T = withContext(pythonDispatcher) {
         withTimeout(timeoutMs) {
             runInterruptible {
                 try {
-                    Logger.d(tag, "Invoking $module.$function(${args.joinToString()})")
+                    if (redactArgs) {
+                        Logger.d(tag, "Invoking $module.$function(<redacted>)")
+                    } else {
+                        Logger.d(tag, "Invoking $module.$function(${args.joinToString()})")
+                    }
                     val py = Python.getInstance()
                     val pyModule = py.getModule(module)
                     val pyFunction = pyModule[function]

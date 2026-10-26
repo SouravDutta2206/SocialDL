@@ -15,12 +15,14 @@ fun NavController.navigateToSettings(navOptions: NavOptions? = null) {
 fun NavGraphBuilder.settingsScreen(
     onNavigateBack: () -> Unit,
     onNavigateToCookieCapture: () -> Unit = {},
+    onNavigateToInstagramCookieCapture: () -> Unit = {},
     appVersion: String = ""
 ) {
     composable(route = SETTINGS_ROUTE) {
         SettingsScreen(
             onNavigateBack = onNavigateBack,
             onNavigateToCookieCapture = onNavigateToCookieCapture,
+            onNavigateToInstagramCookieCapture = onNavigateToInstagramCookieCapture,
             appVersion = appVersion
         )
     }

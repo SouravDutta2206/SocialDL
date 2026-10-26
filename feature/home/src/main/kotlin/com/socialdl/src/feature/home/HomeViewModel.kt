@@ -35,10 +35,17 @@ data class HomeUiState(
     val mediaItems: List<MediaItem> = emptyList(),
     /**
      * Set when the last extraction hit `ExtractionError.AuthWallDetected` — drives
-     * the "Sign in with YouTube" card CTA (§2.6 recapture flow). Cleared on the next
-     * extraction attempt, sign-in completion, or failure of another kind.
+     * the "Sign in with <platform>" card CTA (§2.6 recapture flow). Cleared on the
+     * next extraction attempt, sign-in completion, or failure of another kind.
      */
     val authWallUrl: String? = null,
+
+    /**
+     * False for single-format platforms (Instagram/Twitter/Threads): the card
+     * action downloads the best format directly instead of opening the picker.
+     * Mirrors the extractor's [com.socialdl.src.extraction.api.PlatformCapabilities].
+     */
+    val showsFormatPicker: Boolean = true,
 )
 
 @HiltViewModel
@@ -147,6 +154,31 @@ class HomeViewModel @Inject constructor(
         return enqueued
     }
 
+    /**
+     * Single-tap download for platforms whose extractor sets
+     * `showsFormatPicker = false` (Instagram/Twitter/Threads). "Best available" is
+     * already decided at extraction time — one format per media element — so the UI
+     * never renders a chooser for these sources.
+     */
+    fun startDirectDownload(item: MediaItem) {
+        val format = item.videoFormats.firstOrNull()
+            ?: item.imageFormats.firstOrNull()
+            ?: item.audioFormats.firstOrNull()
+        if (format == null) {
+            messageBus.post("This post has no downloadable media", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                downloadManager.enqueueDownload(mediaItem = item, selectedFormat = format)
+                messageBus.post("Download queued: ${item.title} (${format.label})")
+            } catch (e: Exception) {
+                Logger.e(tag, "Failed to enqueue direct download for '${item.title}'", e)
+                messageBus.post("Couldn't queue download: ${e.message ?: "unknown error"}", isError = true)
+            }
+        }
+    }
+
     fun onQueryChange(newQuery: String) {
         val platform = if (newQuery.isNotBlank()) {
             UrlPlatformResolver.resolvePlatform(newQuery)
@@ -187,6 +219,7 @@ class HomeViewModel @Inject constructor(
                             current.copy(
                                 isLoading = false,
                                 query = "", // Clear search bar on successful extraction
+                                showsFormatPicker = extractor.capabilities.showsFormatPicker,
                                 // Defense-in-depth: guarantee unique (sourceUrl, carouselIndex) pairs so
                                 // LazyColumn keys can never collide.
                                 mediaItems = result.items.distinctBy { "${it.sourceUrl}_${it.carouselIndex}" }
@@ -202,14 +235,19 @@ class HomeViewModel @Inject constructor(
                     is ExtractionResult.Error -> {
                         val errMsg = result.cause.message
                         Logger.w(tag, "Extraction failed for $url: $errMsg")
-                        // §2.6 recapture flow: an auth wall on a YouTube card means a
-                        // signed-in session may exist now — offer the sign-in CTA that
-                        // auto-retries this same URL once capture completes.
+                        // §2.6 recapture flow: only YouTube surfaces the sign-in card.
+                        // Instagram auth walls are resolved from Settings → Instagram login;
+                        // Home stays a pure search surface (product decision, Oct 2026).
+                        val authWallPlatform =
+                            (result.cause as? ExtractionError.AuthWallDetected)?.platform
                         _uiState.update {
                             it.copy(
                                 isLoading = false,
                                 mediaItems = emptyList(),
-                                authWallUrl = if (result.cause is ExtractionError.AuthWallDetected) url else null
+                                showsFormatPicker = true,
+                                authWallUrl = if (authWallPlatform != null &&
+                                    authWallPlatform != Platform.INSTAGRAM
+                                ) url else null
                             )
                         }
                         messageBus.post(errMsg ?: "Extraction failed", isError = true)
@@ -231,21 +269,21 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Called when the cookie-capture screen returned to Home carrying a
-     * `COOKIE_CAPTURE_RESULT_KEY = true` result (§2.6): re-run extraction on the
-     * URL that originally hit the auth wall, automatically — no manual round-trip.
+     * Called when the YouTube cookie-capture route returned to Home carrying
+     * `COOKIE_CAPTURE_RESULT_KEY` = true: re-run extraction on the URL that
+     * originally hit the wall, automatically — no manual round-trip.
      */
-    fun onYouTubeSignInCompleted() {
+    fun onAuthSignInCompleted() {
         val pending = _uiState.value.authWallUrl ?: return
         _uiState.update { it.copy(authWallUrl = null) }
         val extractor = extractorRegistry.resolve(pending)
         if (extractor == null) {
             // Don't silently drop the pending retry — tell the user to re-paste.
             Logger.w(tag, "Sign-in completed but no extractor resolved for $pending")
-            messageBus.post("Signed in — paste the video link again to download")
+            messageBus.post("Signed in — paste the link again to download")
             return
         }
-        Logger.i(tag, "YouTube sign-in completed; auto-retrying extraction of $pending")
+        Logger.i(tag, "Sign-in completed; auto-retrying extraction of $pending")
         extractMedia(extractor, pending)
     }
 }

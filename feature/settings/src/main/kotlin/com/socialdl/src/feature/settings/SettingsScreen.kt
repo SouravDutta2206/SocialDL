@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
@@ -59,32 +60,42 @@ import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 
 /** Which SettingsRow section is currently expanded (null = none). */
-private enum class SettingsSection { GENERAL, FOLDERS, COOKIES, LOGS, ABOUT }
+private enum class SettingsSection { GENERAL, FOLDERS, COOKIES, INSTAGRAM, LOGS, ABOUT }
 
 @Composable
 fun SettingsScreen(
     onNavigateBack: () -> Unit,
     onNavigateToCookieCapture: () -> Unit = {},
+    onNavigateToInstagramCookieCapture: () -> Unit = {},
     appVersion: String = "",
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val cookiesUiState by viewModel.cookiesUiState.collectAsStateWithLifecycle()
+    val instagramCookiesUiState by viewModel.instagramCookiesUiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     var expandedSection by remember { mutableStateOf<SettingsSection?>(null) }
     var showClearCookiesDialog by remember { mutableStateOf(false) }
+    var showClearInstagramCookiesDialog by remember { mutableStateOf(false) }
 
     // No manual cookie refresh needed: a capture round-trip bumps the
     // LAST_REFRESHED DataStore key, which re-evaluates cookiesUiState
-    // (hasYoutubeCookies()) automatically on the IO dispatcher.
+    // automatically on the IO dispatcher.
 
     // Manual cookies.txt import picker (§2.6 fallback)
     val cookiesFilePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let(viewModel::importCookies)
+    }
+
+    // Manual cookies.txt import fallback for gallery-dl.
+    val instagramCookiesFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let(viewModel::importInstagramCookies)
     }
 
     // Back collapses the expanded panel first.
@@ -215,8 +226,8 @@ fun SettingsScreen(
                 item {
                     SettingsRow(
                         icon = Icons.Default.Cookie,
-                        title = "Cookies",
-                        subtitle = "Import cookies.txt, Browser cookies sync, Member access",
+                        title = "YouTube cookies",
+                        subtitle = "Sign in with WebView, Import cookies.txt, Member access",
                         expanded = expandedSection == SettingsSection.COOKIES,
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -235,6 +246,32 @@ fun SettingsScreen(
                             onSignIn = onNavigateToCookieCapture,
                             onImport = { cookiesFilePicker.launch(arrayOf("*/*")) },
                             onClear = { showClearCookiesDialog = true }
+                        )
+                    }
+                }
+
+                item {
+                    SettingsRow(
+                        icon = Icons.Default.AccountCircle,
+                        title = "Instagram cookies",
+                        subtitle = "Sign in with WebView, Private posts and reels",
+                        expanded = expandedSection == SettingsSection.INSTAGRAM,
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            expandedSection =
+                                if (expandedSection == SettingsSection.INSTAGRAM) null
+                                else SettingsSection.INSTAGRAM
+                        }
+                    )
+                }
+                if (expandedSection == SettingsSection.INSTAGRAM) {
+                    item {
+                        InstagramCookiesSettingsPanel(
+                            present = instagramCookiesUiState.present,
+                            lastRefreshedAt = instagramCookiesUiState.lastRefreshedAt,
+                            onSignIn = onNavigateToInstagramCookieCapture,
+                            onImport = { instagramCookiesFilePicker.launch(arrayOf("*/*")) },
+                            onClear = { showClearInstagramCookiesDialog = true }
                         )
                     }
                 }
@@ -285,10 +322,24 @@ fun SettingsScreen(
     // §2.6: Clear cookies is a destructive action — confirmation dialog first.
     if (showClearCookiesDialog) {
         ClearCookiesConfirmDialog(
+            title = "Clear YouTube cookies?",
+            text = "Age-restricted and member-only downloads will stop working until you sign in again. Encrypted cookies are deleted from this device.",
             onDismiss = { showClearCookiesDialog = false },
             onConfirm = {
                 showClearCookiesDialog = false
                 viewModel.clearCookies()
+            }
+        )
+    }
+
+    if (showClearInstagramCookiesDialog) {
+        ClearCookiesConfirmDialog(
+            title = "Clear Instagram cookies?",
+            text = "Private posts and reels will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
+            onDismiss = { showClearInstagramCookiesDialog = false },
+            onConfirm = {
+                showClearInstagramCookiesDialog = false
+                viewModel.clearInstagramCookies()
             }
         )
     }
@@ -539,17 +590,90 @@ private fun CookiesSettingsPanel(
     }
 }
 
+/** Phase 5: Instagram cookies are a Netscape jar consumed by gallery-dl. */
+@Composable
+private fun InstagramCookiesSettingsPanel(
+    present: Boolean,
+    lastRefreshedAt: Long?,
+    onSignIn: () -> Unit,
+    onImport: () -> Unit,
+    onClear: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(SocialDLBg)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = when {
+                present && lastRefreshedAt != null ->
+                    "Signed in · refreshed ${relativeCookieAge(lastRefreshedAt)}"
+                present -> "Signed in"
+                else -> "Not signed in"
+            },
+            style = MaterialTheme.typography.titleSmall,
+            color = SocialDLOnSurface
+        )
+        Text(
+            text = if (present) {
+                "Private posts and reels resolve with these cookies. The jar is encrypted at rest and consumed by gallery-dl."
+            } else {
+                "Sign in once with the WebView; two-factor accounts are supported. SocialDL never sees your password."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = SocialDLOnSurfaceVariant
+        )
+
+        Button(
+            onClick = onSignIn,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = SocialDLAccent,
+                contentColor = SocialDLOnSurface
+            )
+        ) {
+            Text(if (present) "Sign in again" else "Sign in with Instagram")
+        }
+
+        OutlinedButton(
+            onClick = onImport,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text("Import cookies.txt")
+        }
+
+        if (present) {
+            TextButton(
+                onClick = onClear,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Clear cookies",
+                    color = SocialDLAccent
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun ClearCookiesConfirmDialog(
+    title: String,
+    text: String,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Clear YouTube cookies?") },
+        title = { Text(title) },
         text = {
             Text(
-                "Age-restricted and member-only downloads will stop working until you sign in again. Encrypted cookies are deleted from this device.",
+                text,
                 style = MaterialTheme.typography.bodySmall
             )
         },

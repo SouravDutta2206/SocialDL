@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
@@ -108,7 +109,9 @@ fun BatchDownloadBottomSheet(
         val selectedPairs = items.mapIndexedNotNull { index, item ->
             val key = item.uiKey(fallbackIndex = index)
             if (selectedUrls.contains(key)) {
-                val bestFormat = item.videoFormats.firstOrNull() ?: item.audioFormats.firstOrNull()
+                val bestFormat = item.videoFormats.firstOrNull()
+                    ?: item.imageFormats.firstOrNull()
+                    ?: item.audioFormats.firstOrNull()
                 bestFormat?.let { Pair(item, it) }
             } else {
                 null
@@ -191,7 +194,9 @@ fun BatchDownloadBottomSheet(
                 ) { index, item ->
                     val key = item.uiKey(fallbackIndex = index)
                     val isChecked = selectedUrls.contains(key)
-                    val defaultPreset = item.videoFormats.firstOrNull() ?: item.audioFormats.firstOrNull()
+                    val defaultPreset = item.videoFormats.firstOrNull()
+                        ?: item.imageFormats.firstOrNull()
+                        ?: item.audioFormats.firstOrNull()
 
                     BatchItemRow(
                         index = item.carouselIndex ?: (index + 1),
@@ -323,9 +328,13 @@ private fun BatchItemRow(
                 }
             }
 
-            // Right Type Icon (Video/Audio)
+            // Right Type Icon (Video/Image/Audio)
             Icon(
-                imageVector = if (item.videoFormats.isNotEmpty()) Icons.Default.Videocam else Icons.Default.Audiotrack,
+                imageVector = when {
+                    item.videoFormats.isNotEmpty() -> Icons.Default.Videocam
+                    item.imageFormats.isNotEmpty() -> Icons.Default.Image
+                    else -> Icons.Default.Audiotrack
+                },
                 contentDescription = null,
                 tint = SocialDLOnSurfaceVariant,
                 modifier = Modifier
