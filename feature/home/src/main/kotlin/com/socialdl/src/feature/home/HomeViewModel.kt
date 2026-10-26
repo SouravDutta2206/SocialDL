@@ -5,6 +5,7 @@ import androidx.annotation.StringRes
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.socialdl.src.core.common.util.Logger
+import com.socialdl.src.core.common.util.UiMessageBus
 import com.socialdl.src.core.download.DownloadManager
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
@@ -20,9 +21,9 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -30,7 +31,6 @@ import javax.inject.Inject
 data class HomeUiState(
     val query: String = "",
     val isLoading: Boolean = false,
-    val infoMessage: String? = null,
     val detectedPlatform: Platform? = null,
     val mediaItems: List<MediaItem> = emptyList(),
     /**
@@ -54,6 +54,10 @@ class HomeViewModel @Inject constructor(
     // string-build time. A deeper UiText-based redesign is deferred (see plan R-F.2).
     private fun stringRes(@StringRes resId: Int, vararg args: Any): String =
         appContext.getString(resId, *args)
+
+    /** One-shot user messages (toasts); replaces the old UiState.infoMessage field. */
+    private val messageBus = UiMessageBus()
+    val messages = messageBus.events
 
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
@@ -91,9 +95,10 @@ class HomeViewModel @Inject constructor(
                     }
                     is ExtractionResult.Error -> {
                         _resolvingItemId.value = null
-                        _uiState.update {
-                            it.copy(infoMessage = stringRes(R.string.home_error_presets_failed, result.cause.message))
-                        }
+                        messageBus.post(
+                            stringRes(R.string.home_error_presets_failed, result.cause.message),
+                            isError = true
+                        )
                     }
                 }
             } else {
@@ -163,12 +168,10 @@ class HomeViewModel @Inject constructor(
                 extractMedia(extractor, trimmed)
             } else {
                 Logger.w(tag, "submitQuery: url='$trimmed' platform=$platform but no extractor found")
-                _uiState.update { it.copy(infoMessage = stringRes(R.string.home_error_no_extractor, platform)) }
+                messageBus.post(stringRes(R.string.home_error_no_extractor, platform), isError = true)
             }
         } else {
-            _uiState.update {
-                it.copy(infoMessage = stringRes(R.string.home_error_unsupported_link))
-            }
+            messageBus.post(stringRes(R.string.home_error_unsupported_link), isError = true)
         }
     }
 
@@ -186,13 +189,15 @@ class HomeViewModel @Inject constructor(
                                 query = "", // Clear search bar on successful extraction
                                 // Defense-in-depth: guarantee unique (sourceUrl, carouselIndex) pairs so
                                 // LazyColumn keys can never collide.
-                                mediaItems = result.items.distinctBy { "${it.sourceUrl}_${it.carouselIndex}" },
-                                infoMessage = stringRes(
-                                    R.string.home_info_loaded,
-                                    result.items.firstOrNull()?.title ?: "media"
-                                )
+                                mediaItems = result.items.distinctBy { "${it.sourceUrl}_${it.carouselIndex}" }
                             )
                         }
+                        messageBus.post(
+                            stringRes(
+                                R.string.home_info_loaded,
+                                result.items.firstOrNull()?.title ?: "media"
+                            )
+                        )
                     }
                     is ExtractionResult.Error -> {
                         val errMsg = result.cause.message
@@ -204,10 +209,10 @@ class HomeViewModel @Inject constructor(
                             it.copy(
                                 isLoading = false,
                                 mediaItems = emptyList(),
-                                infoMessage = errMsg,
                                 authWallUrl = if (result.cause is ExtractionError.AuthWallDetected) url else null
                             )
                         }
+                        messageBus.post(errMsg ?: "Extraction failed", isError = true)
                     }
                 }
             } catch (e: CancellationException) {
@@ -215,18 +220,14 @@ class HomeViewModel @Inject constructor(
             } catch (e: Exception) {
                 Logger.e(tag, "Unexpected error extracting $url", e)
                 _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        mediaItems = emptyList(),
-                        infoMessage = stringRes(R.string.home_error_extraction, e.message ?: "unknown")
-                    )
+                    it.copy(isLoading = false, mediaItems = emptyList())
                 }
+                messageBus.post(
+                    stringRes(R.string.home_error_extraction, e.message ?: "unknown"),
+                    isError = true
+                )
             }
         }
-    }
-
-    fun clearInfoMessage() {
-        _uiState.update { it.copy(infoMessage = null) }
     }
 
     /**
@@ -241,7 +242,7 @@ class HomeViewModel @Inject constructor(
         if (extractor == null) {
             // Don't silently drop the pending retry — tell the user to re-paste.
             Logger.w(tag, "Sign-in completed but no extractor resolved for $pending")
-            _uiState.update { it.copy(infoMessage = "Signed in — paste the video link again to download") }
+            messageBus.post("Signed in — paste the video link again to download")
             return
         }
         Logger.i(tag, "YouTube sign-in completed; auto-retrying extraction of $pending")

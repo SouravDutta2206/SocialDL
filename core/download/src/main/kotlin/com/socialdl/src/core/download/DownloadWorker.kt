@@ -282,7 +282,14 @@ class DownloadWorker @AssistedInject constructor(
         var effectiveVideoChunkSize = job.videoChunkSize
         var effectiveAudioChunkSize = job.audioChunkSize
         var effectiveMuxStrategy = job.muxStrategy?.let { strategy ->
-            runCatching { MuxStrategy.valueOf(strategy) }.getOrNull()
+            // Unparseable stored value must NOT silently fall through to a null
+            // strategy: buildMuxArgs(null) transcodes audio instead of copying.
+            // REMUX_COPY (c:v copy) is the closest-to-intent recovery.
+            runCatching { MuxStrategy.valueOf(strategy) }
+                .getOrElse {
+                    Logger.w(tag, "[$jobId] Unparseable stored muxStrategy '$strategy' — defaulting to REMUX_COPY")
+                    MuxStrategy.REMUX_COPY
+                }
         }
         var effectiveContainer = job.container
 

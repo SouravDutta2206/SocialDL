@@ -58,40 +58,18 @@ _NETWORK_MARKERS = (
     "network",
 )
 
-def _locate_native_runtime():
-    """Finds the Kotlin-side native runtime (NativeRuntime.ensureExtracted output).
-
-    Our module is imported from <filesDir>/chaquopy/AssetFinder/app/<pkg>/..., so
-    walking up to the directory literally named 'files' recovers filesDir without
-    relying on TMPDIR/HOME being set in the Chaquopy process env.
-    Returns (bin_dir, usr_lib) or (None, None).
-    """
-    try:
-        module_dir = os.path.dirname(os.path.abspath(__file__))
-        d = module_dir
-        for _ in range(6):
-            d = os.path.dirname(d)
-            if os.path.basename(d) == "files":
-                native_runtime = os.path.join(d, "native_runtime")
-                bin_dir = os.path.join(native_runtime, "bin")
-                usr_lib = os.path.join(native_runtime, "usr", "lib")
-                if os.path.isdir(bin_dir) and os.path.isdir(usr_lib):
-                    return bin_dir, usr_lib
-                break
-    except Exception:
-        pass
-    return None, None
-
-
-def _resolve_node_runtime(node_dir):
+def _resolve_node_runtime(node_dir, native_bin_dir):
     """Finds the bundled Node binary for yt-dlp's js_runtimes option, or None.
 
     Preference order: NativeRuntime's bin/node symlink (already exec-proven by the
     boot smoke test) → nativeLibraryDir/libnode.so → `node` on PATH (desktop/dev).
+
+    Both directories are passed in by the Kotlin side ([NativeRuntime.Paths.binDir]
+    and nativeLibraryDir) — the path contract has ONE owner, so Python no longer
+    re-derives filesDir by walking parent directories.
     """
-    bin_dir, _ = _locate_native_runtime()
-    if bin_dir:
-        candidate = os.path.join(bin_dir, "node")
+    if native_bin_dir:
+        candidate = os.path.join(native_bin_dir, "node")
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     if node_dir:
@@ -101,15 +79,18 @@ def _resolve_node_runtime(node_dir):
     return shutil.which("node")
 
 
-def _ensure_native_env(node_dir):
+def _ensure_native_env(ld_library_path):
     """Spawns of node/ffmpeg must see the support libraries extracted from
-    libnode.zip.so (e.g. libz.so.1) — mirrors NativeRuntime.environment()."""
-    _, usr_lib = _locate_native_runtime()
-    if not usr_lib:
+    libnode.zip.so (e.g. libz.so.1).
+
+    Kotlin's [NativeRuntime.Paths.ldLibraryPath] is the single source of truth —
+    it already contains usr/lib + nativeLibraryDir + /system/lib64. Previously
+    Python re-derived the same value with subtly different merge semantics.
+    """
+    if not ld_library_path:
         return
-    ld = usr_lib + os.pathsep + (node_dir or "") + os.pathsep + "/system/lib64"
     existing = os.environ.get("LD_LIBRARY_PATH")
-    os.environ["LD_LIBRARY_PATH"] = ld + (os.pathsep + existing if existing else "")
+    os.environ["LD_LIBRARY_PATH"] = ld_library_path + (os.pathsep + existing if existing else "")
     os.environ["OPENSSL_CONF"] = "/dev/null"
 
 
@@ -130,14 +111,14 @@ _JS_DEGRADATION_MARKERS = (
 _JS_RUNTIME_PROBE_CACHE = {}
 
 
-def _probe_js_runtime(node_dir):
-    """Resolves + exec-verifies the bundled node runtime. Memoized per node_dir
-    (a §2.5.2 hot-swap changes the path, which re-probes).
+def _probe_js_runtime(node_dir, native_bin_dir):
+    """Resolves + exec-verifies the bundled node runtime. Memoized per resolved
+    directory pair (a §2.5.2 hot-swap changes the path, which re-probes).
 
     Returns a dict: runtime (name or None), path, version, exec_ok, min_supported
     (yt-dlp's own minimum for node), ejs_package (solver distribution present).
     """
-    cache_key = node_dir or ""
+    cache_key = (node_dir or "") + "|" + (native_bin_dir or "")
     cached = _JS_RUNTIME_PROBE_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -162,7 +143,7 @@ def _probe_js_runtime(node_dir):
     except Exception:
         pass
 
-    node_bin = _resolve_node_runtime(node_dir)
+    node_bin = _resolve_node_runtime(node_dir, native_bin_dir)
     if node_bin:
         diag["runtime"] = "node"
         diag["path"] = node_bin
@@ -207,10 +188,14 @@ def warmup():
     except Exception:
         pass
 
-def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None) -> str:
+def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None,
+            native_bin_dir: str | None = None, native_ld_library_path: str | None = None) -> str:
     """
     Extracts metadata and direct stream URLs for YouTube videos/playlists via yt-dlp.
     Metadata only (skip_download=True) - byte downloads and muxing happen in Kotlin/FFmpeg.
+
+    `native_bin_dir` / `native_ld_library_path` come from the Kotlin side's
+    [NativeRuntime.Paths] so the native runtime contract has a single owner.
     """
     ydl_opts = {
         "quiet": True,
@@ -221,16 +206,16 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         "cookiefile": cookiefile,    # decrypted temp path if available
     }
 
-    node_bin = _resolve_node_runtime(node_dir)
+    node_bin = _resolve_node_runtime(node_dir, native_bin_dir)
     if node_bin:
         # yt-dlp 2026.10+ enables ONLY deno by default (utils/_jsruntime.py); node
         # must be registered explicitly via the `js_runtimes` option, else the
         # n/sig challenges fail and every GVS format is dropped. The path accepts
         # a direct file path, so Android's nativeLibraryDir/libnode.so works as-is.
         ydl_opts["js_runtimes"] = {"node": {"path": node_bin}}
-        _ensure_native_env(node_dir)
+        _ensure_native_env(native_ld_library_path)
 
-    js_diag = _probe_js_runtime(node_dir)
+    js_diag = _probe_js_runtime(node_dir, native_bin_dir)
     debug_logger = _DebugLogCollector()
     ydl_opts["logger"] = debug_logger
 

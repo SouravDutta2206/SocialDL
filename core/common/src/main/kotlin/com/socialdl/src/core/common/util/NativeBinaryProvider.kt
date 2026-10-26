@@ -24,9 +24,10 @@ open class NativeBinaryProvider(
 
     /**
      * Wraps [NativeRuntime.ensureExtracted] and surfaces extraction failure loudly
-     * instead of silently returning a broken runtime.
+     * instead of silently returning a broken runtime. Public: callers outside the
+     * native-runtime modules (e.g. the YouTube bridge call) need the full paths.
      */
-    protected fun resolveRuntime(): NativeRuntime.Paths? {
+    fun resolveRuntime(): NativeRuntime.Paths? {
         if (context == null) return null
         val paths = NativeRuntime.ensureExtracted(context)
         if (paths.extractionFailed) {

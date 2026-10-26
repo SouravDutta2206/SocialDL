@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.core.app.NotificationCompat
@@ -13,6 +12,7 @@ import androidx.work.ForegroundInfo
 import com.socialdl.src.core.common.util.toHumanReadableSize
 import com.socialdl.src.core.model.DownloadStatus
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -56,12 +56,12 @@ class DownloadNotificationManager @Inject constructor(
         val notification = buildNotification(jobId, title, status, progress, downloadedBytes, totalBytes)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ForegroundInfo(
-                jobId.hashCode(),
+                jobIdNotificationId(jobId),
                 notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             )
         } else {
-            ForegroundInfo(jobId.hashCode(), notification)
+            ForegroundInfo(jobIdNotificationId(jobId), notification)
         }
     }
 
@@ -104,6 +104,18 @@ class DownloadNotificationManager @Inject constructor(
         const val CHANNEL_ID = "download_progress"
     }
 }
+
+/**
+ * Stable notification / PendingIntent id derived from the job's UUID bits.
+ * Replaces raw `jobId.hashCode()`, which could collide across two concurrent
+ * jobs — one notification would overwrite the other's progress and cancel
+ * action. UUID bits xor'd then truncated to Int distributes far more evenly.
+ */
+fun jobIdNotificationId(jobId: String): Int =
+    runCatching {
+        val uuid = UUID.fromString(jobId)
+        (uuid.mostSignificantBits xor uuid.leastSignificantBits).toInt()
+    }.getOrDefault(jobId.hashCode())
 
 // Room for progress wiring without polluting the class body.
 private object BuilderProgress {
