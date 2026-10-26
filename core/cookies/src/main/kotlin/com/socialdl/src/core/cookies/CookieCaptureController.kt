@@ -2,6 +2,7 @@ package com.socialdl.src.core.cookies
 
 import android.webkit.CookieManager
 import com.socialdl.src.core.common.util.Logger
+import com.socialdl.src.core.model.Platform
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -30,9 +31,11 @@ class CookieCaptureController @Inject constructor(
 
     private val tag = "CookieCapture"
 
-    /** Resolves the default flow config, probing the runtime UA once. */
-    suspend fun defaultConfig(): CookieCaptureConfig =
-        YoutubeCookieCapture.config(userAgent = userAgentProvider.probe())
+    /** Resolves the flow config for [platform], probing the runtime UA for YouTube. */
+    suspend fun config(platform: Platform): CookieCaptureConfig = when (platform) {
+        Platform.INSTAGRAM -> InstagramCookieCapture.config()
+        else -> YoutubeCookieCapture.config(userAgent = userAgentProvider.probe())
+    }
 
     /**
      * Auto-detect check, run from `onPageFinished`: the WebView has settled on
@@ -74,9 +77,9 @@ class CookieCaptureController @Inject constructor(
             val jar = NetscapeCookieJarWriter.buildJarContent(harvests)
                 ?: return CaptureOutcome.NotSignedIn
 
-            cookieStore.save(jar)
+            cookieStore.save(config.platform, jar)
             val cookieCount = countLines(jar)
-            Logger.i(tag, "Captured YouTube cookie jar with $cookieCount cookies")
+            Logger.i(tag, "Captured ${config.platform.name} cookie jar with $cookieCount cookies")
             CaptureOutcome.Success(cookieCount)
         } catch (e: Exception) {
             Logger.e(tag, "Cookie harvest failed", e)

@@ -37,6 +37,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.socialdl.src.core.cookies.CaptureOutcome
 import com.socialdl.src.core.cookies.CookieCaptureConfig
+import com.socialdl.src.core.model.Platform
 
 /**
  * Full-screen interactive WebView host for cookie capture (§2.6) — a real, visible
@@ -48,11 +49,16 @@ import com.socialdl.src.core.cookies.CookieCaptureConfig
  */
 @Composable
 fun CookieCaptureScreen(
+    platform: Platform,
     onResult: (success: Boolean) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: CookieCaptureViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+
+    LaunchedEffect(platform) {
+        viewModel.initialize(platform)
+    }
 
     // Deliver the one-shot result exactly once, on either terminal path.
     // acknowledgeResult() nulls the outcome, so this LaunchedEffect cannot re-fire.
@@ -93,12 +99,13 @@ fun CookieCaptureScreen(
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Sign in with YouTube",
+                    text = uiState.config?.title ?: "Sign in",
                     style = MaterialTheme.typography.titleMedium,
                     color = Color.White
                 )
                 Text(
-                    text = "Sign in normal YouTube: tap the profile icon and log in. SocialDL never sees your password.",
+                    text = uiState.config?.subtitle
+                        ?: "SocialDL never sees your password; only cookies are stored encrypted.",
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFF9AA0A6)
                 )
@@ -169,11 +176,8 @@ private fun CaptureWebView(
                 val cleanDeviceUa = defaultUa
                     .replace("Version/4.0 ", "")
                     .replace("; wv)", ")")
-                settings.userAgentString = if (cleanDeviceUa.isNotBlank()) {
-                    cleanDeviceUa
-                } else {
-                    config.userAgent ?: defaultUa
-                }
+                settings.userAgentString = config.userAgentOverride
+                    ?: cleanDeviceUa.ifBlank { config.userAgent ?: defaultUa }
                 val cookieManager = CookieManager.getInstance()
                 cookieManager.setAcceptCookie(true)
                 cookieManager.setAcceptThirdPartyCookies(this, true)

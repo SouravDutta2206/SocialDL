@@ -1,8 +1,9 @@
-import json
 import os
 import shutil
 import subprocess
 import yt_dlp
+
+from common.envelope import EXCEPTION, classify, fail, succeed
 
 
 class _DebugLogCollector:
@@ -39,23 +40,6 @@ _AUTH_WALL_MARKERS = (
     "login required",
     "confirm your age",
     "the page needs to be reloaded",
-)
-
-# Substrings of yt-dlp's DownloadError message that mean the platform is
-# throttling us (HTTP 429). UI can show a "wait and retry" state.
-_RATE_LIMIT_MARKERS = (
-    "http error 429",
-    "too many requests",
-)
-
-# Substrings of yt-dlp's DownloadError message that mean a transport-level
-# network failure (DNS, connection refused/reset, timeouts). UI can offer a retry.
-_NETWORK_MARKERS = (
-    "getaddrinfo",
-    "connection",
-    "timed out",
-    "unable to download webpage",
-    "network",
 )
 
 def _resolve_node_runtime(node_dir, native_bin_dir):
@@ -223,25 +207,23 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
-                return json.dumps({"error": "no_info", "detail": "No metadata returned by yt-dlp"})
-            return json.dumps(_maybe_attach_js_diagnostics(_normalize(info), js_diag, debug_logger))
+                return fail("no_info", "No metadata returned by yt-dlp")
+            return succeed(_maybe_attach_js_diagnostics(_normalize(info), js_diag, debug_logger))
 
     except yt_dlp.utils.DownloadError as e:
-        message = str(e).lower()
-        if any(marker in message for marker in _AUTH_WALL_MARKERS):
-            return json.dumps({"error": "auth_wall", "detail": str(e), "debug_log": _tail(debug_logger),
-                               **_js_diagnostics(js_diag, debug_logger)})
-        if any(marker in message for marker in _RATE_LIMIT_MARKERS):
-            return json.dumps({"error": "rate_limited", "detail": str(e), "debug_log": _tail(debug_logger),
-                               **_js_diagnostics(js_diag, debug_logger)})
-        if any(marker in message for marker in _NETWORK_MARKERS):
-            return json.dumps({"error": "network", "detail": str(e), "debug_log": _tail(debug_logger),
-                               **_js_diagnostics(js_diag, debug_logger)})
-        return json.dumps({"error": "unavailable", "detail": str(e), "debug_log": _tail(debug_logger),
-                           **_js_diagnostics(js_diag, debug_logger)})
+        return fail(
+            classify(e, _AUTH_WALL_MARKERS),
+            e,
+            tail=debug_logger.lines,
+            extra=_js_diagnostics(js_diag, debug_logger),
+        )
     except Exception as e:
-        return json.dumps({"error": "exception", "detail": str(e), "debug_log": _tail(debug_logger),
-                           **_js_diagnostics(js_diag, debug_logger)})
+        return fail(
+            EXCEPTION,
+            e,
+            tail=debug_logger.lines,
+            extra=_js_diagnostics(js_diag, debug_logger),
+        )
 
 
 def _js_diagnostics(js_diag, debug_logger):
@@ -259,10 +241,6 @@ def _maybe_attach_js_diagnostics(payload, js_diag, debug_logger):
         payload["js_diagnostics"] = {**js_diag, "warnings": warnings[-10:]}
     return payload
 
-
-def _tail(logger: _DebugLogCollector, n: int = 40) -> str:
-    """Last n collected yt-dlp messages, newline-joined; diagnostics only."""
-    return "\n".join(logger.lines[-n:])
 
 def _normalize_single_entry(info: dict) -> dict:
     thumbnails = sorted(

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.socialdl.src.core.cookies.CaptureOutcome
 import com.socialdl.src.core.cookies.CookieCaptureConfig
 import com.socialdl.src.core.cookies.CookieCaptureController
+import com.socialdl.src.core.model.Platform
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -38,9 +39,14 @@ class CookieCaptureViewModel @Inject constructor(
 
     private var lastPageUrl: String? = null
 
-    init {
+    private var initializedFor: Platform? = null
+
+    /** Resolves the flow config once per platform (the route dictates the platform). */
+    fun initialize(platform: Platform) {
+        if (initializedFor == platform) return
+        initializedFor = platform
         viewModelScope.launch {
-            _uiState.update { it.copy(config = controller.defaultConfig()) }
+            _uiState.update { it.copy(config = controller.config(platform)) }
         }
     }
 

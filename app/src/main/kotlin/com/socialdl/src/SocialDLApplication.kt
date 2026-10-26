@@ -59,6 +59,37 @@ class SocialDLApplication : Application(), Configuration.Provider {
         notificationManager.ensureChannel()
 
         runDiagnosticsSmokeTest()
+        cleanupLegacyInstaloaderSessionArtifacts()
+    }
+
+    /**
+     * One-time removal of artifacts left by the retired Instaloader **session**
+     * flow (the anonymous Instaloader fallback used by the hybrid pipeline does
+     * not use any of these):
+     *
+     * - the old encrypted session pickle and its cache temp directory;
+     * - the old session-metadata DataStore file.
+     *
+     * Idempotent and silent when there is nothing to delete. The Instaloader
+     * Python package itself is intentionally not touched.
+     */
+    private fun cleanupLegacyInstaloaderSessionArtifacts() {
+        diagnosticsScope.launch {
+            val targets = listOf(
+                File(filesDir, "instagram_sessions"),
+                File(cacheDir, "instaloader_bridge"),
+                File(filesDir, "datastore/socialdl_instagram_session_meta.preferences_pb"),
+            )
+
+            var removed = 0
+            for (target in targets) {
+                if (!target.exists()) continue
+                if (target.deleteRecursively()) removed++
+            }
+            if (removed > 0) {
+                Logger.i("SocialDL_Boot", "Removed $removed legacy Instaloader session artifact(s)")
+            }
+        }
     }
 
     private fun runDiagnosticsSmokeTest() {

@@ -16,6 +16,7 @@ import com.socialdl.src.extraction.api.ExtractionError
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
+import com.socialdl.src.extraction.api.mapErrorKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -138,7 +139,7 @@ class YoutubeExtractor @Inject constructor(
             // §2.6 bridge: decrypt the stored jar into a throwaway cacheDir file for
             // the duration of this one PythonEngine call, or pass null when the user
             // never signed in — missing cookies must not become a new failure mode.
-            val rawJson = cookieStore.withYoutubeCookieFile { cookieFilePath: String? ->
+            val rawJson = cookieStore.withCookieFile(Platform.YOUTUBE) { cookieFilePath: String? ->
                 pythonEngine.run(
                     module = "yt_dlp_bridge.extract",
                     function = "extract",
@@ -203,14 +204,7 @@ class YoutubeExtractor @Inject constructor(
             parsed.debug_log?.takeIf { it.isNotBlank() }?.let {
                 Logger.w(tag, "yt-dlp debug_log:\n$it")
             }
-            return when (parsed.error) {
-                "auth_wall" -> ExtractionResult.Error(ExtractionError.AuthWallDetected(Platform.YOUTUBE, parsed.detail ?: "Sign-in required"))
-                "rate_limited" -> ExtractionResult.Error(ExtractionError.RateLimited())
-                "network" -> ExtractionResult.Error(
-                    ExtractionError.NetworkFailure(message = parsed.detail ?: "Network failure during extraction")
-                )
-                else -> ExtractionResult.Error(ExtractionError.ContentUnavailable(parsed.detail ?: "Content unavailable"))
-            }
+            return ExtractionResult.Error(mapErrorKind(parsed.error, parsed.detail, Platform.YOUTUBE))
         }
 
         if (parsed.is_playlist && parsed.entries.isNotEmpty()) {

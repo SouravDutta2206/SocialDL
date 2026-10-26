@@ -24,6 +24,7 @@ android {
 
 dependencies {
     implementation(project(":core:common"))
+    implementation(project(":core:model"))
     implementation(project(":core:python"))
 
     implementation(libs.androidx.core.ktx)

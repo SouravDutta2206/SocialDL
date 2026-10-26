@@ -313,10 +313,14 @@ class DownloadWorker @AssistedInject constructor(
                     }
 
                     val isAudio = job.formatKind == "AUDIO"
-                    val resolvedFormat = if (isAudio) {
-                        resolvedItem.audioFormats.firstOrNull() ?: resolvedItem.videoFormats.firstOrNull()
-                    } else {
-                        resolvedItem.videoFormats.firstOrNull() ?: resolvedItem.audioFormats.firstOrNull()
+                    val isImage = job.formatKind.equals("IMAGE", ignoreCase = true)
+                    val resolvedFormat = when {
+                        isImage -> resolvedItem.imageFormats.firstOrNull()
+                            ?: resolvedItem.videoFormats.firstOrNull()
+                        isAudio -> resolvedItem.audioFormats.firstOrNull()
+                            ?: resolvedItem.videoFormats.firstOrNull()
+                        else -> resolvedItem.videoFormats.firstOrNull()
+                            ?: resolvedItem.audioFormats.firstOrNull()
                     }
 
                     if (resolvedFormat == null || resolvedFormat.directUrl.isNullOrBlank()) {
@@ -559,12 +563,15 @@ class DownloadWorker @AssistedInject constructor(
                 job.formatLabel.contains("OPUS", ignoreCase = true) ||
                 job.formatLabel.contains("FLAC", ignoreCase = true)
 
+        val isImage = job.formatKind.equals("IMAGE", ignoreCase = true)
+
         val outputUri = mediaStoreExporter.export(
             file = finalFile,
             title = job.title,
             author = job.author,
             container = resolvedContainer,
             isAudio = isAudioOnly,
+            isImage = isImage,
             onPendingRowCreated = { pendingUri ->
                 // P1-3: record the pending MediaStore row durably, and re-check the
                 // cancellation guard right after row creation so cancels mid-copy

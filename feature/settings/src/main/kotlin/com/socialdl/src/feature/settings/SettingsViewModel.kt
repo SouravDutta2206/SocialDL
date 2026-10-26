@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.socialdl.src.core.cookies.CookieStore
+import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.settings.SettingsRepository
 import com.socialdl.src.core.settings.model.AppTheme
 import com.socialdl.src.core.settings.model.SearchEngine
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -45,7 +47,7 @@ private data class DownloadPrefs(
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository,
-    private val cookieStore: CookieStore
+    private val cookieStore: CookieStore,
 ) : ViewModel() {
 
     private val downloadPrefs = combine(
@@ -144,19 +146,19 @@ class SettingsViewModel @Inject constructor(
     private val cookiesActionMessage = MutableStateFlow<String?>(null)
 
     val cookiesUiState: StateFlow<CookiesUiState> = combine(
-        cookieStore.lastRefreshedAt,
+        cookieStore.lastRefreshedAt(Platform.YOUTUBE),
         cookiesActionMessage
     ) { lastRefreshed, actionMessage ->
-        // hasYoutubeCookies() re-evaluated on every emission, so a capture
-        // round-trip from the WebView route (which bumps LAST_REFRESHED in
-        // save()) is reflected without an explicit refresh call.
+        // hasCookies() re-evaluated on every emission, so a capture round-trip from
+        // the WebView route (which bumps LAST_REFRESHED in save()) is reflected
+        // without an explicit refresh call.
         CookiesUiState(
-            present = cookieStore.hasYoutubeCookies(),
+            present = cookieStore.hasCookies(Platform.YOUTUBE),
             lastRefreshedAt = lastRefreshed,
             actionMessage = actionMessage
         )
     }
-        // hasYoutubeCookies() stats the encrypted jar file — never on the main thread.
+        // hasCookies() stats the encrypted jar file — never on the main thread.
         .flowOn(Dispatchers.IO)
         .stateIn(
             scope = viewModelScope,
@@ -175,7 +177,7 @@ class SettingsViewModel @Inject constructor(
     fun importCookies(uri: Uri) {
         viewModelScope.launch {
             setActionMessage(
-                when (val outcome = cookieStore.importNetscapeFile(uri)) {
+                when (val outcome = cookieStore.importNetscapeFile(Platform.YOUTUBE, uri)) {
                     is CookieStore.ImportOutcome.Success ->
                         "Cookies imported — you're signed in for YouTube extraction."
                     is CookieStore.ImportOutcome.Rejected ->
@@ -190,8 +192,45 @@ class SettingsViewModel @Inject constructor(
     /** Destructive — UI confirms before calling. */
     fun clearCookies() {
         viewModelScope.launch {
-            cookieStore.clear()
+            cookieStore.clear(Platform.YOUTUBE)
             setActionMessage("YouTube cookies cleared.")
+        }
+    }
+
+    // ---- Instagram cookies (Phase 5, gallery-dl) ----
+
+    data class InstagramCookiesUiState(
+        val present: Boolean = false,
+        val lastRefreshedAt: Long? = null,
+    )
+
+    val instagramCookiesUiState: StateFlow<InstagramCookiesUiState> =
+        cookieStore.lastRefreshedAt(Platform.INSTAGRAM)
+            .map { lastRefreshed ->
+                InstagramCookiesUiState(
+                    present = cookieStore.hasCookies(Platform.INSTAGRAM),
+                    lastRefreshedAt = lastRefreshed,
+                )
+            }
+            // hasCookies() stats the encrypted blob — never on the main thread.
+            .flowOn(Dispatchers.IO)
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = InstagramCookiesUiState()
+            )
+
+    /** Destructive — UI confirms before calling. */
+    fun clearInstagramCookies() {
+        viewModelScope.launch {
+            cookieStore.clear(Platform.INSTAGRAM)
+        }
+    }
+
+    /** Manual cookies.txt fallback for gallery-dl (§2.6 escape hatch). */
+    fun importInstagramCookies(uri: Uri) {
+        viewModelScope.launch {
+            cookieStore.importNetscapeFile(Platform.INSTAGRAM, uri)
         }
     }
 }

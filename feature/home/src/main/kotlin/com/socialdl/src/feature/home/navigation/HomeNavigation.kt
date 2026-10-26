@@ -28,7 +28,7 @@ fun NavGraphBuilder.homeScreen(
         // SavedStateHandle. A success here auto-retries the URL that hit the wall.
         LaunchedEffect(backStackEntry.id) {
             if (backStackEntry.savedStateHandle.remove<Boolean>(COOKIE_CAPTURE_RESULT_KEY) == true) {
-                viewModel.onYouTubeSignInCompleted()
+                viewModel.onAuthSignInCompleted()
             }
         }
 

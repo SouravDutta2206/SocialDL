@@ -10,14 +10,16 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.security.crypto.EncryptedFile
 import androidx.security.crypto.MasterKey
 import com.socialdl.src.core.common.util.Logger
+import com.socialdl.src.core.model.Platform
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.Dispatchers
 import java.io.File
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -27,7 +29,7 @@ private val Context.cookieMetaStore: DataStore<Preferences> by preferencesDataSt
 
 /**
  * [CookieStore] implementation: `EncryptedFile` at rest + a throwaway cacheDir
- * decrypt for yt-dlp's cookiefile hand-off, per §2.6/§2.7.
+ * decrypt for the extractor's cookiefile hand-off, per §2.6/§2.7.
  */
 @Singleton
 class CookieStoreImpl @Inject constructor(
@@ -37,59 +39,79 @@ class CookieStoreImpl @Inject constructor(
     private val tag = "CookieStore"
 
     private object Keys {
-        val LAST_REFRESHED = longPreferencesKey("youtube_cookies_last_refreshed")
+        /**
+         * YouTube keeps its original key so upgrading installs retain the Settings
+         * status; every other platform uses a namespaced key.
+         */
+        fun lastRefreshed(platform: Platform) = when (platform) {
+            Platform.YOUTUBE -> longPreferencesKey("youtube_cookies_last_refreshed")
+            else -> longPreferencesKey("cookies_last_refreshed_${platform.name.lowercase(Locale.ROOT)}")
+        }
     }
 
     /** Serializes save/clear/decrypt so a capture racing a clear can't interleave. */
     private val mutex = Mutex()
 
-    private val jarFile: File by lazy { File(File(context.filesDir, "cookies"), "youtube_cookies.txt.enc") }
     private val tempDir: File by lazy {
         File(context.cacheDir, "cookies_bridge").also { dir ->
             dir.mkdirs()
-            // Process death mid-extraction skips the finally in
-            // withYoutubeCookieFile, leaving a DECRYPTED jar on disk. Purge any
-            // survivors at the start of the next extraction — the decrypted
-            // jar must never outlive one call (§2.6 threat model).
+            // Process death mid-extraction skips the finally in withCookieFile,
+            // leaving a DECRYPTED jar on disk. Purge any survivors at the start of
+            // the next extraction — the decrypted jar must never outlive one call.
             dir.listFiles()?.forEach { stale -> runCatching { stale.delete() } }
         }
     }
 
-    override fun hasYoutubeCookies(): Boolean {
-        return jarFile.exists() && jarFile.length() > 0
+    /**
+     * YouTube keeps its original filename (`youtube_cookies.txt.enc`) so existing
+     * installs remain valid; other platforms use `<platform>_cookies.txt.enc`.
+     */
+    private fun jarFile(platform: Platform): File {
+        val name = when (platform) {
+            Platform.YOUTUBE -> "youtube_cookies.txt.enc"
+            else -> "${platform.name.lowercase(Locale.ROOT)}_cookies.txt.enc"
+        }
+        return File(File(context.filesDir, "cookies"), name)
     }
 
-    override val lastRefreshedAt: Flow<Long?> = context.cookieMetaStore.data.map { prefs ->
-        prefs[Keys.LAST_REFRESHED]
+    override fun hasCookies(platform: Platform): Boolean {
+        val file = jarFile(platform)
+        return file.exists() && file.length() > 0
     }
 
-    override suspend fun save(jarContent: String) {
+    override fun lastRefreshedAt(platform: Platform): Flow<Long?> =
+        context.cookieMetaStore.data.map { prefs -> prefs[Keys.lastRefreshed(platform)] }
+
+    override suspend fun save(platform: Platform, jarContent: String) {
         if (jarContent.isBlank()) {
-            Logger.w(tag, "save() ignored: jar content is blank")
+            Logger.w(tag, "save(${platform.name}) ignored: jar content is blank")
             return
         }
         mutex.withLock {
             withContext(Dispatchers.IO) {
-                createEncryptedFile().openFileOutput().use { out ->
+                createEncryptedFile(platform).openFileOutput().use { out ->
                     out.write(jarContent.toByteArray())
                 }
             }
-            context.cookieMetaStore.edit { it[Keys.LAST_REFRESHED] = System.currentTimeMillis() }
-            Logger.i(tag, "YouTube cookie jar saved (${jarContent.length} chars)")
+            context.cookieMetaStore.edit {
+                it[Keys.lastRefreshed(platform)] = System.currentTimeMillis()
+            }
+            Logger.i(tag, "${platform.name} cookie jar saved (${jarContent.length} chars)")
         }
     }
 
-    override suspend fun clear() {
+    override suspend fun clear(platform: Platform) {
         mutex.withLock {
             withContext(Dispatchers.IO) {
-                if (jarFile.exists()) jarFile.delete()
+                val file = jarFile(platform)
+                if (file.exists()) file.delete()
             }
-            context.cookieMetaStore.edit { it.remove(Keys.LAST_REFRESHED) }
-            Logger.i(tag, "YouTube cookie jar cleared")
+            context.cookieMetaStore.edit { it.remove(Keys.lastRefreshed(platform)) }
+            Logger.i(tag, "${platform.name} cookie jar cleared")
         }
     }
 
-    override suspend fun importNetscapeFile(uri: Uri): CookieStore.ImportOutcome {
+    override suspend fun importNetscapeFile(platform: Platform, uri: Uri): CookieStore.ImportOutcome {
         val text = withContext(Dispatchers.IO) {
             runCatching {
                 context.contentResolver.openInputStream(uri)
@@ -112,28 +134,32 @@ class CookieStoreImpl @Inject constructor(
             )
             else -> {
                 // Re-join with a canonical trailing newline; every line already validated.
-                save(validation.validLines.joinToString("\n"))
+                save(platform, validation.validLines.joinToString("\n"))
                 CookieStore.ImportOutcome.Success
             }
         }
     }
 
-    override suspend fun <T> withYoutubeCookieFile(block: suspend (String?) -> T): T {
-        if (!hasYoutubeCookies()) return block(null)
+    override suspend fun <T> withCookieFile(
+        platform: Platform,
+        block: suspend (String?) -> T
+    ): T {
+        if (!hasCookies(platform)) return block(null)
 
-        val tempFile = File(tempDir, "yt_cookies_${System.nanoTime()}.txt")
+        val prefix = platform.name.lowercase(Locale.ROOT)
+        val tempFile = File(tempDir, "${prefix}_cookies_${System.nanoTime()}.txt")
         try {
             mutex.withLock {
                 withContext(Dispatchers.IO) {
-                    createEncryptedFile().openFileInput().use { input ->
+                    createEncryptedFile(platform).openFileInput().use { input ->
                         tempFile.outputStream().use { input.copyTo(it) }
                     }
                 }
             }
-            Logger.d(tag, "Decrypted cookie jar to throwaway ${tempFile.name}")
+            Logger.d(tag, "Decrypted ${platform.name} cookie jar to throwaway ${tempFile.name}")
             return block(tempFile.absolutePath)
         } catch (e: Exception) {
-            Logger.e(tag, "Failed to decrypt cookie jar; extraction continues without cookies", e)
+            Logger.e(tag, "Failed to decrypt ${platform.name} cookie jar; extraction continues without cookies", e)
             return block(null)
         } finally {
             // The decrypted copy must not outlive the call that needed it.
@@ -142,14 +168,15 @@ class CookieStoreImpl @Inject constructor(
         }
     }
 
-    private fun createEncryptedFile(): EncryptedFile {
-        jarFile.parentFile?.mkdirs()
+    private fun createEncryptedFile(platform: Platform): EncryptedFile {
+        val file = jarFile(platform)
+        file.parentFile?.mkdirs()
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
         return EncryptedFile.Builder(
             context,
-            jarFile,
+            file,
             masterKey,
             EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB
         ).build()

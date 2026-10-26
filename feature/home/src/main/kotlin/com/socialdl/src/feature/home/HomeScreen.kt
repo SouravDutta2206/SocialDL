@@ -201,13 +201,23 @@ fun HomeScreen(
                             item = item,
                             isResolving = resolvingItemId == item.sourceUrl,
                             onCardClick = {
-                                handleOpenSheet(item, FormatKind.VIDEO)
+                                if (uiState.showsFormatPicker) {
+                                    handleOpenSheet(item, FormatKind.VIDEO)
+                                } else {
+                                    viewModel.startDirectDownload(item)
+                                }
                             },
                             onQuickAudioDownload = {
                                 handleOpenSheet(item, FormatKind.AUDIO)
                             },
                             onQuickVideoDownload = {
-                                handleOpenSheet(item, FormatKind.VIDEO)
+                                if (uiState.showsFormatPicker) {
+                                    handleOpenSheet(item, FormatKind.VIDEO)
+                                } else {
+                                    // Covers both the Video pill and the Image pill —
+                                    // single-format platforms never render a picker.
+                                    viewModel.startDirectDownload(item)
+                                }
                             }
                         )
                     }
