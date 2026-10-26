@@ -6,11 +6,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.download.DownloadManager
-import com.socialdl.src.core.model.DownloadProgressInfo
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
-import com.socialdl.src.core.model.uiKey
 import com.socialdl.src.extraction.api.ExtractionError
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.ExtractorRegistry
@@ -22,11 +20,9 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -64,20 +60,6 @@ class HomeViewModel @Inject constructor(
 
     private val _resolvingItemId = MutableStateFlow<String?>(null)
     val resolvingItemId: StateFlow<String?> = _resolvingItemId.asStateFlow()
-
-    /**
-     * Active download jobs keyed by the shared [uiKey] identity formula so
-     * MediaCard can render its inline progress overlay for the item that is
-     * downloading. Backed by the Room job flow, so dedup survives process death
-     * and cancelled rows vanish instantly (P0-4).
-     */
-    val activeTasksBySourceKey: StateFlow<Map<String, DownloadProgressInfo>> =
-        downloadManager.progressInfoByKey
-            .stateIn(
-                scope = viewModelScope,
-                started = SharingStarted.WhileSubscribed(5000),
-                initialValue = emptyMap()
-            )
 
     private var extractionJob: Job? = null
 
@@ -160,13 +142,6 @@ class HomeViewModel @Inject constructor(
         return enqueued
     }
 
-    fun cancelDownload(taskId: String) {
-        viewModelScope.launch {
-            downloadManager.cancelDownload(taskId)
-        }
-    }
-
-
     fun onQueryChange(newQuery: String) {
         val platform = if (newQuery.isNotBlank()) {
             UrlPlatformResolver.resolvePlatform(newQuery)
@@ -225,23 +200,13 @@ class HomeViewModel @Inject constructor(
                         // §2.6 recapture flow: an auth wall on a YouTube card means a
                         // signed-in session may exist now — offer the sign-in CTA that
                         // auto-retries this same URL once capture completes.
-                        if (result.cause is ExtractionError.AuthWallDetected) {
-                            _uiState.update {
-                                it.copy(
-                                    isLoading = false,
-                                    mediaItems = emptyList(),
-                                    infoMessage = errMsg,
-                                    authWallUrl = url
-                                )
-                            }
-                        } else {
-                            _uiState.update {
-                                it.copy(
-                                    isLoading = false,
-                                    mediaItems = emptyList(),
-                                    infoMessage = errMsg
-                                )
-                            }
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                mediaItems = emptyList(),
+                                infoMessage = errMsg,
+                                authWallUrl = if (result.cause is ExtractionError.AuthWallDetected) url else null
+                            )
                         }
                     }
                 }
@@ -272,7 +237,13 @@ class HomeViewModel @Inject constructor(
     fun onYouTubeSignInCompleted() {
         val pending = _uiState.value.authWallUrl ?: return
         _uiState.update { it.copy(authWallUrl = null) }
-        val extractor = extractorRegistry.resolve(pending) ?: return
+        val extractor = extractorRegistry.resolve(pending)
+        if (extractor == null) {
+            // Don't silently drop the pending retry — tell the user to re-paste.
+            Logger.w(tag, "Sign-in completed but no extractor resolved for $pending")
+            _uiState.update { it.copy(infoMessage = "Signed in — paste the video link again to download") }
+            return
+        }
         Logger.i(tag, "YouTube sign-in completed; auto-retrying extraction of $pending")
         extractMedia(extractor, pending)
     }

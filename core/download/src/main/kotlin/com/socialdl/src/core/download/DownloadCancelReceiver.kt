@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.socialdl.src.core.common.util.Logger
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +27,11 @@ class DownloadCancelReceiver : BroadcastReceiver() {
         val result = goAsync()
         CoroutineScope(Dispatchers.Default).launch {
             try {
-                downloadManager.cancelDownload(jobId)
+                // runCatching: an unhandled exception here (Room not ready,
+                // WorkManager init failure) would crash the process during a
+                // user-initiated cancel from the notification shade.
+                runCatching { downloadManager.cancelDownload(jobId) }
+                    .onFailure { Logger.e("DownloadCancelReceiver", "Cancel action failed for job $jobId", it) }
             } finally {
                 result.finish()
             }

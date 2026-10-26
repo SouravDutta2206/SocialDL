@@ -1,11 +1,8 @@
 package com.socialdl.src.extraction.instagram
 
 import com.socialdl.src.core.model.Platform
-import com.socialdl.src.extraction.api.ExtractionError
-import com.socialdl.src.extraction.api.ExtractionResult
-import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
-import com.socialdl.src.extraction.api.UrlPlatformResolver
+import com.socialdl.src.extraction.api.PlaceholderExtractor
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -14,7 +11,7 @@ import javax.inject.Singleton
  * Real implementation is built out in Phase 5.
  */
 @Singleton
-class InstagramExtractor @Inject constructor() : MediaExtractor {
+class InstagramExtractor @Inject constructor() : PlaceholderExtractor() {
 
     override val platform: Platform = Platform.INSTAGRAM
 
@@ -25,17 +22,4 @@ class InstagramExtractor @Inject constructor() : MediaExtractor {
         typicalLatencyMs = 1500L,
         showsFormatPicker = false // Direct CDN URL download
     )
-
-    override fun supports(url: String): Boolean {
-        return UrlPlatformResolver.resolvePlatform(url) == Platform.INSTAGRAM
-    }
-
-    override suspend fun extract(url: String): ExtractionResult {
-        // Placeholder for Phase 5 implementation.
-        // Returns a typed error instead of TODO() which would throw NotImplementedError
-        // into the caller's coroutine.
-        return ExtractionResult.Error(
-            ExtractionError.ContentUnavailable("Instagram extraction is coming soon.")
-        )
-    }
 }

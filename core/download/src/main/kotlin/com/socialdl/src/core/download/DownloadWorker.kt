@@ -34,6 +34,12 @@ import java.util.Locale
  * remains, no retry, no re-enqueue. The FAILED card is purely a user-side visual
  * record (the background job no longer exists).
  *
+ * App restart (force-stop, swipe-away, crash, process death): ALL non-terminal
+ * jobs fail immediately. WorkManager rescheduling of unfinished WorkSpecs is
+ * rejected via the runAttemptCount guard in [doWork], and
+ * [DownloadManager.reconcileOnStartup] cancels + fails everything left over.
+ * Nothing ever re-runs or restarts from byte 0.
+ *
  * Instant-cancellation guard reads: before export and again right before the
  * history-insert, the job row is re-read. If the user cancelled (row deleted),
  * the current step aborts and `finally` cleans scratch. Cancellation landing
@@ -67,6 +73,9 @@ class DownloadWorker @AssistedInject constructor(
     )
 
     private val tag = "DownloadWorker"
+
+    /** Aborts in-flight OkHttp calls instantly on network loss (kill-on-fail §9). */
+    private val networkCanceller = DownloadCallCanceller()
 
     /** Foreground-service notification promotion state (P1-1). */
     private var isForeground = false
@@ -152,8 +161,24 @@ class DownloadWorker @AssistedInject constructor(
             return@withContext Result.failure()
         }
 
+        // Kill-on-fail across restarts (§9): runAttemptCount > 0 is only possible
+        // when WorkManager re-runs a WorkSpec after process death / force-stop.
+        // Interrupted work is DEAD, never restarted — fail it immediately so no
+        // partial download ever silently restarts from byte 0.
+        if (runAttemptCount > 0) {
+            Logger.i(tag, "[$jobId] Worker re-run after process death (attempt $runAttemptCount) — failing as interrupted")
+            jobRepository.markFailed(jobId, DownloadError.Interrupted)
+            return@withContext Result.failure()
+        }
+
         val scratchDir = File(appContext.cacheDir, "downloads/$jobId")
         scratchDir.mkdirs()
+
+        // Watch the network for the whole job: when the last usable network drops,
+        // abort every in-flight call instantly (retries without a network are
+        // pointless). During mux/export no call is registered — cancel is a no-op.
+        val watchdog = NetworkLossWatchdog(appContext) { networkCanceller.cancel() }
+        watchdog.register()
 
         try {
             val success = concurrencyGate.withDownloadPermit {
@@ -174,6 +199,7 @@ class DownloadWorker @AssistedInject constructor(
                 Result.failure()
             }
         } finally {
+            watchdog.unregister()
             // Clean up task scratch directory (§9.1)
             scratchDir.deleteRecursively()
         }
@@ -227,7 +253,7 @@ class DownloadWorker @AssistedInject constructor(
             if (mediaTemp.renameTo(convertedFile)) convertedFile else mediaTemp
         }
 
-        return exportAndPersist(job, finalFile)
+        return exportAndPersist(job, finalFile, resolved.container)
     }
 
     /**
@@ -321,6 +347,13 @@ class DownloadWorker @AssistedInject constructor(
             return null
         }
 
+        // Persist the JIT-resolved container so the export step derives
+        // extension/MIME/RELATIVE_PATH from the format actually downloaded,
+        // not the stale placeholder value ("Default" rows may resolve to WEBM etc).
+        if (effectiveContainer != job.container) {
+            jobRepository.updateJob(job.copy(container = effectiveContainer))
+        }
+
         // P0-3 gate: a mux-required format with no audio track must fail before any
         // bytes are downloaded — never silently fall through to a video-only export.
         if (effectiveRequiresMuxing && effectiveAudioDirectUrl.isNullOrBlank()) {
@@ -331,7 +364,10 @@ class DownloadWorker @AssistedInject constructor(
 
         return ResolvedStreams(
             directUrl = effectiveDirectUrl,
-            audioDirectUrl = effectiveAudioDirectUrl!!,
+            // Non-mux jobs legitimately have no audio URL (DownloadManager stores
+            // null); the mux path is already gated above on requiresMuxing having
+            // a non-blank audio URL, so orEmpty() can never be observed as a URL.
+            audioDirectUrl = effectiveAudioDirectUrl.orEmpty(),
             requiresMuxing = effectiveRequiresMuxing,
             videoChunkSize = effectiveVideoChunkSize,
             audioChunkSize = effectiveAudioChunkSize,
@@ -358,7 +394,8 @@ class DownloadWorker @AssistedInject constructor(
             destination = videoTemp,
             chunkSizeBytes = resolved.videoChunkSize,
             platform = platform,
-            isStopped = { isStopped }
+            isStopped = { isStopped },
+            canceller = networkCanceller
         ) { bytesWritten, totalBytes ->
             val progress = if (totalBytes != null && totalBytes > 0) {
                 (bytesWritten.toFloat() / totalBytes) * 0.8f // Video accounts for 80% of download progress
@@ -374,7 +411,8 @@ class DownloadWorker @AssistedInject constructor(
             destination = audioTemp,
             chunkSizeBytes = resolved.audioChunkSize,
             platform = platform,
-            isStopped = { isStopped }
+            isStopped = { isStopped },
+            canceller = networkCanceller
         ) { bytesWritten, totalBytes ->
             val progress = if (totalBytes != null && totalBytes > 0) {
                 0.8f + (bytesWritten.toFloat() / totalBytes) * 0.15f // Audio accounts for 15%
@@ -408,7 +446,8 @@ class DownloadWorker @AssistedInject constructor(
             destination = destination,
             chunkSizeBytes = chunkSizeBytes,
             platform = platform,
-            isStopped = { isStopped }
+            isStopped = { isStopped },
+            canceller = networkCanceller
         ) { bytesWritten, totalBytes ->
             val progress = if (totalBytes != null && totalBytes > 0) {
                 bytesWritten.toFloat() / totalBytes
@@ -480,9 +519,15 @@ class DownloadWorker @AssistedInject constructor(
      * Exports [finalFile] to MediaStore / scoped storage (§9.7) and persists the
      * Room history row (§10). Guard reads against instant cancellation run before
      * the export step and again right before the success transaction.
+     * [resolvedContainer] is the container actually downloaded (JIT-resolved
+     * placeholders may differ from the stale [DownloadJobEntity.container]).
      * Returns true on success; false (FAILED written) on export failure.
      */
-    private suspend fun exportAndPersist(job: DownloadJobEntity, finalFile: File): Boolean {
+    private suspend fun exportAndPersist(
+        job: DownloadJobEntity,
+        finalFile: File,
+        resolvedContainer: String
+    ): Boolean {
         val jobId = job.id
 
         // Guard read #1: row gone => user cancelled mid-pipeline; abort silently.
@@ -501,7 +546,7 @@ class DownloadWorker @AssistedInject constructor(
         )
 
         val isAudioOnly = job.formatKind.equals("AUDIO", ignoreCase = true) ||
-                job.container.uppercase(Locale.ROOT) in listOf("MP3", "M4A", "OPUS", "FLAC", "WAV", "AAC", "OGG") ||
+                resolvedContainer.uppercase(Locale.ROOT) in listOf("MP3", "M4A", "OPUS", "FLAC", "WAV", "AAC", "OGG") ||
                 job.formatLabel.contains("MP3", ignoreCase = true) ||
                 job.formatLabel.contains("M4A", ignoreCase = true) ||
                 job.formatLabel.contains("OPUS", ignoreCase = true) ||
@@ -511,7 +556,7 @@ class DownloadWorker @AssistedInject constructor(
             file = finalFile,
             title = job.title,
             author = job.author,
-            container = job.container,
+            container = resolvedContainer,
             isAudio = isAudioOnly,
             onPendingRowCreated = { pendingUri ->
                 // P1-3: record the pending MediaStore row durably, and re-check the
@@ -545,7 +590,7 @@ class DownloadWorker @AssistedInject constructor(
         // Persist to Room: insert history + delete job atomically (§10). All terminal
         // outcomes are written before the Result is returned.
         jobRepository.finishJobSuccessfully(
-            job = job,
+            job = job.copy(container = resolvedContainer),
             outputUri = outputUri.toString(),
             fileSizeBytes = finalFile.length()
         )

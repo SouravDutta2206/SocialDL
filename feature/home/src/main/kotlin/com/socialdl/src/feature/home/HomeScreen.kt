@@ -73,7 +73,6 @@ fun HomeScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val resolvingItemId by viewModel.resolvingItemId.collectAsStateWithLifecycle()
-    val activeTasksBySourceKey by viewModel.activeTasksBySourceKey.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
     var selectedItemForSheet by remember { mutableStateOf<MediaItem?>(null) }
@@ -188,8 +187,11 @@ fun HomeScreen(
                     itemsIndexed(
                         items = uiState.mediaItems,
                         key = { index, item -> item.uiKey(fallbackIndex = index) }
-                    ) { _, item ->
-                        val activeTask = activeTasksBySourceKey[item.uiKey()]
+                    ) { index, item ->
+                        // No inline progress/failed overlay here by design: download
+                        // state (progress, failures, cancel) lives exclusively on the
+                        // Downloads tab. Home stays a pure search/experience surface —
+                        // a previously-failed URL re-searches and re-downloads freely.
                         MediaCard(
                             item = item,
                             isResolving = resolvingItemId == item.sourceUrl,
@@ -201,14 +203,6 @@ fun HomeScreen(
                             },
                             onQuickVideoDownload = {
                                 handleOpenSheet(item, FormatKind.VIDEO)
-                            },
-                            // Inline progress + cancel for the item that is downloading.
-                            // Pause/resume left unset: WorkManager has no real pause.
-                            activeDownload = activeTask,
-                            onCancelDownload = if (activeTask != null) {
-                                { viewModel.cancelDownload(activeTask.id) }
-                            } else {
-                                null
                             }
                         )
                     }

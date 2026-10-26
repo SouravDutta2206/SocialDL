@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -14,7 +13,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
@@ -22,15 +20,12 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.FormatListNumbered
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -66,7 +61,6 @@ import com.socialdl.src.core.ui.theme.SocialDLIndicator
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
-import com.socialdl.src.core.ui.theme.SocialDLSheetHeader
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerHigh
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerLow
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceVariant
@@ -125,21 +119,9 @@ fun BatchDownloadBottomSheet(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = SocialDLSurfaceVariant,
-        shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(vertical = 10.dp)
-                    .width(40.dp)
-                    .height(4.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.2f))
-            )
-        }
+    SocialDLModalBottomSheet(
+        onDismiss = onDismiss,
+        sheetState = sheetState
     ) {
         Column(
             modifier = Modifier
@@ -148,44 +130,18 @@ fun BatchDownloadBottomSheet(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // Header: "Edit / Edit selected" and "OK" Pill Button
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            SheetHeader(
+                title = "Edit",
+                subtitle = "Edit selected",
+                titleBold = true
             ) {
-                Column {
-                    Text(
-                        text = "Edit",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = SocialDLOnSurface
-                    )
-                    Text(
-                        text = "Edit selected",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = SocialDLOnSurfaceVariant
-                    )
-                }
-
-                Button(
-                    onClick = ::handleConfirm,
+                SheetPillButton(
+                    label = "OK",
+                    icon = Icons.Default.Check,
+                    iconContentDescription = "Confirm",
                     enabled = selectedUrls.isNotEmpty(),
-                    shape = CircleShape,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = SocialDLSheetHeader,
-                        contentColor = SocialDLOnSurface
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "Confirm",
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "OK",
-                        style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold)
-                    )
-                }
+                    onClick = ::handleConfirm
+                )
             }
 
             // Subheader: "X Selected" count and Action Icons

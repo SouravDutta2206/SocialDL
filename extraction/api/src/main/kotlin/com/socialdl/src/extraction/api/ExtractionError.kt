@@ -48,6 +48,13 @@ sealed class ExtractionError(
         override val message: String = "This post contains no downloadable media."
     ) : ExtractionError(message)
 
+    /** Platform extraction exists as a design but is not implemented yet (Phases 5/6/7). */
+    data class NotImplemented(
+        val platform: com.socialdl.src.core.model.Platform,
+        val url: String? = null,
+        override val message: String = "${platform.name} extraction is coming soon."
+    ) : ExtractionError(message)
+
     /** Failed to parse metadata / JSON from the extractor. */
     data class ParsingFailed(
         override val message: String = "Failed to parse media details",

@@ -131,6 +131,14 @@ class DownloadJobRepository @Inject constructor(
     suspend fun getActiveJobs(): List<DownloadJobEntity> = jobDao.getActiveJobs()
 
     /**
+     * Destructive replace (§10 UX): a new enqueue of the same [sourceUrl]/carousel
+     * slot discards any FAILED record for it first.
+     */
+    suspend fun discardFailedJob(sourceUrl: String, carouselIndex: Int) {
+        jobDao.deleteFailedJob(sourceUrl, carouselIndex)
+    }
+
+    /**
      * Startup reconciliation failure write: jobs that lost their WorkManager work
      * (process death, system kill) become FAILED(INTERRUPTED) cards, consistent
      * with kill-on-fail.

@@ -29,6 +29,16 @@ interface DownloadJobDao {
     @Query("DELETE FROM download_jobs WHERE id = :id")
     suspend fun deleteJob(id: String)
 
+    /**
+     * Destructive replace: starting the same download again discards a lingering
+     * FAILED record for it (matched by the uiKey identity — sourceUrl + carousel
+     * slot), so a retry never requires an X-to-remove round-trip first.
+     */
+    @Query(
+        "DELETE FROM download_jobs WHERE sourceUrl = :sourceUrl AND carouselIndex = :carouselIndex AND status = 'FAILED'"
+    )
+    suspend fun deleteFailedJob(sourceUrl: String, carouselIndex: Int)
+
     /** Jobs visible in the UI: every non-terminal status plus FAILED failure cards. */
     @Query(
         "SELECT * FROM download_jobs " +
@@ -61,8 +71,9 @@ interface DownloadJobDao {
         updatedAt: Long
     )
 
+    /** Marks a job FAILED in one statement unless it already is; never resurrects a FAILED row. */
     @Query(
-        "UPDATE download_jobs SET errorMessage = :message, updatedAt = :updatedAt " +
+        "UPDATE download_jobs SET status = 'FAILED', errorMessage = :message, updatedAt = :updatedAt " +
             "WHERE id = :id AND status != 'FAILED'"
     )
     suspend fun markFailed(id: String, message: String?, updatedAt: Long)
@@ -72,10 +83,11 @@ interface DownloadJobDao {
     )
     suspend fun updateStatus(id: String, status: DownloadStatus, updatedAt: Long)
 
-    /** Final failure write: status + message in one statement (used after guard reads). */
+    /** Final failure write: status + message in one statement (used after guard reads).
+     *  Idempotent like [markFailed]: no-op if the row is gone or already FAILED. */
     @Query(
         "UPDATE download_jobs SET status = 'FAILED', errorMessage = :message, updatedAt = :updatedAt " +
-            "WHERE id = :id"
+            "WHERE id = :id AND status != 'FAILED'"
     )
     suspend fun failJob(id: String, message: String?, updatedAt: Long)
 }

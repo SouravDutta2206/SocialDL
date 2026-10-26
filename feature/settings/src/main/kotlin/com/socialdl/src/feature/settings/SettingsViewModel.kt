@@ -8,10 +8,13 @@ import com.socialdl.src.core.settings.SettingsRepository
 import com.socialdl.src.core.settings.model.AppTheme
 import com.socialdl.src.core.settings.model.SearchEngine
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -134,51 +137,53 @@ class SettingsViewModel @Inject constructor(
     data class CookiesUiState(
         val present: Boolean = false,
         val lastRefreshedAt: Long? = null,
-        /** One-shot copy for import/clear outcomes; null when nothing to show. */
+        /** Copy for import/clear outcomes; self-clears after a few seconds. */
         val actionMessage: String? = null,
     )
-
-    private val cookiesStatusRefresh = MutableStateFlow(0)
 
     private val cookiesActionMessage = MutableStateFlow<String?>(null)
 
     val cookiesUiState: StateFlow<CookiesUiState> = combine(
-        cookiesStatusRefresh,
         cookieStore.lastRefreshedAt,
         cookiesActionMessage
-    ) { _, lastRefreshed, actionMessage ->
-        // hasYoutubeCookies() re-evaluated on every emission, so a capture round-trip
-        // from the WebView route is reflected without an explicit refresh call.
+    ) { lastRefreshed, actionMessage ->
+        // hasYoutubeCookies() re-evaluated on every emission, so a capture
+        // round-trip from the WebView route (which bumps LAST_REFRESHED in
+        // save()) is reflected without an explicit refresh call.
         CookiesUiState(
             present = cookieStore.hasYoutubeCookies(),
             lastRefreshedAt = lastRefreshed,
             actionMessage = actionMessage
         )
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.Eagerly,
-        initialValue = CookiesUiState()
-    )
-
-    fun clearCookiesActionMessage() {
-        cookiesActionMessage.value = null
     }
+        // hasYoutubeCookies() stats the encrypted jar file — never on the main thread.
+        .flowOn(Dispatchers.IO)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = CookiesUiState()
+        )
 
-    fun refreshCookiesStatus() {
-        cookiesStatusRefresh.value += 1
+    /** Sets [cookiesActionMessage] and clears it after a display window. */
+    private suspend fun setActionMessage(message: String) {
+        cookiesActionMessage.value = message
+        delay(4_000)
+        if (cookiesActionMessage.value == message) cookiesActionMessage.value = null
     }
 
     /** Manual `cookies.txt` import fallback (§2.6) — validates before accepting. */
     fun importCookies(uri: Uri) {
         viewModelScope.launch {
-            cookiesActionMessage.value = when (val outcome = cookieStore.importNetscapeFile(uri)) {
-                is CookieStore.ImportOutcome.Success ->
-                    "Cookies imported — you're signed in for YouTube extraction."
-                is CookieStore.ImportOutcome.Rejected ->
-                    "Import rejected: ${outcome.reason}"
-                CookieStore.ImportOutcome.Unreadable ->
-                    "Import failed: the selected file could not be read."
-            }
+            setActionMessage(
+                when (val outcome = cookieStore.importNetscapeFile(uri)) {
+                    is CookieStore.ImportOutcome.Success ->
+                        "Cookies imported — you're signed in for YouTube extraction."
+                    is CookieStore.ImportOutcome.Rejected ->
+                        "Import rejected: ${outcome.reason}"
+                    CookieStore.ImportOutcome.Unreadable ->
+                        "Import failed: the selected file could not be read."
+                }
+            )
         }
     }
 
@@ -186,7 +191,7 @@ class SettingsViewModel @Inject constructor(
     fun clearCookies() {
         viewModelScope.launch {
             cookieStore.clear()
-            cookiesActionMessage.value = "YouTube cookies cleared."
+            setActionMessage("YouTube cookies cleared.")
         }
     }
 }

@@ -46,11 +46,15 @@ class FFmpegProcessExecutor @Inject constructor(
         } catch (e: Exception) {
 
             Logger.e(tag, "Failed to start ffmpeg process", e)
-            trySend(FFmpegEvent.Failed(-1, e.message ?: "Failed to start process"))
+            send(FFmpegEvent.Failed(-1, e.message ?: "Failed to start process"))
             close()
             return@callbackFlow
         }
 
+        // Terminal events (Failed/Completed) MUST reach the collector: a dropped
+        // Completed makes the worker treat a successful mux as failed and delete
+        // good output. send() suspends until buffer space exists instead of
+        // silently dropping; progress ticks may still use trySend (droppable).
         val errorBuffer = StringBuilder()
         val stdoutBuffer = StringBuilder()
 
@@ -107,11 +111,11 @@ class FFmpegProcessExecutor @Inject constructor(
 
         if (exitCode == 0) {
             Logger.d(tag, "ffmpeg process completed successfully")
-            trySend(FFmpegEvent.Completed)
+            send(FFmpegEvent.Completed)
         } else {
             val lastErrors = errorBuffer.takeLast(1000).toString()
             Logger.e(tag, "ffmpeg process failed with code $exitCode: $lastErrors")
-            trySend(FFmpegEvent.Failed(exitCode, lastErrors))
+            send(FFmpegEvent.Failed(exitCode, lastErrors))
         }
 
         close()
