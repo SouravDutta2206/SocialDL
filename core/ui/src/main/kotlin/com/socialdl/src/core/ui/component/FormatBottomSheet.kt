@@ -31,8 +31,6 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -79,7 +77,6 @@ import com.socialdl.src.core.ui.theme.SocialDLIndicator
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
-import com.socialdl.src.core.ui.theme.SocialDLSheetHeader
 import com.socialdl.src.core.ui.theme.SocialDLSurface
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerHigh
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerLow
@@ -120,21 +117,9 @@ fun FormatBottomSheet(
 
     var showFormatSubmenu by remember { mutableStateOf(false) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        containerColor = SocialDLSurfaceVariant,
-        shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(vertical = 10.dp)
-                    .width(40.dp)
-                    .height(4.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.2f))
-            )
-        }
+    SocialDLModalBottomSheet(
+        onDismiss = onDismiss,
+        sheetState = sheetState
     ) {
         AnimatedContent(
             targetState = showFormatSubmenu,
@@ -204,41 +189,16 @@ private fun MainDownloadSheetView(
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         // Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        SheetHeader(
+            title = "Download",
+            subtitle = "Adjust download"
         ) {
-            Column {
-                Text(
-                    text = "Download",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = SocialDLOnSurface
-                )
-                Text(
-                    text = "Adjust download",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = SocialDLOnSurfaceVariant
-                )
-            }
-
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(
-                    onClick = onDownload,
-                    shape = CircleShape,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = SocialDLSheetHeader,
-                        contentColor = SocialDLOnSurface
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.ArrowDownward,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(text = "Download", style = MaterialTheme.typography.labelLarge)
-                }
+                SheetPillButton(
+                    label = "Download",
+                    icon = Icons.Default.ArrowDownward,
+                    onClick = onDownload
+                )
 
                 IconButton(onClick = onClose) {
                     Icon(

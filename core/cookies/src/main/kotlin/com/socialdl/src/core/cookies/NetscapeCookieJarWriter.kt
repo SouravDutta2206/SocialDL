@@ -150,12 +150,14 @@ object NetscapeCookieJarWriter {
             }
 
             val columns = dataLine.split("\t")
+            // Domain may be dot-prefixed (domain cookie) or a bare host
+            // (host-only cookie) — the Netscape format legalizes both, and
+            // browser exports commonly contain the latter.
             val isOk = columns.size == 7 &&
                 columns[0].isNotBlank() &&          // domain
                 columns[2].isNotBlank() &&          // path
                 columns[4].toLongOrNull() != null &&// expiry (0 = session cookie)
-                columns[5].isNotBlank() &&          // name
-                columns[0].startsWith(".")          // domain must be a cookie domain
+                columns[5].isNotBlank()             // name
             if (isOk) valid.add(line) else invalid.add(index + 1)
         }
         return NetscapeValidation(validLines = valid, invalidLineNumbers = invalid)

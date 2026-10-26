@@ -38,7 +38,6 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -77,11 +76,9 @@ fun SettingsScreen(
     var expandedSection by remember { mutableStateOf<SettingsSection?>(null) }
     var showClearCookiesDialog by remember { mutableStateOf(false) }
 
-    // Cookie-capture round-trip: when we come back from the WebView route the
-    // encrypted jar may have changed — re-read status exactly once per return.
-    LaunchedEffect(cookiesUiState.lastRefreshedAt, cookiesUiState.present) {
-        viewModel.refreshCookiesStatus()
-    }
+    // No manual cookie refresh needed: a capture round-trip bumps the
+    // LAST_REFRESHED DataStore key, which re-evaluates cookiesUiState
+    // (hasYoutubeCookies()) automatically on the IO dispatcher.
 
     // Manual cookies.txt import picker (§2.6 fallback)
     val cookiesFilePicker = rememberLauncherForActivityResult(

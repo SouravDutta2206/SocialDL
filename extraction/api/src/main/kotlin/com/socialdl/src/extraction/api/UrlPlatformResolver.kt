@@ -14,7 +14,7 @@ import java.util.regex.Pattern
 object UrlPlatformResolver {
 
     private val YOUTUBE_REGEX = Pattern.compile(
-        """^(?:https?://)?(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/|live/|playlist\?)|youtu\.be/)([\w\-]+)""",
+        """^(?:https?://)?(?:www\.|m\.|music\.)?(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/|live/|playlist\?)|youtu\.be/)([\w\-]+)""",
         Pattern.CASE_INSENSITIVE
     )
 
@@ -61,8 +61,17 @@ object UrlPlatformResolver {
         }
     }
 
+    /**
+     * True when [url]'s host is [host] or a subdomain of it (e.g. music.youtube.com
+     * for youtube.com). Parses the host with java.net.URI — never substring matching,
+     * so redirect-wrapped or lookalike domains (youtube.com.evil.com) cannot hijack
+     * resolution.
+     */
     private fun containsHost(url: String, host: String): Boolean {
-        val lower = url.lowercase()
-        return lower.contains("://$host") || lower.contains("://www.$host") || lower.startsWith(host) || lower.startsWith("www.$host")
+        val withScheme = if (url.contains("://")) url else "https://$url"
+        val uriHost = runCatching {
+            java.net.URI(withScheme).host?.lowercase()
+        }.getOrNull() ?: return false
+        return uriHost == host || uriHost == "www.$host" || uriHost.endsWith(".$host")
     }
 }

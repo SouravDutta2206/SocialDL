@@ -49,13 +49,15 @@ fun String.isLikelyUrl(): Boolean {
 }
 
 /**
- * Ensures a URL string has an https:// scheme prefix.
+ * Ensures a URL string has an https:// scheme prefix, healing the common
+ * "ttps://..." clipboard typo (dropped leading h) on the way.
  */
 fun String.ensureHttps(): String {
     val trimmed = this.trim()
     return when {
         trimmed.startsWith("https://") -> trimmed
         trimmed.startsWith("http://") -> trimmed.replaceFirst("http://", "https://")
+        trimmed.startsWith("ttps://") -> "h$trimmed"
         else -> "https://$trimmed"
     }
 }

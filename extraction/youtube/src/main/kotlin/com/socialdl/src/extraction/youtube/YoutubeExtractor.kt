@@ -2,6 +2,7 @@ package com.socialdl.src.extraction.youtube
 
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.ThumbnailCache
+import com.socialdl.src.core.common.util.ensureHttps
 import com.socialdl.src.core.cookies.CookieStore
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaFormat
@@ -10,12 +11,14 @@ import com.socialdl.src.core.model.MuxStrategy
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.node.NodeBinaryProvider
 import com.socialdl.src.core.python.PythonEngine
+import com.socialdl.src.core.python.PythonExecutionException
 import com.socialdl.src.extraction.api.ExtractionError
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
-import com.socialdl.src.extraction.api.UrlPlatformResolver
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -25,6 +28,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlin.math.roundToInt
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -45,7 +49,8 @@ internal data class YtDlpNormalizedResponse(
     val webpage_url: String? = null,
     val title: String? = null,
     val uploader: String? = null,
-    val duration: Int? = null,
+    /** yt-dlp reports duration as a float (e.g. 212.05) — declare Double, round at mapping. */
+    val duration: Double? = null,
     val thumbnail_url: String? = null,
     val formats: List<YtDlpFormatDto> = emptyList(),
     val error: String? = null,
@@ -70,7 +75,8 @@ internal data class YtDlpFormatDto(
     val acodec: String? = null,
     val width: Int? = null,
     val height: Int? = null,
-    val fps: Int? = null,
+    /** yt-dlp reports fps as a float (e.g. 29.97) — declare Double, round at mapping. */
+    val fps: Double? = null,
     val abr: Double? = null,
     val asr: Int? = null,
     val audio_channels: Int? = null,
@@ -112,17 +118,8 @@ class YoutubeExtractor @Inject constructor(
         showsFormatPicker = true
     )
 
-    override fun supports(url: String): Boolean {
-        return UrlPlatformResolver.resolvePlatform(url) == Platform.YOUTUBE
-    }
-
     override suspend fun extract(url: String): ExtractionResult {
-        val trimmed = url.trim()
-        val normalizedUrl = when {
-            trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
-            trimmed.startsWith("ttps://") -> "h$trimmed"
-            else -> "https://$trimmed"
-        }
+        val normalizedUrl = url.trim().ensureHttps()
         if (!supports(normalizedUrl)) {
             return ExtractionResult.Error(ExtractionError.UnsupportedUrl(url))
         }
@@ -145,14 +142,20 @@ class YoutubeExtractor @Inject constructor(
             }
 
             parseYtDlpJson(rawJson, normalizedUrl)
+        } catch (e: TimeoutCancellationException) {
+            Logger.e(tag, "Extraction timed out for $url", e)
+            ExtractionResult.Error(ExtractionError.Timeout())
+        } catch (e: CancellationException) {
+            // User cancel or structured cancellation — must never be converted to
+            // a user-facing "parse failed"; let the coroutine unwind.
+            throw e
+        } catch (e: PythonExecutionException) {
+            // The traceback stays in logs; the user gets a generic parse message.
+            Logger.e(tag, "Extraction failed for $url", e)
+            ExtractionResult.Error(ExtractionError.ParsingFailed("Couldn't process YouTube's response"))
         } catch (e: Exception) {
             Logger.e(tag, "Extraction failed for $url", e)
-            val message = e.message ?: "Unknown extraction error"
-            if (message.contains("timed out", ignoreCase = true)) {
-                ExtractionResult.Error(ExtractionError.Timeout())
-            } else {
-                ExtractionResult.Error(ExtractionError.ParsingFailed(message))
-            }
+            ExtractionResult.Error(ExtractionError.ParsingFailed(e.message ?: "Unknown extraction error"))
         }
     }
 
@@ -227,7 +230,7 @@ class YoutubeExtractor @Inject constructor(
         itemUrl: String,
         carouselIndex: Int?
     ): MediaItem {
-        val duration = dto.duration ?: 0
+        val duration = dto.duration?.roundToInt() ?: 0
         val cachedThumb = thumbnailCache.store(dto.thumbnail_url) ?: dto.thumbnail_url
 
         // 1. Partition formats into audio-only, progressive (audio+video), and video-only (§4.2)
@@ -349,7 +352,7 @@ class YoutubeExtractor @Inject constructor(
             codec = dto.vcodec,
             approxSizeBytes = size.first,
             isSizeEstimated = size.second,
-            fps = dto.fps,
+            fps = dto.fps?.roundToInt(),
             height = dto.height,
             isHdr = isHdrFormat(dto.dynamic_range),
             directUrl = dto.url,
@@ -384,7 +387,7 @@ class YoutubeExtractor @Inject constructor(
             codec = dto.vcodec,
             approxSizeBytes = totalSize,
             isSizeEstimated = isEstimated || (bestAudio?.isSizeEstimated == true),
-            fps = dto.fps,
+            fps = dto.fps?.roundToInt(),
             height = dto.height,
             isHdr = isHdr,
             directUrl = dto.url,
@@ -401,7 +404,7 @@ class YoutubeExtractor @Inject constructor(
             dto.height != null -> "${dto.height}P"
             else -> "Video"
         }
-        val fpsStr = if (dto.fps != null && dto.fps > 30) " ${dto.fps}fps" else ""
+        val fpsStr = dto.fps?.roundToInt()?.takeIf { it > 30 }?.let { " ${it}fps" } ?: ""
         val hdrStr = if (isHdrFormat(dto.dynamic_range)) " HDR" else ""
         return "$res$fpsStr$hdrStr"
     }

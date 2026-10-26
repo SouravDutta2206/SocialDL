@@ -13,7 +13,12 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Handles network streaming and chunked range downloads with exponential backoff and resume capabilities.
+ * Handles network streaming and chunked range downloads with exponential backoff.
+ *
+ * Resume is intentionally OUT of scope (§9): a download starts from an empty
+ * destination file, and a worker re-run after process death/system stop
+ * restarts the file from byte 0. Retry/backoff exists only within a single
+ * chunk's attempt loop, never across runs.
  */
 @Singleton
 class ChunkedDownloader @Inject constructor(
@@ -47,6 +52,7 @@ class ChunkedDownloader @Inject constructor(
         chunkSizeBytes: Long,
         platform: String,
         isStopped: () -> Boolean,
+        canceller: DownloadCallCanceller? = null,
         onProgress: suspend (bytesWritten: Long, totalBytes: Long?) -> Unit
     ) {
         val effectiveChunkSize = when {
@@ -56,9 +62,9 @@ class ChunkedDownloader @Inject constructor(
         }
 
         if (effectiveChunkSize > 0L) {
-            downloadChunked(url, destination, effectiveChunkSize, isStopped, onProgress)
+            downloadChunked(url, destination, effectiveChunkSize, isStopped, canceller, onProgress)
         } else {
-            downloadSingleStream(url, destination, isStopped, onProgress)
+            downloadSingleStream(url, destination, isStopped, canceller, onProgress)
         }
     }
 
@@ -67,6 +73,7 @@ class ChunkedDownloader @Inject constructor(
         destination: File,
         chunkSize: Long,
         isStopped: () -> Boolean,
+        canceller: DownloadCallCanceller?,
         onProgress: suspend (bytesWritten: Long, totalBytes: Long?) -> Unit
     ) {
         if (destination.exists()) {
@@ -99,21 +106,37 @@ class ChunkedDownloader @Inject constructor(
                 }
                 chunkAttempts++
                 try {
-                    val request = Request.Builder()
-                        .url(url)
-                        .header("User-Agent", DEFAULT_USER_AGENT)
-                        .header("Accept-Encoding", "identity")
-                        .header("Range", "bytes=$chunkStart-$chunkEnd")
-                        .build()
+                    val call = streamingClient.newCall(
+                        Request.Builder()
+                            .url(url)
+                            .header("User-Agent", DEFAULT_USER_AGENT)
+                            .header("Accept-Encoding", "identity")
+                            .header("Range", "bytes=$chunkStart-$chunkEnd")
+                            .build()
+                    )
+                    // Registered so the worker can abort the blocked read the instant
+                    // the network drops instead of waiting out the read timeout.
+                    canceller?.register(call)
 
-                    streamingClient.newCall(request).execute().use { response ->
+                    call.execute().use { response ->
                         if (response.code == 416) {
-                            Logger.d(tag, "HTTP 416 Range Not Satisfiable at byte $chunkStart. Marking complete.")
-                            chunkSuccess = true
                             if (totalBytes == null) {
+                                // Unknown size and the server says the range is
+                                // past EOF: everything up to chunkStart is all
+                                // the server has — treat it as complete.
+                                Logger.d(tag, "HTTP 416 Range Not Satisfiable at byte $chunkStart. Marking complete.")
+                                chunkSuccess = true
                                 totalBytes = chunkStart
+                                return@use
                             }
-                            return@use
+                            // totalBytes was already resolved but the remaining
+                            // range is unsatisfiable: the file is truncated /
+                            // content changed underneath us. Retrying is pointless
+                            // and completing would silently persist a truncated
+                            // file — fail the download.
+                            throw RangeNotSatisfiableException(
+                                "HTTP error 416: Range Not Satisfiable at byte $chunkStart of resolved total=$totalBytes"
+                            )
                         }
 
                         if (response.code == 200 && chunkStart == 0L) {
@@ -129,6 +152,15 @@ class ChunkedDownloader @Inject constructor(
                             chunkSuccess = true
                             downloadedBytes = destination.length()
                             return@use
+                        }
+
+                        if (response.code == 200 && chunkStart > 0L) {
+                            // Server stopped honoring Range mid-download (or never
+                            // honored it for this URL). Retrying the same request
+                            // yields the same 200 — fail fast instead of burning
+                            // backoff cycles and full-body connection discards.
+                            Logger.w(tag, "Server returned 200 OK for ranged request at byte $chunkStart. Aborting.")
+                            throw RangeNotSupportedException("HTTP error 200: server ignored the Range request at byte $chunkStart")
                         }
 
                         if (response.code != 206) {
@@ -177,7 +209,16 @@ class ChunkedDownloader @Inject constructor(
                     }
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: RangeNotSatisfiableException) {
+                    throw e // server cannot serve the remaining range — retrying cannot fix it
+                } catch (e: RangeNotSupportedException) {
+                    throw e // server ignores Range — retrying cannot fix it
                 } catch (e: Exception) {
+                    if (canceller?.isCancelled == true) {
+                        // The watchdog aborted us (network loss): retrying against a
+                        // dead network is pointless — fail the download immediately.
+                        throw e
+                    }
                     lastError = e
                     Logger.w(tag, "Chunk $chunkStart-$chunkEnd failed (attempt $chunkAttempts/$MAX_RETRIES_PER_CHUNK): ${e.message}")
                     if (chunkAttempts < MAX_RETRIES_PER_CHUNK) {
@@ -199,14 +240,18 @@ class ChunkedDownloader @Inject constructor(
         url: String,
         destination: File,
         isStopped: () -> Boolean,
+        canceller: DownloadCallCanceller?,
         onProgress: suspend (bytesWritten: Long, totalBytes: Long?) -> Unit
     ) {
-        val request = Request.Builder()
-            .url(url)
-            .header("User-Agent", DEFAULT_USER_AGENT)
-            .build()
+        val call = streamingClient.newCall(
+            Request.Builder()
+                .url(url)
+                .header("User-Agent", DEFAULT_USER_AGENT)
+                .build()
+        )
+        canceller?.register(call)
 
-        streamingClient.newCall(request).execute().use { response ->
+        call.execute().use { response ->
             if (!response.isSuccessful) {
                 throw IOException("HTTP error ${response.code}: ${response.message}")
             }
@@ -262,3 +307,9 @@ class ChunkedDownloader @Inject constructor(
         return if (totalPart == "*") null else totalPart.trim().toLongOrNull()
     }
 }
+
+/** 416 on a range the resolved total says must exist — the file cannot be completed. */
+private class RangeNotSatisfiableException(message: String) : IOException(message)
+
+/** Server returned 200 for a ranged (non-zero-offset) request — Range support is gone. */
+private class RangeNotSupportedException(message: String) : IOException(message)

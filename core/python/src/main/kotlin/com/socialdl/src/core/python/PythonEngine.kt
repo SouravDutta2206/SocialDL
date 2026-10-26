@@ -4,6 +4,7 @@ import com.chaquo.python.PyException
 import com.chaquo.python.Python
 import com.socialdl.src.core.common.di.PythonDispatcher
 import com.socialdl.src.core.common.util.Logger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
@@ -62,12 +63,21 @@ open class PythonEngine @Inject constructor(
                     val jsonString = result?.toString() ?: ""
                     Logger.d(tag, "$module.$function returned ${jsonString.length} chars")
                     parse(jsonString)
+                } catch (e: CancellationException) {
+                    // Timeout (withTimeout) and cancellation (runInterruptible) must
+                    // propagate structurally — converting them to a parse error would
+                    // mask "user cancelled"/"timed out" and break the caller's
+                    // CancellationException contract. TimeoutCancellationException
+                    // escaping withTimeout is the normal timeout signal.
+                    throw e
                 } catch (e: PyException) {
                     val traceback = e.message ?: "Unknown Python error"
                     Logger.e(tag, "Python error in $module.$function: $traceback", e)
                     throw PythonExecutionException(
                         traceback = traceback,
-                        message = "Python execution error: $traceback",
+                        // Keep the traceback out of the message: this string flows
+                        // into user-facing extraction error cards.
+                        message = "Python execution error in $module.$function",
                         cause = e
                     )
                 } catch (e: Exception) {

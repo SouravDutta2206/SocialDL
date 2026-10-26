@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 import javax.inject.Inject
@@ -78,6 +79,10 @@ class DownloadManager @Inject constructor(
 
         val title = customTitle ?: mediaItem.title
         val author = customAuthor ?: mediaItem.author
+
+        // Destructive replace: starting the same download again discards a
+        // lingering FAILED record for it — no X-to-remove round-trip needed.
+        jobRepository.discardFailedJob(mediaItem.sourceUrl, mediaItem.carouselIndex ?: 0)
 
         // If format requires muxing, resolve paired audio stream upfront
         // (non-placeholder path; placeholders re-resolve in the worker via JIT).
@@ -163,43 +168,36 @@ class DownloadManager @Inject constructor(
     }
 
     /**
-     * Startup reconciliation:
-     * 1. Non-terminal Room jobs whose WorkManager work is missing or finished
-     *    (process death, system kill) are marked FAILED(INTERRUPTED) — they
-     *    surface as normal FAILED cards (X removable), consistent with kill-on-fail.
-     * 2. Orphan scratch dirs (`cache/downloads/<id>` with no job row) are swept.
+     * Startup reconciliation (kill-on-fail across restarts):
+     * 1. Every non-terminal Room job is killed unconditionally — its WorkManager
+     *    work is cancelled and it becomes a FAILED(INTERRUPTED) card, immediately,
+     *    regardless of connectivity or whether WorkManager rescheduled the work.
+     *    A pending (IS_PENDING=1) MediaStore row from an interrupted export is swept.
+     * 2. Orphan scratch dirs (`cache/downloads/<id>` with no live job) are swept.
      */
-    private suspend fun reconcileOnStartup() {
+    private suspend fun reconcileOnStartup() = withContext(Dispatchers.IO) {
         try {
             val workManager = WorkManager.getInstance(context)
             val jobs = jobRepository.getActiveJobs()
             jobs.forEach { job ->
-                val workAlive = try {
-                    workManager.getWorkInfosByTag(job.id).get()
-                        .any { !it.state.isFinished }
-                } catch (e: Exception) {
-                    Logger.w(tag, "WorkManager lookup failed for job ${job.id}", e)
-                    false
-                }
-                if (!workAlive) {
-                    Logger.i(tag, "Reconciling dead job ${job.id} (${job.status}) as FAILED(INTERRUPTED)")
-                    // P1-3 sweep: a MediaStore row created with IS_PENDING=1 during an
-                    // interrupted export is deleted if still pending.
-                    job.pendingUri?.let { uri ->
-                        if (deleteIfStillPending(uri)) {
-                            Logger.i(tag, "Swept orphaned pending MediaStore row for job ${job.id}")
-                        }
+                Logger.i(tag, "Reconciling dead job ${job.id} (${job.status}) as FAILED(INTERRUPTED)")
+                workManager.cancelAllWorkByTag(job.id)
+                // P1-3 sweep: a MediaStore row created with IS_PENDING=1 during an
+                // interrupted export is deleted if still pending.
+                job.pendingUri?.let { uri ->
+                    if (deleteIfStillPending(uri)) {
+                        Logger.i(tag, "Swept orphaned pending MediaStore row for job ${job.id}")
                     }
-                    jobRepository.markInterruptedIfNotFailed(job.id)
                 }
+                jobRepository.markInterruptedIfNotFailed(job.id)
             }
 
-            val knownIds = jobRepository.getActiveJobs().map { it.id }.toSet()
+            // No-resume + kill-everything-at-restart: every non-terminal row above
+            // just became FAILED, so NO scratch dir belongs to live work anymore.
+            // Partial files of force-stopped downloads are swept here too.
             File(context.cacheDir, "downloads").listFiles()?.forEach { dir ->
-                if (dir.name !in knownIds) {
-                    Logger.i(tag, "Sweeping orphan scratch dir ${dir.name}")
-                    dir.deleteRecursively()
-                }
+                Logger.i(tag, "Sweeping orphan scratch dir ${dir.name}")
+                dir.deleteRecursively()
             }
         } catch (e: Exception) {
             Logger.e(tag, "Startup reconciliation failed", e)

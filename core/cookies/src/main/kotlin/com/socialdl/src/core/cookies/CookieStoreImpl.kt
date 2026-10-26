@@ -44,7 +44,16 @@ class CookieStoreImpl @Inject constructor(
     private val mutex = Mutex()
 
     private val jarFile: File by lazy { File(File(context.filesDir, "cookies"), "youtube_cookies.txt.enc") }
-    private val tempDir: File by lazy { File(context.cacheDir, "cookies_bridge").also { it.mkdirs() } }
+    private val tempDir: File by lazy {
+        File(context.cacheDir, "cookies_bridge").also { dir ->
+            dir.mkdirs()
+            // Process death mid-extraction skips the finally in
+            // withYoutubeCookieFile, leaving a DECRYPTED jar on disk. Purge any
+            // survivors at the start of the next extraction — the decrypted
+            // jar must never outlive one call (§2.6 threat model).
+            dir.listFiles()?.forEach { stale -> runCatching { stale.delete() } }
+        }
+    }
 
     override fun hasYoutubeCookies(): Boolean {
         return jarFile.exists() && jarFile.length() > 0

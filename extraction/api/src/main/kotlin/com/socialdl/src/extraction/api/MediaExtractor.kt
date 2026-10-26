@@ -16,8 +16,12 @@ interface MediaExtractor {
     val capabilities: PlatformCapabilities
         get() = PlatformCapabilities()
 
-    /** Returns true if this extractor can handle the given URL. */
-    fun supports(url: String): Boolean
+    /**
+     * Returns true if this extractor can handle the given URL.
+     * Default: single-platform resolution via [UrlPlatformResolver] — override
+     * only when an extractor handles a platform its [platform] field doesn't name.
+     */
+    fun supports(url: String): Boolean = UrlPlatformResolver.resolvePlatform(url) == platform
 
     /**
      * Resolves metadata and downloadable stream formats for the URL.
@@ -25,4 +29,15 @@ interface MediaExtractor {
      * or [ExtractionResult.Error] with typed cause.
      */
     suspend fun extract(url: String): ExtractionResult
+}
+
+/**
+ * Base for not-yet-implemented extractors (Phases 5/6/7): returns a typed
+ * [ExtractionError.NotImplemented] — never TODO() (which would throw
+ * NotImplementedError into the caller's coroutine) and never
+ * [ExtractionError.ContentUnavailable] (which means "post deleted/-private").
+ */
+abstract class PlaceholderExtractor : MediaExtractor {
+    override suspend fun extract(url: String): ExtractionResult =
+        ExtractionResult.Error(ExtractionError.NotImplemented(platform, url))
 }

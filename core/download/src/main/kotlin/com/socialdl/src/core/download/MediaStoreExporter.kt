@@ -107,11 +107,19 @@ class MediaStoreExporter @Inject constructor(
         }
 
         return try {
-            resolver.openOutputStream(itemUri)?.use { output ->
+            val copied = resolver.openOutputStream(itemUri)?.use { output ->
                 file.inputStream().use { input ->
                     input.copyTo(output)
                 }
-            } ?: return null
+            } != null
+            if (!copied) {
+                // openOutputStream returned null (no stream available) — same
+                // failure class as a failed copy: delete the pending row so no
+                // zero-byte IS_PENDING ghost is left in the gallery.
+                Logger.e(tag, "openOutputStream returned null for $itemUri; deleting pending row")
+                resolver.delete(itemUri, null, null)
+                return null
+            }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 contentValues.clear()

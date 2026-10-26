@@ -4,7 +4,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -12,12 +11,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -34,7 +30,6 @@ import com.socialdl.src.core.ui.theme.SocialDLIndicator
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
-import com.socialdl.src.core.ui.theme.SocialDLSheetHeader
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerHigh
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerLow
 
@@ -57,36 +52,15 @@ fun FormatSubmenuView(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // Submenu Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+        SheetHeader(
+            title = "Format",
+            subtitle = "Select format"
         ) {
-            Column {
-                Text(
-                    text = "Format",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = SocialDLOnSurface
-                )
-                Text(
-                    text = "Select format",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = SocialDLOnSurfaceVariant
-                )
-            }
-
-            Button(
-                onClick = onBack,
-                shape = CircleShape,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = SocialDLSheetHeader,
-                    contentColor = SocialDLOnSurface
-                )
-            ) {
-                Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(text = "OK", style = MaterialTheme.typography.labelLarge)
-            }
+            SheetPillButton(
+                label = "OK",
+                icon = Icons.Default.Check,
+                onClick = onBack
+            )
         }
 
         // Single scrollable stream list with Video Section then Audio Section
