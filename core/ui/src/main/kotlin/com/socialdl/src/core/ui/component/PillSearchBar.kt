@@ -19,7 +19,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Search
@@ -57,7 +57,7 @@ fun PillSearchBar(
     onSearch: () -> Unit,
     isLoading: Boolean = false,
     modifier: Modifier = Modifier,
-    placeholderText: String = "Paste link or search..."
+    placeholderText: String = "Paste a video or post link..."
 ) {
     val context = LocalContext.current
 
@@ -205,7 +205,7 @@ fun PillSearchBar(
                     )
                 } else {
                     Icon(
-                        imageVector = Icons.Default.ArrowForward,
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
                         contentDescription = null,
                         tint = SocialDLOnSurface,
                         modifier = Modifier.size(18.dp)

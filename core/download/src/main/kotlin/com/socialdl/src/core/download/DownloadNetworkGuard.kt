@@ -30,6 +30,11 @@ class DownloadCallCanceller {
         if (cancelled) call.cancel()
     }
 
+    /** Drops a finished call so the set stays bounded for long downloads. */
+    fun unregister(call: Call) {
+        calls.remove(call)
+    }
+
     /** Aborts every registered (and any future) call. */
     fun cancel() {
         cancelled = true
@@ -71,6 +76,9 @@ class NetworkLossWatchdog(
 
     private val request = NetworkRequest.Builder()
         .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        // VALIDATED excludes captive portals that report INTERNET but cannot
+        // actually reach the origin (the download would otherwise hang/retry).
+        .addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         .build()
 
     /** Registers the callback; pre-existing matching networks fire [onAvailable] at registration. */

@@ -32,8 +32,14 @@ data class DownloadJobEntity(
     val platform: String,
     /** Carousel slot index — part of the uiKey dedup formula (see MediaItem.uiKey). */
     val carouselIndex: Int = 0,
+    /** Exact source format ID, so a JIT re-resolution can pick the same stream. */
+    val formatId: String = "",
     val formatLabel: String = "",
     val formatKind: String = "",
+    /**
+     * Output container. Blank means "resolve at download time" — used for
+     * placeholder (batch/playlist) jobs so the JIT-resolved format decides.
+     */
     val container: String = "",
     val groupId: String? = null,
     val status: DownloadStatus,

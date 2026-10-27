@@ -62,6 +62,7 @@ import com.socialdl.src.core.common.util.toHumanReadableSize
 import com.socialdl.src.core.database.entity.DownloadHistoryEntity
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadStatus
+import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.ui.component.SocialDLToastHost
 import com.socialdl.src.core.ui.component.ToastMessage
 import com.socialdl.src.core.ui.component.ToastType
@@ -183,6 +184,14 @@ fun DownloadsScreen(
                                 color = SocialDLAccent,
                                 modifier = Modifier.padding(vertical = 4.dp)
                             )
+                            // Kill-on-fail is a deliberate product policy: make it
+                            // visible rather than surprising the user after a restart.
+                            Text(
+                                text = "Downloads stop if the app is closed or killed.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = SocialDLOnSurfaceDim,
+                                modifier = Modifier.padding(bottom = 4.dp)
+                            )
                         }
 
                         items(uiState.activeJobs, key = { "active_${it.id}" }) { job ->
@@ -209,7 +218,7 @@ fun DownloadsScreen(
                                 entity = history,
                                 onOpen = {
                                     try {
-                                        val mimeType = MediaStorageUtils.getMimeType(history.container)
+                                        val mimeType = history.resolvedMimeType()
                                         val intent = Intent(Intent.ACTION_VIEW).apply {
                                             setDataAndType(Uri.parse(history.localUri), mimeType)
                                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -225,7 +234,7 @@ fun DownloadsScreen(
                                 },
                                 onShare = {
                                     try {
-                                        val mimeType = MediaStorageUtils.getMimeType(history.container)
+                                        val mimeType = history.resolvedMimeType()
                                         val intent = Intent(Intent.ACTION_SEND).apply {
                                             type = mimeType
                                             putExtra(Intent.EXTRA_STREAM, Uri.parse(history.localUri))
@@ -349,6 +358,17 @@ private fun ActiveDownloadCard(
     }
 }
 
+/**
+ * History MIME: use the value persisted at download time; legacy rows fall back
+ * to container mapping with the typed media kind instead of assuming video.
+ */
+private fun DownloadHistoryEntity.resolvedMimeType(): String = mimeType.ifBlank {
+    MediaStorageUtils.getMimeType(
+        container = container,
+        isAudio = FormatKind.fromOrNull(formatKind) == FormatKind.AUDIO
+    )
+}
+
 @Composable
 private fun CompletedDownloadCard(
     entity: DownloadHistoryEntity,
@@ -423,21 +443,21 @@ private fun CompletedDownloadCard(
 
             // Action Buttons
             Row {
-                IconButton(onClick = onOpen, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = onOpen, modifier = Modifier.size(48.dp)) {
                     Icon(
                         imageVector = Icons.Default.PlayArrow,
                         contentDescription = "Open",
                         tint = SocialDLOnSurface
                     )
                 }
-                IconButton(onClick = onShare, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = onShare, modifier = Modifier.size(48.dp)) {
                     Icon(
                         imageVector = Icons.Default.Share,
                         contentDescription = "Share",
                         tint = SocialDLOnSurfaceDim
                     )
                 }
-                IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = onDelete, modifier = Modifier.size(48.dp)) {
                     Icon(
                         imageVector = Icons.Default.Delete,
                         contentDescription = "Delete",

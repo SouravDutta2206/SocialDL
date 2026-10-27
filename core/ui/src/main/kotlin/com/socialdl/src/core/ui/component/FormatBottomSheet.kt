@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 import com.socialdl.src.core.model.FormatKind
+import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.ui.theme.SocialDLBadgeBlue
@@ -108,8 +109,16 @@ fun FormatBottomSheet(
         mutableStateOf(availableFormats.firstOrNull() ?: item.imageFormats.firstOrNull())
     }
 
-    var selectedContainer by remember(isAudio) {
-        mutableStateOf(if (isAudio) "Default" else "Default")
+    // Only containers that can actually be produced for the selected stream. This
+    // prevents saving WebM/Opus bytes under an .mp4/.mp3 extension: a single
+    // stream is never transcoded, and a mux target is chosen from the codec.
+    val containerOptions = remember(selectedFormat?.id) {
+        selectedFormat?.let { format ->
+            MediaContainer.optionsFor(format).map { it.extension.uppercase() }
+        } ?: listOf("Default")
+    }
+    var selectedContainer by remember(selectedFormat?.id) {
+        mutableStateOf(containerOptions.first())
     }
 
     var customTitle by remember(item) { mutableStateOf(item.title) }
@@ -131,6 +140,7 @@ fun FormatBottomSheet(
                 FormatSubmenuView(
                     item = item,
                     selectedFormat = selectedFormat,
+                    activeKind = if (isAudio) FormatKind.AUDIO else FormatKind.VIDEO,
                     onSelectFormat = {
                         selectedFormat = it
                         showFormatSubmenu = false
@@ -148,6 +158,7 @@ fun FormatBottomSheet(
                     selectedTab = selectedTab,
                     onTabSelected = { selectedTab = it },
                     selectedFormat = selectedFormat,
+                    containerOptions = containerOptions,
                     selectedContainer = selectedContainer,
                     onContainerSelected = { selectedContainer = it },
                     onOpenSubmenu = { showFormatSubmenu = true },
@@ -175,6 +186,7 @@ private fun MainDownloadSheetView(
     selectedTab: Int,
     onTabSelected: (Int) -> Unit,
     selectedFormat: MediaFormat?,
+    containerOptions: List<String>,
     selectedContainer: String,
     onContainerSelected: (String) -> Unit,
     onOpenSubmenu: () -> Unit,
@@ -354,11 +366,6 @@ private fun MainDownloadSheetView(
 
             // Container Dropdown Box
             var containerMenuExpanded by remember { mutableStateOf(false) }
-            val containers = if (selectedTab == 0) {
-                listOf("Default", "MP3", "M4A", "OPUS", "FLAC", "WAV", "AAC")
-            } else {
-                listOf("Default", "MP4", "WEBM", "MKV", "MOV", "AVI")
-            }
 
             Box(modifier = Modifier.weight(1f)) {
                 Surface(
@@ -414,7 +421,7 @@ private fun MainDownloadSheetView(
                     onDismissRequest = { containerMenuExpanded = false },
                     modifier = Modifier.background(SocialDLSurfaceContainerHigh)
                 ) {
-                    containers.forEach { containerOption ->
+                    containerOptions.forEach { containerOption ->
                         DropdownMenuItem(
                             text = {
                                 Text(

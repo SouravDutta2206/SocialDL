@@ -4,11 +4,11 @@ import com.socialdl.src.core.common.util.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
+import kotlinx.coroutines.runInterruptible
 import java.util.regex.Pattern
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -23,6 +23,16 @@ class FFmpegProcessExecutor @Inject constructor(
 ) {
     private val tag = "FFmpegExecutor"
 
+    /** Callers can fail with a typed error before spawning a missing binary. */
+    fun isAvailable(): Boolean = binaryProvider.isAvailable()
+
+    private companion object {
+        /** Large muxes can legitimately take a while; this bounds a hung process. */
+        const val DEFAULT_TIMEOUT_MS = 15 * 60 * 1000L
+        const val MAX_CAPTURED_CHARS = 16 * 1024
+        const val MAX_ERROR_TAIL_CHARS = 4 * 1024
+    }
+
     private val frameRegex = Pattern.compile("""frame=\s*(\d+)""")
     private val fpsRegex = Pattern.compile("""fps=\s*([\d\.]+)""")
     private val sizeRegex = Pattern.compile("""size=\s*(\d+)kB""")
@@ -30,7 +40,10 @@ class FFmpegProcessExecutor @Inject constructor(
     private val bitrateRegex = Pattern.compile("""bitrate=\s*([\d\.]+)kbits/s""")
     private val speedRegex = Pattern.compile("""speed=\s*([\d\.]+)x""")
 
-    suspend fun run(args: List<String>): Flow<FFmpegEvent> = callbackFlow {
+    suspend fun run(
+        args: List<String>,
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+    ): Flow<FFmpegEvent> = callbackFlow {
         val binaryPath = binaryProvider.path()
         val command = listOf(binaryPath) + args
         Logger.d(tag, "Executing ffmpeg command: ${command.joinToString(" ")}")
@@ -44,7 +57,6 @@ class FFmpegProcessExecutor @Inject constructor(
             }
             pb.start()
         } catch (e: Exception) {
-
             Logger.e(tag, "Failed to start ffmpeg process", e)
             send(FFmpegEvent.Failed(-1, e.message ?: "Failed to start process"))
             close()
@@ -58,13 +70,17 @@ class FFmpegProcessExecutor @Inject constructor(
         val errorBuffer = StringBuilder()
         val stdoutBuffer = StringBuilder()
 
+        fun appendBounded(target: StringBuilder, line: String) {
+            target.appendLine(line)
+            val overflow = target.length - MAX_CAPTURED_CHARS
+            if (overflow > 0) target.delete(0, overflow)
+        }
+
         // Drain stdout so the child never blocks on a full pipe (which would hang waitFor() indefinitely).
         val stdoutJob = launch(Dispatchers.IO) {
             try {
                 process.inputStream.bufferedReader().forEachLine { line ->
-                    if (stdoutBuffer.length < 4096) {
-                        stdoutBuffer.appendLine(line)
-                    }
+                    appendBounded(stdoutBuffer, line)
                 }
             } catch (e: Exception) {
                 Logger.e(tag, "Error reading ffmpeg stdout", e)
@@ -74,53 +90,56 @@ class FFmpegProcessExecutor @Inject constructor(
         val stderrJob = launch(Dispatchers.IO) {
             try {
                 process.errorStream.bufferedReader().forEachLine { line ->
-                    if (errorBuffer.length < 4096) {
-                        errorBuffer.appendLine(line)
-                    }
-                    val progress = parseProgress(line)
-                    if (progress != null) {
-                        trySend(progress)
-                    }
+                    // Keep the TAIL of the log: ffmpeg reports the real failure at
+                    // the end, not in the first 4 KB.
+                    appendBounded(errorBuffer, line)
+                    parseProgress(line)?.let { trySend(it) }
                 }
             } catch (e: Exception) {
                 Logger.e(tag, "Error reading ffmpeg stderr", e)
             }
         }
 
-        val exitCode = withContext(Dispatchers.IO) {
-            try {
-                process.waitFor()
+        var timedOut = false
+        val timeoutJob = launch {
+            delay(timeoutMs)
+            timedOut = true
+            Logger.w(tag, "ffmpeg timed out after ${timeoutMs}ms; killing process")
+            process.destroyForcibly()
+        }
+
+        // runInterruptible makes waitFor() respond to coroutine cancellation (a
+        // plain blocking wait ignores it). The waiter owns terminal delivery;
+        // awaitClose owns cleanup, so cancellation while ffmpeg runs cannot leak
+        // a process or leave the flow open.
+        val waiter = launch(Dispatchers.IO) {
+            val exitCode = try {
+                runInterruptible { process.waitFor() }
             } catch (e: CancellationException) {
-                Logger.d(tag, "Process wait cancelled; killing ffmpeg process")
-                process.destroyForcibly()
                 throw e
             } catch (e: Exception) {
                 Logger.w(tag, "Process wait failed", e)
                 -1
             }
-        }
+            timeoutJob.cancel()
+            runCatching { stderrJob.join() }
+            runCatching { stdoutJob.join() }
 
-        try {
-            stderrJob.join()
-        } catch (_: Exception) {
+            if (exitCode == 0 && !timedOut) {
+                Logger.d(tag, "ffmpeg process completed successfully")
+                send(FFmpegEvent.Completed)
+            } else {
+                // errorBuffer already holds the bounded tail of stderr.
+                val errorTail = errorBuffer.toString().takeLast(MAX_ERROR_TAIL_CHARS)
+                Logger.e(tag, "ffmpeg process failed with code $exitCode: $errorTail")
+                send(FFmpegEvent.Failed(if (timedOut) -2 else exitCode, errorTail))
+            }
+            close()
         }
-        try {
-            stdoutJob.join()
-        } catch (_: Exception) {
-        }
-
-        if (exitCode == 0) {
-            Logger.d(tag, "ffmpeg process completed successfully")
-            send(FFmpegEvent.Completed)
-        } else {
-            val lastErrors = errorBuffer.takeLast(1000).toString()
-            Logger.e(tag, "ffmpeg process failed with code $exitCode: $lastErrors")
-            send(FFmpegEvent.Failed(exitCode, lastErrors))
-        }
-
-        close()
 
         awaitClose {
+            timeoutJob.cancel()
+            waiter.cancel()
             stderrJob.cancel()
             stdoutJob.cancel()
             if (process.isAlive) {

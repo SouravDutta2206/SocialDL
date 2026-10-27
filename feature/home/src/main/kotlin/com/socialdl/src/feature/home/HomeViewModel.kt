@@ -82,8 +82,12 @@ class HomeViewModel @Inject constructor(
 
         viewModelScope.launch {
             _resolvingItemId.value = item.sourceUrl
-            val extractor = extractorRegistry.resolve(item.sourceUrl)
-            if (extractor != null) {
+            try {
+                val extractor = extractorRegistry.resolve(item.sourceUrl)
+                if (extractor == null) {
+                    onResolved(item)
+                    return@launch
+                }
                 when (val result = extractor.extract(item.sourceUrl)) {
                     is ExtractionResult.Success -> {
                         val resolvedItem = result.items.firstOrNull()?.copy(
@@ -97,20 +101,26 @@ class HomeViewModel @Inject constructor(
                             }
                             state.copy(mediaItems = updatedList)
                         }
-                        _resolvingItemId.value = null
                         onResolved(resolvedItem)
                     }
                     is ExtractionResult.Error -> {
-                        _resolvingItemId.value = null
                         messageBus.post(
                             stringRes(R.string.home_error_presets_failed, result.cause.message),
                             isError = true
                         )
                     }
                 }
-            } else {
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Logger.e(tag, "Failed to resolve formats for '${item.title}'", e)
+                messageBus.post(
+                    stringRes(R.string.home_error_presets_failed, e.message ?: "unknown error"),
+                    isError = true
+                )
+            } finally {
+                // Never leave the card spinner stuck, even if extraction throws.
                 _resolvingItemId.value = null
-                onResolved(item)
             }
         }
     }

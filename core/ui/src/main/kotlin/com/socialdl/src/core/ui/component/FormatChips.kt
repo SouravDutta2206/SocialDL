@@ -121,7 +121,7 @@ private fun BadgeChip(
         Text(
             text = text,
             style = MaterialTheme.typography.labelSmall.copy(
-                fontSize = 9.sp,
+                fontSize = 11.sp,
                 fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
                 fontFamily = if (monospace) FontFamily.Monospace else null
             ),

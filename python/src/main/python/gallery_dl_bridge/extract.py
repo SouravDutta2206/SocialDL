@@ -62,7 +62,7 @@ def extract(url, cookiefile=None, user_agent=None):
     for fallback_index, (media_url, meta) in enumerate(files, 1):
         items.append({
             "index": meta.get("num") or fallback_index,
-            "media_type": "video" if meta.get("video_url") else "image",
+            "media_type": "video" if _is_video(media_url, meta) else "image",
             "url": media_url,
             "thumbnail_url": meta.get("display_url"),
             "duration": meta.get("duration"),
@@ -74,6 +74,20 @@ def extract(url, cookiefile=None, user_agent=None):
         "owner": post.get("username"),
         "items": items,
     })
+
+
+_VIDEO_EXTENSIONS = (".mp4", ".m4v", ".mov", ".webm")
+
+
+def _is_video(media_url, meta):
+    """Videos are not guaranteed to expose ``video_url`` in gallery-dl metadata.
+    Treat an explicit type, video metadata, or a video URL extension as video."""
+    if meta.get("video_url"):
+        return True
+    if str(meta.get("media_type") or "").lower() == "video":
+        return True
+    path = str(media_url or "").split("?", 1)[0].lower()
+    return path.endswith(_VIDEO_EXTENSIONS)
 
 
 def _configure(cookiefile, user_agent):
@@ -88,9 +102,9 @@ def _configure(cookiefile, user_agent):
     # muxing is not needed for these already-merged Instagram streams).
     config.set(("extractor", "instagram"), "videos", "merged")
     config.set(("extractor", "instagram"), "audio", False)
-    # gallery-dl's Instagram extractor paces requests 6-12s by default; one post
-    # per app call is a single API request, so that pacing only adds latency.
-    config.set(("extractor", "instagram"), "sleep-request", 0)
+    # Keep a small delay between requests: removing pacing entirely (0) makes
+    # rapid successive carousel/manual fetches much more likely to hit HTTP 429.
+    config.set(("extractor", "instagram"), "sleep-request", 1)
 
 
 def _failure_envelope(error, cookiefile):

@@ -1,11 +1,12 @@
 package com.socialdl.src
 
 import android.app.Application
+import android.os.Build
 import com.chaquo.python.Python
-import com.chaquo.python.android.AndroidPlatform
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.ffmpeg.FFmpegBinaryProvider
 import com.socialdl.src.core.node.NodeBinaryProvider
+import com.socialdl.src.core.python.PythonBootstrap
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -50,10 +51,9 @@ class SocialDLApplication : Application(), Configuration.Provider {
 
     override fun onCreate() {
         super.onCreate()
-        // Initialize Chaquopy Python runtime if not already started
-        if (!Python.isStarted()) {
-            Python.start(AndroidPlatform(this))
-        }
+        // Start Chaquopy on a background thread. PythonEngine awaits readiness
+        // before its first call, so onCreate no longer blocks the main thread.
+        PythonBootstrap.begin(this)
 
         // Foreground download notification channel (P1-1) — created once at app start.
         notificationManager.ensureChannel()
@@ -92,22 +92,53 @@ class SocialDLApplication : Application(), Configuration.Provider {
         }
     }
 
+    /** Timed wait with an API 24-25 fallback (Process.waitFor(timeout) is API 26+). */
+    private fun waitForWithTimeout(process: Process, seconds: Long): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return process.waitFor(seconds, TimeUnit.SECONDS)
+        }
+        val deadline = System.currentTimeMillis() + seconds * 1000
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                process.exitValue()
+                return true
+            } catch (_: IllegalThreadStateException) {
+                Thread.sleep(100)
+            }
+        }
+        return false
+    }
+
+    private fun destroyProcess(process: Process) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            process.destroyForcibly()
+        } else {
+            process.destroy()
+        }
+    }
+
     private fun runDiagnosticsSmokeTest() {
         diagnosticsScope.launch {
             try {
+                // Wait for the background Chaquopy start before touching Python.
+                PythonBootstrap.awaitStarted()
+
                 // 1. Python smoke test: call common.ping per Phase 0 & Phase 2 exit criteria
                 val py = Python.getInstance()
                 val pingModule = py.getModule("common.ping")
                 val pingResult = pingModule.callAttr("ping", "SocialDL Phase 0/2 Boot Check")
                 Logger.i("SocialDL_Boot", "Chaquopy Smoke Test OK: $pingResult")
 
-                // Pre-warm yt_dlp module so the first user search avoids Python import lag
-                try {
-                    val extractModule = py.getModule("yt_dlp_bridge.extract")
-                    extractModule.callAttr("warmup")
-                    Logger.i("SocialDL_Boot", "Chaquopy yt_dlp bridge pre-warmed")
-                } catch (e: Exception) {
-                    Logger.w("SocialDL_Boot", "yt_dlp bridge pre-warm non-critical error: ${e.message}")
+                // Pre-warm yt_dlp only in debug builds: in release it burns CPU and
+                // memory on every boot for a benefit the first search already hides.
+                if (BuildConfig.DEBUG) {
+                    try {
+                        val extractModule = py.getModule("yt_dlp_bridge.extract")
+                        extractModule.callAttr("warmup")
+                        Logger.i("SocialDL_Boot", "Chaquopy yt_dlp bridge pre-warmed")
+                    } catch (e: Exception) {
+                        Logger.w("SocialDL_Boot", "yt_dlp bridge pre-warm non-critical error: ${e.message}")
+                    }
                 }
 
                 // FFmpeg/node smoke tests spawn subprocesses; only worth the boot cost in DEBUG builds.
@@ -122,10 +153,10 @@ class SocialDLApplication : Application(), Configuration.Provider {
                         pb.environment().putAll(ffmpegBinaryProvider.environment())
                         val process = pb.start()
                         val versionLine = process.inputStream.bufferedReader().readLine() ?: ""
-                        val finished = process.waitFor(10, TimeUnit.SECONDS)
+                        val finished = waitForWithTimeout(process, 10)
                         if (!finished) {
                             Logger.w("SocialDL_Boot", "FFmpeg smoke test timed out after 10s; killing process")
-                            process.destroyForcibly()
+                            destroyProcess(process)
                         } else {
                             val exitCode = process.exitValue()
                             Logger.i("SocialDL_Boot", "FFmpeg Smoke Test exit=$exitCode: $versionLine")
@@ -143,10 +174,10 @@ class SocialDLApplication : Application(), Configuration.Provider {
                         pb.environment().putAll(nodeBinaryProvider.environment())
                         val process = pb.start()
                         val nodeOutput = process.inputStream.bufferedReader().readLine() ?: ""
-                        val finished = process.waitFor(10, TimeUnit.SECONDS)
+                        val finished = waitForWithTimeout(process, 10)
                         if (!finished) {
                             Logger.w("SocialDL_Boot", "Node smoke test timed out after 10s; killing process")
-                            process.destroyForcibly()
+                            destroyProcess(process)
                         } else {
                             val exitCode = process.exitValue()
                             Logger.i("SocialDL_Boot", "Node Smoke Test exit=$exitCode: $nodeOutput")

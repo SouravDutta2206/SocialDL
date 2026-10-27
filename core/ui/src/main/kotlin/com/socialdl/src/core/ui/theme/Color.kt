@@ -28,7 +28,7 @@ val SocialDLAccentDark = Color(0xFFDC2626)        // Darker accent variant
 // ── Text ──
 val SocialDLOnSurface = Color(0xFFF1F5F9)         // slate-100 — primary text
 val SocialDLOnSurfaceVariant = Color(0xFF9E9CA5)  // Muted text / subtitles
-val SocialDLOnSurfaceDim = Color(0xFF64748B)      // slate-500 — very muted
+val SocialDLOnSurfaceDim = Color(0xFF94A3B8)      // slate-400 — readable on SocialDLBg
 
 // ── Status / semantic ──
 val SocialDLSuccess = Color(0xFF34D399)           // emerald-400

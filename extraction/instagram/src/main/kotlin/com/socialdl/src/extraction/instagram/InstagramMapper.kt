@@ -1,6 +1,7 @@
 package com.socialdl.src.extraction.instagram
 
 import com.socialdl.src.core.model.FormatKind
+import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
@@ -27,10 +28,17 @@ internal suspend fun mapInstagramItems(
             ?: item.thumbnail_url
             ?: directUrl
 
+        // The CDN URL carries the real media extension (jpg/webp/png/mp4). Never
+        // hardcode JPEG: a WebP image saved as .jpg/image/jpeg is mislabeled.
+        val container = MediaContainer.fromUrl(
+            url = directUrl,
+            fallback = if (isVideo) MediaContainer.MP4 else MediaContainer.JPEG
+        )
+
         val format = MediaFormat(
             id = "${if (isVideo) "video" else "image"}_$index",
             kind = if (isVideo) FormatKind.VIDEO else FormatKind.IMAGE,
-            container = if (isVideo) "MP4" else "JPEG",
+            container = container.extension.uppercase(),
             label = if (isVideo) "Video" else "Image",
             directUrl = directUrl,
             requiresMuxing = false,

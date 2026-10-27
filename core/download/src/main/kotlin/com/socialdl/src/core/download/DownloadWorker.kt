@@ -7,16 +7,21 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.database.entity.DownloadJobEntity
-import com.socialdl.src.core.model.DownloadStatus
 import com.socialdl.src.core.ffmpeg.FFmpegEvent
 import com.socialdl.src.core.ffmpeg.FFmpegProcessExecutor
+import com.socialdl.src.core.model.DownloadStatus
+import com.socialdl.src.core.model.FormatKind
+import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MuxStrategy
+import com.socialdl.src.core.model.allFormats
+import com.socialdl.src.core.settings.SettingsRepository
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.ExtractorRegistry
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
@@ -59,6 +64,7 @@ class DownloadWorker @AssistedInject constructor(
     private val concurrencyGate: DownloadConcurrencyGate,
     private val extractorRegistry: ExtractorRegistry,
     private val notificationManager: DownloadNotificationManager,
+    private val settingsRepository: SettingsRepository,
 ) : CoroutineWorker(appContext, workerParams) {
 
     /** Effective stream configuration after optional JIT resolution of a placeholder format. */
@@ -70,6 +76,9 @@ class DownloadWorker @AssistedInject constructor(
         val audioChunkSize: Long,
         val muxStrategy: MuxStrategy?,
         val container: String,
+        val formatKind: FormatKind,
+        val formatLabel: String,
+        val formatId: String,
     )
 
     private val tag = "DownloadWorker"
@@ -157,7 +166,14 @@ class DownloadWorker @AssistedInject constructor(
         val job = jobRepository.getJob(jobId)
         if (job == null) {
             // Row deleted before/at start => the user already cancelled; nothing to do.
-            Logger.i(tag, "[$jobId] Job row missing at worker start — cancelled; aborting")
+            Logger.i(tag, "[$jobId] Job row missing at worker start - cancelled; aborting")
+            return@withContext Result.failure()
+        }
+
+        // A FAILED row can still have live WorkManager work (startup reconciliation
+        // races, a late failure write). Never download for a terminal card.
+        if (job.status == DownloadStatus.FAILED || job.status == DownloadStatus.COMPLETED) {
+            Logger.i(tag, "[$jobId] Job is already terminal (${job.status}); refusing to run")
             return@withContext Result.failure()
         }
 
@@ -253,7 +269,7 @@ class DownloadWorker @AssistedInject constructor(
             if (mediaTemp.renameTo(convertedFile)) convertedFile else mediaTemp
         }
 
-        return exportAndPersist(job, finalFile, resolved.container)
+        return exportAndPersist(job, finalFile, resolved)
     }
 
     /**
@@ -268,13 +284,20 @@ class DownloadWorker @AssistedInject constructor(
             tag,
             "[$jobId] Acquiring streams: container=${job.container}, requiresMuxing=${job.requiresMuxing}, isPlaceholder=${job.isPlaceholder}"
         )
-        jobRepository.registerProgress(
+        // The first transition doubles as the "still active" guard: a row already
+        // FAILED by startup reconciliation, or deleted by cancel, matches zero
+        // rows and the pipeline must not start downloading for it.
+        val started = jobRepository.registerProgress(
             id = jobId,
             status = DownloadStatus.DOWNLOADING,
             progress = 0f,
             downloadedBytes = 0L,
             totalBytes = job.totalBytes
         )
+        if (!started) {
+            Logger.i(tag, "[$jobId] Job is no longer active at start; aborting before download")
+            return null
+        }
 
         var effectiveDirectUrl = job.directUrl
         var effectiveAudioDirectUrl = job.audioDirectUrl
@@ -292,8 +315,16 @@ class DownloadWorker @AssistedInject constructor(
                 }
         }
         var effectiveContainer = job.container
+        var effectiveFormatKind = FormatKind.from(job.formatKind)
+        var effectiveFormatLabel = job.formatLabel
+        var effectiveFormatId = job.formatId
+        var resolvedViaExtraction = false
+        val forceH264 = runCatching { settingsRepository.forceH264Transcode.first() }
+            .getOrDefault(false)
 
-        if (job.isPlaceholder || effectiveDirectUrl.isNullOrBlank()) {
+        // Resolve when the job is a placeholder, its signed URL expired, or a
+        // legacy row has no container to derive an extension/MIME from.
+        if (job.isPlaceholder || effectiveDirectUrl.isNullOrBlank() || effectiveContainer.isBlank()) {
             Logger.i(tag, "[$jobId] JIT resolving stream formats for: ${job.sourceUrl}")
 
             val extractor = extractorRegistry.resolve(job.sourceUrl)
@@ -312,14 +343,19 @@ class DownloadWorker @AssistedInject constructor(
                         return null
                     }
 
-                    val isAudio = job.formatKind == "AUDIO"
-                    val isImage = job.formatKind.equals("IMAGE", ignoreCase = true)
-                    val resolvedFormat = when {
-                        isImage -> resolvedItem.imageFormats.firstOrNull()
+                    val requestedKind = FormatKind.from(job.formatKind)
+                    // Prefer the exact persisted format id (same stream the user
+                    // picked) over "first of kind", which may silently upgrade or
+                    // downgrade the selection after a URL refresh.
+                    val exactFormat = job.formatId
+                        .takeIf { !job.isPlaceholder && it.isNotBlank() }
+                        ?.let { id -> resolvedItem.allFormats().firstOrNull { it.id == id } }
+                    val resolvedFormat = exactFormat ?: when (requestedKind) {
+                        FormatKind.IMAGE -> resolvedItem.imageFormats.firstOrNull()
                             ?: resolvedItem.videoFormats.firstOrNull()
-                        isAudio -> resolvedItem.audioFormats.firstOrNull()
+                        FormatKind.AUDIO -> resolvedItem.audioFormats.firstOrNull()
                             ?: resolvedItem.videoFormats.firstOrNull()
-                        else -> resolvedItem.videoFormats.firstOrNull()
+                        FormatKind.VIDEO -> resolvedItem.videoFormats.firstOrNull()
                             ?: resolvedItem.audioFormats.firstOrNull()
                     }
 
@@ -333,9 +369,28 @@ class DownloadWorker @AssistedInject constructor(
                     effectiveRequiresMuxing = resolvedFormat.requiresMuxing
                     effectiveVideoChunkSize = resolvedFormat.httpChunkSizeBytes ?: 0L
                     effectiveMuxStrategy = resolvedFormat.muxStrategy
-                    effectiveContainer =
-                        if (job.container.isNotBlank() && job.container != "Default") job.container
-                        else resolvedFormat.container
+                    effectiveFormatKind = resolvedFormat.kind
+                    effectiveFormatLabel = resolvedFormat.label
+                    effectiveFormatId = resolvedFormat.id
+
+                    // Only accept an explicit container when it is actually
+                    // producible for this stream; otherwise adopt the codec-derived
+                    // container instead of relabeling bytes (P0-5/P0-6).
+                    val autoContainer = MediaContainer.recommendedFor(resolvedFormat)
+                    val requestedContainer = job.container
+                        .takeIf { it.isNotBlank() && !it.equals("Default", ignoreCase = true) }
+                    effectiveContainer = requestedContainer
+                        ?.takeIf { MediaContainer.isCompatible(resolvedFormat, it) }
+                        ?.let { MediaContainer.extensionOf(it) }
+                        ?: autoContainer.extension
+                    effectiveContainer = effectiveContainer.uppercase(Locale.ROOT)
+
+                    // Force-H.264 applies only to muxed, non-HDR streams: a full
+                    // re-encode of HDR would destroy the dynamic range.
+                    if (forceH264 && resolvedFormat.requiresMuxing && !resolvedFormat.isHdr) {
+                        effectiveContainer = MediaContainer.MP4.extension.uppercase(Locale.ROOT)
+                        effectiveMuxStrategy = MuxStrategy.FORCE_H264
+                    }
 
                     if (resolvedFormat.requiresMuxing) {
                         val pairedAudio = resolvedItem.audioFormats.find { it.id == resolvedFormat.pairedAudioFormatId }
@@ -343,6 +398,7 @@ class DownloadWorker @AssistedInject constructor(
                         effectiveAudioDirectUrl = pairedAudio?.directUrl
                         effectiveAudioChunkSize = pairedAudio?.httpChunkSizeBytes ?: 0L
                     }
+                    resolvedViaExtraction = true
                 }
                 is ExtractionResult.Error -> {
                     Logger.e(tag, "[$jobId] JIT stream resolution failed: ${result.cause.message}")
@@ -358,11 +414,18 @@ class DownloadWorker @AssistedInject constructor(
             return null
         }
 
-        // Persist the JIT-resolved container so the export step derives
-        // extension/MIME/RELATIVE_PATH from the format actually downloaded,
-        // not the stale placeholder value ("Default" rows may resolve to WEBM etc).
-        if (effectiveContainer != job.container) {
-            jobRepository.updateJob(job.copy(container = effectiveContainer))
+        // Persist resolved metadata with a targeted UPDATE so export derives
+        // extension/MIME/RELATIVE_PATH from the stream actually downloaded. A zero
+        // row count means the user cancelled while extraction was running.
+        if (resolvedViaExtraction) {
+            val persisted = jobRepository.updateResolvedMetadata(
+                id = jobId,
+                container = effectiveContainer,
+                formatId = effectiveFormatId,
+                formatKind = effectiveFormatKind,
+                formatLabel = effectiveFormatLabel
+            )
+            if (!persisted) return null
         }
 
         // P0-3 gate: a mux-required format with no audio track must fail before any
@@ -383,7 +446,10 @@ class DownloadWorker @AssistedInject constructor(
             videoChunkSize = effectiveVideoChunkSize,
             audioChunkSize = effectiveAudioChunkSize,
             muxStrategy = effectiveMuxStrategy,
-            container = effectiveContainer
+            container = effectiveContainer,
+            formatKind = effectiveFormatKind,
+            formatLabel = effectiveFormatLabel,
+            formatId = effectiveFormatId
         )
     }
 
@@ -481,14 +547,24 @@ class DownloadWorker @AssistedInject constructor(
         videoTemp: File,
         audioTemp: File
     ): File? {
+        if (!ffmpegProcessExecutor.isAvailable()) {
+            Logger.e(tag, "[$jobId] FFmpeg binary is unavailable; cannot mux")
+            markFailed(jobId, DownloadError.MuxFailed)
+            return null
+        }
+
         Logger.i(tag, "[$jobId] Both streams downloaded. Starting FFmpeg muxing into $container...")
-        jobRepository.registerProgress(
+        val muxing = jobRepository.registerProgress(
             id = jobId,
             status = DownloadStatus.MUXING,
             progress = 0.95f,
             downloadedBytes = videoTemp.length() + audioTemp.length(),
             totalBytes = videoTemp.length() + audioTemp.length()
         )
+        if (!muxing) {
+            Logger.i(tag, "[$jobId] Job became terminal before muxing; aborting")
+            return null
+        }
 
         val ext = container.lowercase(Locale.ROOT)
         val muxedFile = File(scratchDir, "muxed.$ext")
@@ -537,7 +613,7 @@ class DownloadWorker @AssistedInject constructor(
     private suspend fun exportAndPersist(
         job: DownloadJobEntity,
         finalFile: File,
-        resolvedContainer: String
+        resolved: ResolvedStreams
     ): Boolean {
         val jobId = job.id
 
@@ -548,41 +624,40 @@ class DownloadWorker @AssistedInject constructor(
         }
 
         Logger.i(tag, "[$jobId] Exporting ${finalFile.length()} bytes to MediaStore...")
-        jobRepository.registerProgress(
+        val exporting = jobRepository.registerProgress(
             id = jobId,
             status = DownloadStatus.EXPORTING,
             progress = 0.95f,
             downloadedBytes = finalFile.length(),
             totalBytes = finalFile.length()
         )
+        if (!exporting) {
+            Logger.i(tag, "[$jobId] Job became terminal before export; aborting")
+            return false
+        }
 
-        val isAudioOnly = job.formatKind.equals("AUDIO", ignoreCase = true) ||
-                resolvedContainer.uppercase(Locale.ROOT) in listOf("MP3", "M4A", "OPUS", "FLAC", "WAV", "AAC", "OGG") ||
-                job.formatLabel.contains("MP3", ignoreCase = true) ||
-                job.formatLabel.contains("M4A", ignoreCase = true) ||
-                job.formatLabel.contains("OPUS", ignoreCase = true) ||
-                job.formatLabel.contains("FLAC", ignoreCase = true)
-
-        val isImage = job.formatKind.equals("IMAGE", ignoreCase = true)
+        val resolvedJob = job.copy(
+            container = resolved.container,
+            formatId = resolved.formatId,
+            formatKind = resolved.formatKind.name,
+            formatLabel = resolved.formatLabel
+        )
 
         val outputUri = mediaStoreExporter.export(
             file = finalFile,
-            title = job.title,
-            author = job.author,
-            container = resolvedContainer,
-            isAudio = isAudioOnly,
-            isImage = isImage,
+            title = resolvedJob.title,
+            author = resolvedJob.author,
+            container = resolved.container,
+            kind = resolved.formatKind,
             onPendingRowCreated = { pendingUri ->
                 // P1-3: record the pending MediaStore row durably, and re-check the
                 // cancellation guard right after row creation so cancels mid-copy
                 // abort before the (long) file copy starts.
-                val current = jobRepository.getJob(jobId)
-                if (current == null) {
+                val persisted = jobRepository.setPendingUri(jobId, pendingUri.toString())
+                if (!persisted) {
                     Logger.i(tag, "[$jobId] Job row missing after pending-row creation — cancelled")
                     return@export false
                 }
-                // Full-row update; status stays EXPORTING (same-status write is allowed).
-                jobRepository.updateJob(current.copy(pendingUri = pendingUri.toString()))
                 true
             }
         )
@@ -601,19 +676,22 @@ class DownloadWorker @AssistedInject constructor(
             return false
         }
 
-        // Persist to Room: insert history + delete job atomically (§10). All terminal
-        // outcomes are written before the Result is returned.
-        jobRepository.finishJobSuccessfully(
-            job = job.copy(container = resolvedContainer),
+        // Persist to Room: delete the EXPORTING row + insert history atomically
+        // (§10). A zero-row delete means a cancel won the race; do not record a
+        // completion for it.
+        val recorded = jobRepository.finishJobSuccessfully(
+            job = resolvedJob,
             outputUri = outputUri.toString(),
             fileSizeBytes = finalFile.length()
         )
+        if (!recorded) return false
 
+        notificationManager.notifyCompleted(jobId, resolvedJob.title)
         Logger.i(tag, "[$jobId] Download completed successfully: uri=$outputUri, size=${finalFile.length()}")
         eventBus.emit(
             DownloadEvent.Completed(
                 jobId = jobId,
-                title = job.title,
+                title = resolvedJob.title,
                 outputUri = outputUri.toString(),
                 fileSizeBytes = finalFile.length()
             )
@@ -649,66 +727,40 @@ class DownloadWorker @AssistedInject constructor(
         container: String,
         muxStrategy: MuxStrategy? = null
     ): List<String> {
-        val upperContainer = container.uppercase(Locale.ROOT)
-        return when (upperContainer) {
-            "MP4" -> {
-                when (muxStrategy) {
-                    MuxStrategy.REMUX_COPY -> listOf(
-                        "-y",
-                        "-i", videoFile.absolutePath,
-                        "-i", audioFile.absolutePath,
-                        "-c", "copy",
-                        "-movflags", "+faststart",
-                        outputFile.absolutePath
-                    )
-                    MuxStrategy.FORCE_H264 -> listOf(
-                        "-y",
-                        "-i", videoFile.absolutePath,
-                        "-i", audioFile.absolutePath,
-                        "-c:v", "libx264",
-                        "-preset", "fast",
-                        "-crf", "23",
-                        "-c:a", "aac",
-                        "-b:a", "192k",
-                        "-movflags", "+faststart",
-                        outputFile.absolutePath
-                    )
-                    MuxStrategy.TRANSCODE_AUDIO_ONLY, null -> listOf(
-                        "-y",
-                        "-i", videoFile.absolutePath,
-                        "-i", audioFile.absolutePath,
-                        "-c:v", "copy",
-                        "-c:a", "aac",
-                        "-b:a", "192k",
-                        "-movflags", "+faststart",
-                        outputFile.absolutePath
-                    )
-                }
+        // -nostdin prevents ffmpeg from consuming stdin; explicit -map picks the
+        // first video of input 0 and the first audio of input 1, so a stream with
+        // an unexpected extra track cannot be muxed by accident.
+        val inputs = listOf(
+            "-y",
+            "-nostdin",
+            "-i", videoFile.absolutePath,
+            "-i", audioFile.absolutePath,
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-shortest"
+        )
+        val codecArgs = when (container.uppercase(Locale.ROOT)) {
+            "MP4", "MOV" -> when (muxStrategy) {
+                MuxStrategy.REMUX_COPY -> listOf("-c", "copy", "-movflags", "+faststart")
+                MuxStrategy.FORCE_H264 -> listOf(
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                    "-crf", "23",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-movflags", "+faststart"
+                )
+                MuxStrategy.TRANSCODE_AUDIO_ONLY, null -> listOf(
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-movflags", "+faststart"
+                )
             }
-            "MKV" -> listOf(
-                "-y",
-                "-i", videoFile.absolutePath,
-                "-i", audioFile.absolutePath,
-                "-c", "copy",
-                outputFile.absolutePath
-            )
-            "WEBM" -> listOf(
-                "-y",
-                "-i", videoFile.absolutePath,
-                "-i", audioFile.absolutePath,
-                "-c:v", "copy",
-                "-c:a", "libopus",
-                outputFile.absolutePath
-            )
-            else -> listOf(
-                "-y",
-                "-i", videoFile.absolutePath,
-                "-i", audioFile.absolutePath,
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-movflags", "+faststart",
-                outputFile.absolutePath
-            )
+            "WEBM" -> listOf("-c:v", "copy", "-c:a", "libopus", "-b:a", "160k")
+            // MKV (and the defensive fallback) copies any codec pair losslessly.
+            else -> listOf("-c", "copy")
         }
+        return inputs + codecArgs + outputFile.absolutePath
     }
 }

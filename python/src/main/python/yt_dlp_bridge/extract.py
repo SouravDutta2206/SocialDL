@@ -12,22 +12,33 @@ class _DebugLogCollector:
     error envelope can carry the client-skip diagnostics (e.g. 'web_creator requires
     a PO token', 'requiring account age-verification') instead of just the final
     playability reason. Always attached; only ever emitted on error envelopes.
+
+    Bounded ring buffer: a long extraction can emit thousands of lines, and only
+    the last 40 ever reach the envelope.
     """
+
+    MAX_LINES = 200
 
     def __init__(self):
         self.lines = []
 
+    def _append(self, line):
+        self.lines.append(line)
+        overflow = len(self.lines) - self.MAX_LINES
+        if overflow > 0:
+            del self.lines[:overflow]
+
     def debug(self, msg):
-        self.lines.append(str(msg))
+        self._append(str(msg))
 
     def info(self, msg):
-        self.lines.append(str(msg))
+        self._append(str(msg))
 
     def warning(self, msg):
-        self.lines.append("[warn] " + str(msg))
+        self._append("[warn] " + str(msg))
 
     def error(self, msg):
-        self.lines.append("[error] " + str(msg))
+        self._append("[error] " + str(msg))
 
 # Substrings of yt-dlp's DownloadError message that specifically mean
 # "this needs a logged-in session", not just "something went wrong" —
@@ -73,13 +84,32 @@ def _ensure_native_env(ld_library_path):
     """
     if not ld_library_path:
         return
-    existing = os.environ.get("LD_LIBRARY_PATH")
-    os.environ["LD_LIBRARY_PATH"] = ld_library_path + (os.pathsep + existing if existing else "")
+    # Every extraction calls this; prepending blindly grows the variable without
+    # bound. Merge unique entries in order (new paths first, existing preserved).
+    merged = []
+    for part in ld_library_path.split(os.pathsep) + (os.environ.get("LD_LIBRARY_PATH") or "").split(os.pathsep):
+        if part and part not in merged:
+            merged.append(part)
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(merged)
     os.environ["OPENSSL_CONF"] = "/dev/null"
 
 
 def _is_playlist_url(url: str) -> bool:
-    return "list=" in url or "/playlist" in url
+    """Structural check: a watch URL with a video id is a single video even when
+    it carries a ``list=`` parameter. Only true playlist surfaces count."""
+    from urllib.parse import parse_qs, urlparse
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not (host == "youtube.com" or host.endswith(".youtube.com")):
+        return False
+    if parsed.path.rstrip("/") == "/playlist":
+        return True
+    query = parse_qs(parsed.query)
+    # youtube.com/watch?v=...&list=... → the user pasted one video.
+    if query.get("v"):
+        return False
+    return bool(query.get("list"))
 
 
 # Log lines (from yt-dlp via the logger collector) that mean the JS runtime chain
@@ -181,13 +211,20 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
     `native_bin_dir` / `native_ld_library_path` come from the Kotlin side's
     [NativeRuntime.Paths] so the native runtime contract has a single owner.
     """
+    is_playlist = _is_playlist_url(url)
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,       # metadata only — never triggers a download
-        "noplaylist": not _is_playlist_url(url),  # allow playlist extraction when list is present
-        "extract_flat": "in_playlist" if _is_playlist_url(url) else False,  # fast flat metadata for playlists, deep for single videos
+        "noplaylist": not is_playlist,  # allow playlist extraction only for real playlist URLs
+        "extract_flat": "in_playlist" if is_playlist else False,  # flat metadata for playlists
         "cookiefile": cookiefile,    # decrypted temp path if available
+        # Bound hangs and transient retries inside the bridge; Kotlin's timeout is
+        # the outer guard, these keep a single request from stalling the pipeline.
+        "socket_timeout": 20,
+        "retries": 3,
+        "extractor_retries": 2,
+        "fragment_retries": 2,
     }
 
     node_bin = _resolve_node_runtime(node_dir, native_bin_dir)

@@ -20,7 +20,11 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            // Only arm64-v8a ships real Node/FFmpeg binaries. The other ABIs were
+            // committed as Git LFS pointer text files; including them produces an
+            // APK whose native tools fail at runtime. Re-add an ABI only after its
+            // .so files are real ELF binaries and have been tested on-device.
+            abiFilters += listOf("arm64-v8a")
         }
     }
 

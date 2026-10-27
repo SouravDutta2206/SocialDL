@@ -44,6 +44,9 @@ data class MediaItem(
         get() = videoFormats.any { it.isPlaceholder } || audioFormats.any { it.isPlaceholder }
 }
 
+/** Every stream of every kind, for exact `formatId` lookup after JIT re-resolution. */
+fun MediaItem.allFormats(): List<MediaFormat> = videoFormats + audioFormats + imageFormats
+
 /**
  * Stable identity key for LazyColumn rows and download-task lookups.
  * Carousel items use their carouselIndex; non-carousel items fall back to the provided

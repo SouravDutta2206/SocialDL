@@ -25,8 +25,10 @@ import javax.inject.Inject
 /**
  * UI state backed by [SettingsRepository].
  *
- * NOTE: this is storage-only wiring — the download pipeline consumption of these
- * preferences (concurrency semaphore, Wi-Fi gate, folder redirects) remains deferred.
+ * Download-affecting preferences are now consumed by the pipeline: concurrency
+ * (semaphore size), Wi-Fi-only (WorkManager network constraint) and force-H.264
+ * (mux strategy). Theme, accent, preferred search engine and SAF folder redirects
+ * remain storage-only and are not yet applied by the UI/exporter.
  */
 data class SettingsUiState(
     val theme: AppTheme = AppTheme.DARK,

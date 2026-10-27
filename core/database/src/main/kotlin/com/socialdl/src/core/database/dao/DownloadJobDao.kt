@@ -47,20 +47,40 @@ interface DownloadJobDao {
     )
     fun observeActiveJobs(): Flow<List<DownloadJobEntity>>
 
-    /** Snapshot for startup reconciliation (jobs that ran to completion or were deleted are absent). */
+    /**
+     * Snapshot for startup reconciliation. FAILED cards are excluded: they have no
+     * live work left and must not be re-failed/cancelled on every launch.
+     */
     @Query(
         "SELECT * FROM download_jobs " +
-            "WHERE status IN ('QUEUED','DOWNLOADING','MUXING','EXPORTING','FAILED')"
+            "WHERE status IN ('QUEUED','DOWNLOADING','MUXING','EXPORTING')"
     )
     suspend fun getActiveJobs(): List<DownloadJobEntity>
 
     @Query("SELECT * FROM download_jobs WHERE sourceUrl = :sourceUrl")
     suspend fun getJobsBySourceUrl(sourceUrl: String): List<DownloadJobEntity>
 
+    /** Idempotency lookup: the same stream slot already queued/running. */
+    @Query(
+        "SELECT * FROM download_jobs " +
+            "WHERE sourceUrl = :sourceUrl AND carouselIndex = :carouselIndex AND formatId = :formatId " +
+            "AND status IN ('QUEUED','DOWNLOADING','MUXING','EXPORTING') LIMIT 1"
+    )
+    suspend fun findActiveDuplicate(
+        sourceUrl: String,
+        carouselIndex: Int,
+        formatId: String
+    ): DownloadJobEntity?
+
+    /**
+     * Conditional progress write. [allowedFrom] encodes the legal transition for
+     * the target status, so progress ticks can never resurrect a FAILED row or
+     * move a completed/cancelled job backwards. Returns affected-row count.
+     */
     @Query(
         "UPDATE download_jobs SET status = :status, progress = :progress, " +
             "downloadedBytes = :downloadedBytes, totalBytes = :totalBytes, updatedAt = :updatedAt " +
-            "WHERE id = :id"
+            "WHERE id = :id AND status IN (:allowedFrom)"
     )
     suspend fun updateProgress(
         id: String,
@@ -68,8 +88,20 @@ interface DownloadJobDao {
         progress: Float,
         downloadedBytes: Long,
         totalBytes: Long?,
-        updatedAt: Long
+        updatedAt: Long,
+        allowedFrom: List<DownloadStatus>
+    ): Int
+
+    /** Success-path guard: delete only while still exporting. Returns affected rows. */
+    @Query("DELETE FROM download_jobs WHERE id = :id AND status = :status")
+    suspend fun deleteJobIfStatus(id: String, status: DownloadStatus): Int
+
+    /** Persist the pending MediaStore row without rewriting the whole job. */
+    @Query(
+        "UPDATE download_jobs SET pendingUri = :pendingUri, updatedAt = :updatedAt " +
+            "WHERE id = :id AND status IN ('QUEUED','DOWNLOADING','MUXING','EXPORTING')"
     )
+    suspend fun updatePendingUri(id: String, pendingUri: String, updatedAt: Long): Int
 
     /** Marks a job FAILED in one statement unless it already is; never resurrects a FAILED row. */
     @Query(
@@ -82,6 +114,25 @@ interface DownloadJobDao {
         "UPDATE download_jobs SET status = :status, updatedAt = :updatedAt WHERE id = :id"
     )
     suspend fun updateStatus(id: String, status: DownloadStatus, updatedAt: Long)
+
+    /**
+     * Persist JIT-resolved stream metadata without rewriting the whole row (which
+     * would clobber concurrent status/progress writes). Returns the number of rows
+     * affected: 0 means the row was deleted (user cancelled) while resolving.
+     */
+    @Query(
+        "UPDATE download_jobs SET container = :container, formatId = :formatId, " +
+            "formatKind = :formatKind, formatLabel = :formatLabel, updatedAt = :updatedAt " +
+            "WHERE id = :id AND status IN ('QUEUED','DOWNLOADING','MUXING','EXPORTING')"
+    )
+    suspend fun updateResolvedMetadata(
+        id: String,
+        container: String,
+        formatId: String,
+        formatKind: String,
+        formatLabel: String,
+        updatedAt: Long
+    ): Int
 
     /** Final failure write: status + message in one statement (used after guard reads).
      *  Idempotent like [markFailed]: no-op if the row is gone or already FAILED. */

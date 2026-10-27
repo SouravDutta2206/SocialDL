@@ -1,6 +1,7 @@
 package com.socialdl.src.core.cookies.ui
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
@@ -185,7 +186,23 @@ private fun CaptureWebView(
                     override fun shouldOverrideUrlLoading(
                         view: WebView,
                         request: WebResourceRequest
-                    ): Boolean = false
+                    ): Boolean {
+                        // Only the platform's own sign-in hosts may load inside this
+                        // unaddressable full-screen surface. Everything else opens in
+                        // an external browser (or is ignored for non-web schemes), so
+                        // a redirect cannot turn the capture screen into a phishing
+                        // page the user cannot inspect.
+                        if (request.url.scheme?.lowercase() !in setOf("http", "https")) {
+                            return true
+                        }
+                        if (isAllowedHost(request.url.host, config.allowedHosts)) {
+                            return false
+                        }
+                        runCatching {
+                            view.context.startActivity(Intent(Intent.ACTION_VIEW, request.url))
+                        }
+                        return true
+                    }
 
                     override fun onPageFinished(view: WebView, url: String?) {
                         onSettled(url)
@@ -195,4 +212,11 @@ private fun CaptureWebView(
             }.also { webViewRef = it }
         }
     )
+}
+
+private fun isAllowedHost(host: String?, allowedHosts: List<String>): Boolean {
+    val normalized = host?.lowercase()?.removeSuffix(".") ?: return false
+    return allowedHosts.any { allowed ->
+        normalized == allowed || normalized.endsWith(".$allowed")
+    }
 }
