@@ -33,8 +33,12 @@ class CookieCaptureController @Inject constructor(
 
     /** Resolves the flow config for [platform], probing the runtime UA for YouTube. */
     suspend fun config(platform: Platform): CookieCaptureConfig = when (platform) {
+        Platform.YOUTUBE -> YoutubeCookieCapture.config(userAgent = userAgentProvider.probe())
         Platform.INSTAGRAM -> InstagramCookieCapture.config()
-        else -> YoutubeCookieCapture.config(userAgent = userAgentProvider.probe())
+        // Exhaustive: never silently treat Twitter/Threads/UNKNOWN as YouTube and
+        // harvest the wrong platform's session.
+        Platform.TWITTER, Platform.THREADS, Platform.UNKNOWN ->
+            throw IllegalArgumentException("Cookie capture is not supported for ${platform.name}")
     }
 
     /**

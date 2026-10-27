@@ -5,10 +5,12 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.work.ForegroundInfo
+import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.toHumanReadableSize
 import com.socialdl.src.core.model.DownloadStatus
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -31,13 +33,54 @@ class DownloadNotificationManager @Inject constructor(
 
     fun ensureChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Download progress",
-                NotificationManager.IMPORTANCE_LOW
+            systemNotificationManager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_ID,
+                    "Download progress",
+                    NotificationManager.IMPORTANCE_LOW
+                )
             )
-            systemNotificationManager.createNotificationChannel(channel)
+            systemNotificationManager.createNotificationChannel(
+                NotificationChannel(
+                    CHANNEL_COMPLETE_ID,
+                    "Download completed",
+                    NotificationManager.IMPORTANCE_DEFAULT
+                )
+            )
         }
+    }
+
+    /**
+     * Posts a completion notification. The in-app toast bus is best-effort and
+     * dropped when the app is backgrounded, so the user must be able to learn
+     * about a finished download without opening the app.
+     */
+    fun notifyCompleted(jobId: String, title: String) {
+        ensureChannel()
+        val notification = NotificationCompat.Builder(context, CHANNEL_COMPLETE_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle(title)
+            .setContentText("Download complete")
+            .setContentIntent(openAppPendingIntent())
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .build()
+        runCatching {
+            systemNotificationManager.notify(jobIdNotificationId(jobId) + COMPLETION_ID_OFFSET, notification)
+        }.onFailure { Logger.w("DownloadNotification", "Failed to post completion notification", it) }
+    }
+
+    /** Opens the app's launcher activity; null when no launcher intent exists. */
+    private fun openAppPendingIntent(): PendingIntent? {
+        val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: return null
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        return PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 
     /**
@@ -87,6 +130,7 @@ class DownloadNotificationManager @Inject constructor(
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(statusText)
+            .setContentIntent(openAppPendingIntent())
             .setOnlyAlertOnce(true)
             .setOngoing(true)
             .addAction(
@@ -102,6 +146,8 @@ class DownloadNotificationManager @Inject constructor(
 
     companion object {
         const val CHANNEL_ID = "download_progress"
+        const val CHANNEL_COMPLETE_ID = "download_complete"
+        private const val COMPLETION_ID_OFFSET = 1
     }
 }
 

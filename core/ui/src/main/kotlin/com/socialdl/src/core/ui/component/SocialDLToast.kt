@@ -30,6 +30,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.socialdl.src.core.ui.theme.SocialDLSuccess
 import com.socialdl.src.core.ui.theme.SocialDLToastBg
@@ -86,7 +89,10 @@ fun SocialDLToastHost(
                     shape = CircleShape,
                     color = SocialDLToastBg.copy(alpha = 0.95f),
                     shadowElevation = 8.dp,
-                    modifier = Modifier.padding(bottom = 80.dp)
+                    modifier = Modifier
+                        .padding(bottom = 80.dp)
+                        // Announce toast text to screen readers instead of only drawing it.
+                        .semantics { liveRegion = LiveRegionMode.Polite }
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),

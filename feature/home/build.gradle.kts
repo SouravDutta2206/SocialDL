@@ -37,6 +37,10 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     debugImplementation(libs.compose.ui.tooling)
 
+    // Permissions at download time (activity result + ContextCompat)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.activity.compose)
+
     // Navigation
     implementation(libs.navigation.compose)
 

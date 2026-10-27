@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.ui.theme.SocialDLIndicator
@@ -42,9 +43,26 @@ import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerLow
 fun FormatSubmenuView(
     item: MediaItem,
     selectedFormat: MediaFormat?,
+    activeKind: FormatKind,
     onSelectFormat: (MediaFormat) -> Unit,
     onBack: () -> Unit
 ) {
+    // The submenu follows the active tab: an audio picker must never offer a
+    // video stream (and vice versa). Fall back to any available kind only when
+    // the active one is genuinely empty, so the sheet is never blank.
+    val formats = when (activeKind) {
+        FormatKind.AUDIO -> item.audioFormats
+        FormatKind.IMAGE -> item.imageFormats
+        FormatKind.VIDEO -> item.videoFormats
+    }.ifEmpty {
+        item.videoFormats.ifEmpty { item.audioFormats }.ifEmpty { item.imageFormats }
+    }
+    val sectionLabel = when (activeKind) {
+        FormatKind.AUDIO -> "AUDIO STREAMS"
+        FormatKind.IMAGE -> "IMAGE STREAMS"
+        FormatKind.VIDEO -> "VIDEO STREAMS"
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -70,52 +88,16 @@ fun FormatSubmenuView(
                 .height(380.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            if (item.videoFormats.isNotEmpty()) {
-                item {
+            if (formats.isNotEmpty()) {
+                item(key = "section_$activeKind") {
                     Text(
-                        text = "VIDEO STREAMS",
+                        text = sectionLabel,
                         style = MaterialTheme.typography.labelSmall,
                         color = SocialDLIndicator,
                         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
                     )
                 }
-                items(item.videoFormats) { fmt ->
-                    FormatItemRow(
-                        format = fmt,
-                        isSelected = fmt.id == selectedFormat?.id,
-                        onClick = { onSelectFormat(fmt) }
-                    )
-                }
-            }
-
-            if (item.audioFormats.isNotEmpty()) {
-                item {
-                    Text(
-                        text = "AUDIO STREAMS",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = SocialDLIndicator,
-                        modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)
-                    )
-                }
-                items(item.audioFormats) { fmt ->
-                    FormatItemRow(
-                        format = fmt,
-                        isSelected = fmt.id == selectedFormat?.id,
-                        onClick = { onSelectFormat(fmt) }
-                    )
-                }
-            }
-
-            if (item.imageFormats.isNotEmpty()) {
-                item {
-                    Text(
-                        text = "IMAGE STREAMS",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = SocialDLIndicator,
-                        modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)
-                    )
-                }
-                items(item.imageFormats) { fmt ->
+                items(formats, key = { it.id }) { fmt ->
                     FormatItemRow(
                         format = fmt,
                         isSelected = fmt.id == selectedFormat?.id,

@@ -52,6 +52,7 @@ class DownloadsViewModel @Inject constructor(
     private val tag = "DownloadsViewModel"
     private val refreshTrigger = MutableStateFlow(0)
     private val isPurgingStale = AtomicBoolean(false)
+    private var lastPurgeAt = 0L
 
     // One-shot user messages (deletion failures, download completions) posted to a
     // shared bus consumed by the Screen as styled toasts — same mechanism as Home.
@@ -98,16 +99,46 @@ class DownloadsViewModel @Inject constructor(
         }
     }
 
-    private fun purgeStaleRecords() {
+    private fun purgeStaleRecords(force: Boolean = false) {
         // Guard against overlapping purge runs with an atomic CAS instead of a checked-then-set flag.
         if (!isPurgingStale.compareAndSet(false, true)) return
+        val startedAt = System.currentTimeMillis()
+        if (!force && startedAt - lastPurgeAt < PURGE_THROTTLE_MS) {
+            isPurgingStale.set(false)
+            return
+        }
+        lastPurgeAt = startedAt
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val currentHistory = downloadDao.getAllHistory().first()
-                val staleIds = currentHistory.filterNot { MediaStorageUtils.doesMediaFileExist(context, it.localUri) }.map { it.id }
-                if (staleIds.isNotEmpty()) {
-                    Logger.i(tag, "Purging ${staleIds.size} stale download history record(s) missing from storage")
-                    downloadDao.deleteHistory(staleIds)
+                val now = System.currentTimeMillis()
+                val newlyMissing = mutableListOf<String>()
+                val present = mutableListOf<String>()
+                val expired = mutableListOf<String>()
+
+                for (item in currentHistory) {
+                    if (MediaStorageUtils.doesMediaFileExist(context, item.localUri)) {
+                        if (item.missingSince != null) present += item.id
+                        continue
+                    }
+                    val missingSince = item.missingSince
+                    when {
+                        // First miss: flag it, never delete. A transient unmount,
+                        // provider hiccup, or revoked URI must not destroy history.
+                        missingSince == null -> newlyMissing += item.id
+                        now - missingSince >= MISSING_GRACE_MS -> expired += item.id
+                        // Still inside the grace period: leave the timestamp alone.
+                    }
+                }
+
+                if (present.isNotEmpty()) downloadDao.clearMissing(present)
+                if (newlyMissing.isNotEmpty()) {
+                    downloadDao.markMissing(newlyMissing, now)
+                    Logger.i(tag, "Marked ${newlyMissing.size} history record(s) as missing (grace period)")
+                }
+                if (expired.isNotEmpty()) {
+                    Logger.i(tag, "Purging ${expired.size} history record(s) missing beyond the grace period")
+                    downloadDao.deleteHistoryInChunks(expired)
                 }
             } catch (e: Exception) {
                 Logger.w(tag, "Error purging stale download history", e)
@@ -202,5 +233,13 @@ class DownloadsViewModel @Inject constructor(
         try {
             context.contentResolver.unregisterContentObserver(contentObserver)
         } catch (_: Exception) {}
+    }
+
+    private companion object {
+        /** Do not delete history until a missing file has stayed missing this long. */
+        const val MISSING_GRACE_MS = 24 * 60 * 60 * 1000L
+
+        /** MediaStore can emit bursts; a full existence scan every second is wasteful. */
+        const val PURGE_THROTTLE_MS = 5 * 60 * 1000L
     }
 }

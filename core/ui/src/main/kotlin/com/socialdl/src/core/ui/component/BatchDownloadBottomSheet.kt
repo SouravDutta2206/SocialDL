@@ -255,7 +255,7 @@ private fun BatchItemRow(
                     Text(
                         text = index.toString(),
                         style = MaterialTheme.typography.labelSmall.copy(
-                            fontSize = 10.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         ),
                         color = SocialDLOnSurfaceVariant
@@ -290,7 +290,7 @@ private fun BatchItemRow(
                     ) {
                         Text(
                             text = duration.toTimeString(),
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, fontWeight = FontWeight.Bold),
                             color = Color.White,
                             modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                         )

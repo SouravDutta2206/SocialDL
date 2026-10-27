@@ -70,6 +70,42 @@ object DatabaseModule {
         }
     }
 
+    /**
+     * v3 → v4: persist the exact format ID (JIT re-resolution), the typed media
+     * kind + resolved MIME in history (correct open/share intents), and index
+     * history by completion time (cleanup/paging).
+     */
+    val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE `download_jobs` ADD COLUMN `formatId` TEXT NOT NULL DEFAULT ''"
+            )
+            db.execSQL(
+                "ALTER TABLE `download_history` ADD COLUMN `formatKind` TEXT NOT NULL DEFAULT ''"
+            )
+            db.execSQL(
+                "ALTER TABLE `download_history` ADD COLUMN `mimeType` TEXT NOT NULL DEFAULT ''"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_download_history_completedAt` " +
+                    "ON `download_history` (`completedAt`)"
+            )
+        }
+    }
+
+    /**
+     * v4 → v5: track when a history file was first seen missing so cleanup can
+     * wait out a grace period instead of deleting records on a transient provider
+     * failure.
+     */
+    val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE `download_history` ADD COLUMN `missingSince` INTEGER"
+            )
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): SocialDLDatabase {
@@ -82,7 +118,7 @@ object DatabaseModule {
         // otherwise Room fails loudly instead of silently wiping download history.
         // (Room 2.6.1 supports the vararg `fallbackToDestructiveMigrationFrom` overload.)
         ).fallbackToDestructiveMigrationFrom(1)
-            .addMigrations(MIGRATION_2_3)
+            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .build()
     }
 

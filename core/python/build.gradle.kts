@@ -15,7 +15,8 @@ android {
     defaultConfig {
         minSdk = 24
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            // Keep Chaquopy limited to the ABI that has real Node/FFmpeg binaries.
+            abiFilters += listOf("arm64-v8a")
         }
     }
 
@@ -43,9 +44,12 @@ android {
 
 chaquopy {
     defaultConfig {
-        // Machine-specific interpreter path comes from gradle.properties (socialdl.python.buildPython);
-        // empty/unset or missing file → Chaquopy falls back to `python` on PATH.
-        val configuredPython = providers.gradleProperty("socialdl.python.buildPython").orNull?.trim()
+        // Machine-specific interpreter path: -P property wins, then SOCIALDL_PYTHON.
+        // Unset or missing file → Chaquopy falls back to `python` on PATH (CI).
+        val configuredPython = providers.gradleProperty("socialdl.python.buildPython")
+            .orElse(providers.environmentVariable("SOCIALDL_PYTHON"))
+            .orNull
+            ?.trim()
         if (!configuredPython.isNullOrBlank() && File(configuredPython).exists()) {
             buildPython(configuredPython)
         } else {

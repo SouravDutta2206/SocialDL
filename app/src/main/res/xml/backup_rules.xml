@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+   API 23-30 Auto Backup rules. Secrets and machine-bound state must never leave
+   the device: the encrypted cookie jars are undecryptable after a restore
+   (Android Keystore keys are not backed up), and the Room DB contains source and
+   signed CDN URLs. DataStore holds cookie metadata, so it is excluded too.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="file" path="cookies" />
+    <exclude domain="database" path="socialdl.db" />
+    <exclude domain="database" path="socialdl.db-shm" />
+    <exclude domain="database" path="socialdl.db-wal" />
+    <exclude domain="file" path="datastore" />
 </full-backup-content>

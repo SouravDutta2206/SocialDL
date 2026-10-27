@@ -23,6 +23,12 @@ data class CookieCaptureConfig(
     val harvests: List<NetscapeCookieJarWriter.Harvest>,
     /** UA the WebView must present when it should match the downstream client. */
     val userAgent: String?,
+    /**
+     * Navigation allowlist for the capture WebView. Anything outside these hosts
+     * (and their subdomains) is opened externally instead of inside the
+     * unaddressable full-screen WebView.
+     */
+    val allowedHosts: List<String>,
     /** Toolbar copy shown above the WebView. */
     val title: String,
     val subtitle: String,
@@ -73,6 +79,12 @@ object YoutubeCookieCapture {
         markerCookies = MARKER_COOKIES,
         harvests = HARVESTS,
         userAgent = userAgent,
+        allowedHosts = listOf(
+            "youtube.com",
+            "google.com",
+            "accounts.google.com",
+            "myaccount.google.com",
+        ),
         title = "Sign in with YouTube",
         subtitle = "Sign in normally: tap the profile icon and log in. SocialDL never sees your password.",
     )
@@ -107,7 +119,7 @@ object InstagramCookieCapture {
      */
     const val USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 
     fun config(): CookieCaptureConfig = CookieCaptureConfig(
         platform = Platform.INSTAGRAM,
@@ -116,6 +128,7 @@ object InstagramCookieCapture {
         markerCookies = MARKER_COOKIES,
         harvests = HARVESTS,
         userAgent = USER_AGENT,
+        allowedHosts = listOf("instagram.com", "facebook.com"),
         title = "Sign in with Instagram",
         subtitle = "Log in normally (2FA included). SocialDL never sees your password; only cookies are stored encrypted.",
         userAgentOverride = USER_AGENT,

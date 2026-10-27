@@ -33,10 +33,25 @@ _RATE_MARKERS = (
 
 _NETWORK_MARKERS = (
     "getaddrinfo",
-    "connection",
+    "connection refused",
+    "connection reset",
+    "connection aborted",
+    "connection error",
     "timed out",
     "unable to download webpage",
     "network",
+)
+
+# Permanent/unavailable responses must win over the transport marker above:
+# yt-dlp wraps a deleted video as "Unable to download webpage: HTTP Error 404".
+_UNAVAILABLE_MARKERS = (
+    "http error 404",
+    "http error 410",
+    "video unavailable",
+    "private video",
+    "has been removed",
+    "does not exist",
+    "not available",
 )
 
 # Diagnostics only: how many collected log lines ride along on an error envelope.
@@ -59,16 +74,20 @@ def fail(kind: str, detail, tail=None, extra: dict | None = None) -> str:
 
 
 def classify(message, auth_markers=()) -> str:
-    """Ordered kind resolution: auth → rate → network → unavailable.
+    """Ordered kind resolution: auth → rate → unavailable → network.
 
     ``auth_markers`` is supplied by the bridge because auth-wall vocabulary is
-    platform-specific (yt-dlp messages vs. gallery-dl exception text).
+    platform-specific (yt-dlp messages vs. gallery-dl exception text). Permanent
+    HTTP 404/410 responses are checked before transport markers so a deleted or
+    private video is not reported as a connection problem.
     """
     text = str(message).lower()
     if any(marker in text for marker in auth_markers):
         return AUTH_WALL
     if any(marker in text for marker in _RATE_MARKERS):
         return RATE_LIMITED
+    if any(marker in text for marker in _UNAVAILABLE_MARKERS):
+        return UNAVAILABLE
     if any(marker in text for marker in _NETWORK_MARKERS):
         return NETWORK
     return UNAVAILABLE

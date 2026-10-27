@@ -12,8 +12,10 @@ package com.socialdl.src.core.cookies
  *  - `includeSubdomains` = TRUE
  *  - `path` = `/`
  *  - `secure` = TRUE (YouTube/Google auth cookies are HTTPS-only anyway)
- *  - `expiry` = a far-future timestamp; a stale-but-optimistic expiry is harmless
- *    because a failed extraction re-surfaces `AuthWallDetected` and re-triggers capture.
+ *  - `expiry` = a far-future timestamp below the signed 32-bit `time_t` limit, so
+ *    32-bit Python builds cannot overflow it; a stale-but-optimistic expiry is
+ *    harmless because a failed extraction re-surfaces `AuthWallDetected` and
+ *    re-triggers capture.
  *
  * Pure Kotlin so it can be unit-tested without an Android runtime.
  */
@@ -22,8 +24,12 @@ object NetscapeCookieJarWriter {
     /** Exact header http.cookiejar's MozillaCookieJar looks for when loading. */
     const val NETSCAPE_HEADER = "# Netscape HTTP Cookie File"
 
-    /** Far-future expiry: 2100-01-01 UTC. Kept below LONG-bound but far past any luck. */
-    const val FAR_FUTURE_EXPIRY_SECONDS = 4102444800L
+    /**
+     * 2038-01-01 00:00 UTC — far beyond any real session lifetime, but safely
+     * below `Int.MAX_VALUE` so a 32-bit `time_t` cannot overflow (4102444800,
+     * the old 2100 value, wraps negative there).
+     */
+    const val FAR_FUTURE_EXPIRY_SECONDS = 2_145_916_800L
 
     /**
      * One harvest: the raw [header] `CookieManager.getCookie(url)` returned for [url],
@@ -40,9 +46,10 @@ object NetscapeCookieJarWriter {
      * Builds the complete multi-line `cookies.txt` content, or `null` when no valid
      * cookie survives parsing (callers must treat null as "nothing captured").
      *
-     * Overlapping harvests (the same cookie returned under `.google.com` and
-     * `.accounts.google.com`, for instance) are deduped on `(name, value)` —
-     * first harvest in the list wins — so the jar never contains a duplicate pair.
+     * Duplicates within one domain are deduped on `(domain, name, value)` — first
+     * harvest wins. The same name/value under two different domains is kept
+     * because the two cookies are scoped independently (Google sets `SID` for
+     * both `.google.com` and `.accounts.google.com`).
      */
     fun buildJarContent(harvests: List<Harvest>): String? {
         val lines = buildLines(harvests)
@@ -58,11 +65,11 @@ object NetscapeCookieJarWriter {
 
     /** Netscape data lines (no header/comments), deduped. Empty list when nothing valid. */
     fun buildLines(harvests: List<Harvest>): List<String> {
-        val seen = HashSet<Pair<String, String>>() // (name, value)
+        val seen = HashSet<Triple<String, String, String>>() // (domain, name, value)
         val out = ArrayList<String>()
         for (harvest in harvests) {
             for (pair in parseHeader(harvest.header)) {
-                if (!seen.add(pair)) continue
+                if (!seen.add(Triple(harvest.cookieDomain, pair.first, pair.second))) continue
                 out.add(
                     listOf(
                         harvest.cookieDomain,

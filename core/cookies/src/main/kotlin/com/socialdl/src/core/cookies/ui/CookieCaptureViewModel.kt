@@ -46,7 +46,19 @@ class CookieCaptureViewModel @Inject constructor(
         if (initializedFor == platform) return
         initializedFor = platform
         viewModelScope.launch {
-            _uiState.update { it.copy(config = controller.config(platform)) }
+            runCatching { controller.config(platform) }
+                .onSuccess { config ->
+                    _uiState.update { it.copy(config = config) }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            result = CaptureOutcome.Failure(
+                                error.message ?: "Cookie sign-in is not available for this platform"
+                            )
+                        )
+                    }
+                }
         }
     }
 

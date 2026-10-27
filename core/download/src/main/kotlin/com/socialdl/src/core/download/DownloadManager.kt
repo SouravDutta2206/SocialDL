@@ -10,14 +10,19 @@ import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadProgressInfo
 import com.socialdl.src.core.model.DownloadStatus
+import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
+import com.socialdl.src.core.model.MuxStrategy
+import com.socialdl.src.core.settings.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -35,6 +40,7 @@ class DownloadManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val eventBus: DownloadEventBus,
     private val jobRepository: DownloadJobRepository,
+    private val settingsRepository: SettingsRepository,
 ) {
     private val tag = "DownloadManager"
     private val scope = CoroutineScope(
@@ -53,8 +59,21 @@ class DownloadManager @Inject constructor(
     val progressInfoByKey: Flow<Map<String, DownloadProgressInfo>> =
         jobRepository.observeProgressInfoByKey
 
+    /**
+     * Barrier: reconciliation must finish before a new enqueue can be inserted.
+     * Otherwise a fast first enqueue could be observed by the startup snapshot
+     * and immediately failed/cancelled as an "orphan".
+     */
+    private val startupReconciled = CompletableDeferred<Unit>()
+
     init {
-        scope.launch { reconcileOnStartup() }
+        scope.launch {
+            try {
+                reconcileOnStartup()
+            } finally {
+                startupReconciled.complete(Unit)
+            }
+        }
     }
 
     /**
@@ -70,11 +89,39 @@ class DownloadManager @Inject constructor(
         customAuthor: String? = null,
         groupId: String? = null
     ): String {
+        startupReconciled.await()
+
+        // Idempotency: tapping download twice for the same stream slot must not
+        // launch two workers or produce two files/history rows.
+        jobRepository.findActiveDuplicate(
+            sourceUrl = mediaItem.sourceUrl,
+            carouselIndex = mediaItem.carouselIndex ?: 0,
+            formatId = selectedFormat.id
+        )?.let { existing ->
+            Logger.i(tag, "Download already active as ${existing.id}; coalescing duplicate request")
+            return existing.id
+        }
+
         val jobId = UUID.randomUUID().toString()
-        val finalContainer = if (!container.isNullOrBlank() && container != "Default") {
-            container
-        } else {
-            selectedFormat.container
+
+        // Output container policy:
+        // - placeholder jobs store "" so the worker adopts the JIT-resolved format;
+        // - explicit user choices are accepted only when actually producible for
+        //   the selected stream (never relabel WebM/Opus bytes as MP4/MP3);
+        // - otherwise use the codec-derived recommended container.
+        val requestedContainer = container
+            ?.takeIf { it.isNotBlank() && !it.equals("Default", ignoreCase = true) }
+        // Force-H.264 is applied here for non-placeholder jobs (and again after
+        // JIT resolution in the worker). HDR formats are never re-encoded.
+        val forceH264 = settingsRepository.forceH264Transcode.first() &&
+            selectedFormat.requiresMuxing &&
+            !selectedFormat.isHdr
+        val finalContainer = when {
+            selectedFormat.isPlaceholder -> ""
+            forceH264 -> MediaContainer.MP4.extension.uppercase()
+            requestedContainer != null && MediaContainer.isCompatible(selectedFormat, requestedContainer) ->
+                MediaContainer.extensionOf(requestedContainer).uppercase()
+            else -> MediaContainer.recommendedFor(selectedFormat).extension.uppercase()
         }
 
         val title = customTitle ?: mediaItem.title
@@ -107,6 +154,7 @@ class DownloadManager @Inject constructor(
             thumbnailUrl = mediaItem.thumbnailUrl,
             platform = mediaItem.platform.name,
             carouselIndex = mediaItem.carouselIndex ?: 0,
+            formatId = selectedFormat.id,
             formatLabel = selectedFormat.label,
             formatKind = selectedFormat.kind.name,
             container = finalContainer,
@@ -118,7 +166,11 @@ class DownloadManager @Inject constructor(
             requiresMuxing = selectedFormat.requiresMuxing,
             audioDirectUrl = pairedAudio?.directUrl?.takeIf { it.isNotBlank() },
             audioContainer = pairedAudio?.container ?: "M4A",
-            muxStrategy = selectedFormat.muxStrategy?.name,
+            muxStrategy = if (forceH264) {
+                MuxStrategy.FORCE_H264.name
+            } else {
+                selectedFormat.muxStrategy?.name
+            },
             videoChunkSize = selectedFormat.httpChunkSizeBytes ?: 0L,
             audioChunkSize = pairedAudio?.httpChunkSizeBytes ?: 0L,
             isPlaceholder = selectedFormat.isPlaceholder,
@@ -128,11 +180,16 @@ class DownloadManager @Inject constructor(
 
         jobRepository.insertJob(job)
 
+        // Wi-Fi-only is evaluated at enqueue time and encoded as a WorkManager
+        // constraint, so the OS will not start the job on metered data.
+        val wifiOnly = settingsRepository.wifiOnlyDownloads.first()
         val workRequest = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setInputData(workDataOf(DownloadWorker.KEY_JOB_ID to jobId))
             .setConstraints(
                 Constraints.Builder()
-                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .setRequiredNetworkType(
+                        if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
+                    )
                     .build()
             )
             .addTag(jobId)

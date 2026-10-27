@@ -7,7 +7,8 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import com.socialdl.src.core.common.util.Logger
-import com.socialdl.src.core.common.util.MediaStorageUtils
+import com.socialdl.src.core.model.FormatKind
+import com.socialdl.src.core.model.MediaContainer
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.text.SimpleDateFormat
@@ -47,10 +48,11 @@ class MediaStoreExporter @Inject constructor(
         title: String,
         author: String?,
         container: String,
-        isAudio: Boolean,
-        isImage: Boolean = false,
+        kind: FormatKind,
         onPendingRowCreated: suspend (Uri) -> Boolean
     ): Uri? {
+        val isAudio = kind == FormatKind.AUDIO
+        val isImage = kind == FormatKind.IMAGE
         val resolver = context.contentResolver
         val ext = container.lowercase(Locale.ROOT)
         val sanitizedTitle = title.replace(Regex("[^a-zA-Z0-9.-]"), "_")
@@ -60,7 +62,7 @@ class MediaStoreExporter @Inject constructor(
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val fileName = "${sanitizedTitle}_$timestamp.$ext"
 
-        val mimeType = MediaStorageUtils.getMimeType(container, isAudio)
+        val mimeType = MediaContainer.mimeTypeFor(container, kind)
 
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
@@ -139,7 +141,12 @@ class MediaStoreExporter @Inject constructor(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 contentValues.clear()
                 contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                resolver.update(itemUri, contentValues, null, null)
+                val updated = resolver.update(itemUri, contentValues, null, null)
+                if (updated == 0) {
+                    // The row vanished while copying (provider cleanup / user action).
+                    Logger.w(tag, "IS_PENDING=0 update affected no rows for $itemUri")
+                    return null
+                }
             }
             itemUri
         } catch (e: Exception) {

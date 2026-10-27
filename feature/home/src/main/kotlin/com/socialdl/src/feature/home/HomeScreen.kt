@@ -75,6 +75,7 @@ fun HomeScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val resolvingItemId by viewModel.resolvingItemId.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val requestDownloadPermissions = rememberDownloadPermissionRequest()
     var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
     var selectedItemForSheet by remember { mutableStateOf<MediaItem?>(null) }
     var sheetInitialTab by remember { mutableStateOf(FormatKind.VIDEO) }
@@ -204,7 +205,7 @@ fun HomeScreen(
                                 if (uiState.showsFormatPicker) {
                                     handleOpenSheet(item, FormatKind.VIDEO)
                                 } else {
-                                    viewModel.startDirectDownload(item)
+                                    requestDownloadPermissions { viewModel.startDirectDownload(item) }
                                 }
                             },
                             onQuickAudioDownload = {
@@ -216,7 +217,7 @@ fun HomeScreen(
                                 } else {
                                     // Covers both the Video pill and the Image pill —
                                     // single-format platforms never render a picker.
-                                    viewModel.startDirectDownload(item)
+                                    requestDownloadPermissions { viewModel.startDirectDownload(item) }
                                 }
                             }
                         )
@@ -233,10 +234,23 @@ fun HomeScreen(
                 onDismiss = { selectedItemForSheet = null },
                 onConfirmDownload = { format, container, title, author ->
                     selectedItemForSheet = null
-                    scope.launch {
-                        viewModel.startDownload(item, format, container, title, author)
+                    requestDownloadPermissions {
+                        scope.launch {
+                            // Report success only after the suspend enqueue actually completes;
+                            // an exception must surface as an error toast, not a false success.
+                            try {
+                                viewModel.startDownload(item, format, container, title, author)
+                                toastMessage = ToastMessage(
+                                    message = "Download queued: $title (${format.label})"
+                                )
+                            } catch (e: Exception) {
+                                toastMessage = ToastMessage(
+                                    message = "Couldn't queue download: ${e.message ?: "unknown error"}",
+                                    type = ToastType.ERROR
+                                )
+                            }
+                        }
                     }
-                    toastMessage = ToastMessage(message = "Download queued: $title (${format.label})")
                 }
             )
         }
@@ -309,11 +323,20 @@ fun HomeScreen(
                 onDismiss = { showBatchSheet = false },
                 onConfirmDownload = { selectedPairs ->
                     showBatchSheet = false
-                    // Report the ACTUAL enqueued count — a mid-loop enqueue failure
-                    // should not overstate what landed in the queue.
-                    scope.launch {
-                        val taskIds = viewModel.startBatchDownload(selectedPairs)
-                        toastMessage = ToastMessage(message = "Queued ${taskIds.size} downloads to queue")
+                    requestDownloadPermissions {
+                        // Report the ACTUAL enqueued count — a mid-loop enqueue failure
+                        // should not overstate what landed in the queue.
+                        scope.launch {
+                            val taskIds = viewModel.startBatchDownload(selectedPairs)
+                            toastMessage = if (taskIds.isEmpty()) {
+                                ToastMessage(
+                                    message = "No downloads were queued",
+                                    type = ToastType.ERROR
+                                )
+                            } else {
+                                ToastMessage(message = "Queued ${taskIds.size} downloads to queue")
+                            }
+                        }
                     }
                 }
             )

@@ -2,8 +2,10 @@ package com.socialdl.src.core.common.util
 
 import android.content.Context
 import android.os.Build
+import android.os.Process
 import android.system.Os
 import java.io.File
+import java.io.IOException
 import java.util.zip.ZipInputStream
 
 /**
@@ -27,28 +29,36 @@ object NativeRuntime {
         val extractionFailed: Boolean = false
     )
 
+    /** Bump when extraction layout/validation changes; invalidates old markers. */
+    private const val RUNTIME_VERSION = 5
+    private const val MARKER = ".extracted_v$RUNTIME_VERSION"
+
     fun ensureExtracted(context: Context): Paths = synchronized(lock) {
         val runtimeDir = File(context.filesDir, "native_runtime")
         val usrLibDir = File(runtimeDir, "usr/lib")
         val binDir = File(runtimeDir, "bin")
-        val readyMarker = File(runtimeDir, ".extracted_v4")
 
         val nativeDir = context.applicationInfo.nativeLibraryDir
+        // /system/lib64 on 64-bit, /system/lib on 32-bit. Using the wrong one
+        // silently makes support-library resolution fail on 32-bit devices.
+        val systemLibDir = if (Process.is64Bit()) "/system/lib64" else "/system/lib"
         val ldLibraryPath = listOf(
             usrLibDir.absolutePath,
             nativeDir,
-            "/system/lib64"
+            systemLibDir
         ).joinToString(":")
         val defaultEnv = mapOf(
             "LD_LIBRARY_PATH" to ldLibraryPath,
             "OPENSSL_CONF" to "/dev/null"
         )
 
-        val ffmpegPath = File(nativeDir, "libffmpeg.so").absolutePath
-        val nodePath = File(nativeDir, "libnode.so").absolutePath
-        var extractionFailed = false
+        val ffmpegSource = File(nativeDir, "libffmpeg.so")
+        val nodeSource = File(nativeDir, "libnode.so")
+        val ffmpegPath = ffmpegSource.absolutePath
+        val nodePath = nodeSource.absolutePath
 
-        if (readyMarker.exists() && usrLibDir.exists() && (usrLibDir.list()?.isNotEmpty() == true)) {
+        val marker = File(runtimeDir, MARKER)
+        if (isRuntimeReady(runtimeDir, usrLibDir, binDir, marker)) {
             return@synchronized Paths(
                 runtimeDir = runtimeDir.absolutePath,
                 usrLibDir = usrLibDir.absolutePath,
@@ -60,30 +70,58 @@ object NativeRuntime {
             )
         }
 
+        // Extract into a staging directory and validate it BEFORE touching the
+        // current runtime. A corrupt/partial update must never destroy a working
+        // runtime, and a marker must never claim a half-extracted tree is ready.
+        val stagingDir = File(context.filesDir, "native_runtime_staging")
+        var extractionFailed = false
         try {
             Logger.d(TAG, "Extracting native runtime packages (ffmpeg & node)...")
-            runtimeDir.deleteRecursively()
-            usrLibDir.mkdirs()
-            binDir.mkdirs()
+            stagingDir.deleteRecursively()
+            File(stagingDir, "usr/lib").mkdirs()
+            File(stagingDir, "bin").mkdirs()
 
-            // 1. Extract libffmpeg.zip.so if present
-            extractZipLib(File(nativeDir, "libffmpeg.zip.so"), runtimeDir)
+            if (!isElf(ffmpegSource)) {
+                throw IOException("$ffmpegPath is not an ELF shared object")
+            }
+            if (!isElf(nodeSource)) {
+                throw IOException("$nodePath is not an ELF shared object")
+            }
 
-            // 2. Extract libnode.zip.so if present
-            extractZipLib(File(nativeDir, "libnode.zip.so"), runtimeDir)
+            extractZipLib(File(nativeDir, "libffmpeg.zip.so"), stagingDir)
+            extractZipLib(File(nativeDir, "libnode.zip.so"), stagingDir)
 
-            // 3. Resolve symlink stubs in usr/lib
-            resolveSymlinkStubs(usrLibDir)
+            val stagingUsrLib = File(stagingDir, "usr/lib")
+            resolveSymlinkStubs(stagingUsrLib)
 
-            // 4. Create convenience executable symlinks in bin/
-            createSymlinkOrCopy(File(nativeDir, "libnode.so"), File(binDir, "node"))
-            createSymlinkOrCopy(File(nativeDir, "libffmpeg.so"), File(binDir, "ffmpeg"))
+            val stagingBin = File(stagingDir, "bin")
+            createSymlinkOrCopy(nodeSource, File(stagingBin, "node"))
+            createSymlinkOrCopy(ffmpegSource, File(stagingBin, "ffmpeg"))
 
-            readyMarker.createNewFile()
+            if (stagingUsrLib.listFiles()?.isEmpty() != false) {
+                throw IOException("Native runtime archive contained no support libraries")
+            }
+
+            File(stagingDir, MARKER).writeText(
+                "version=$RUNTIME_VERSION\nabi=${Build.SUPPORTED_ABIS.firstOrNull().orEmpty()}\n"
+            )
+
+            // Promote atomically (same filesystem): keep the old tree until the
+            // staged one has replaced it successfully.
+            val backupDir = File(context.filesDir, "native_runtime_old")
+            backupDir.deleteRecursively()
+            if (runtimeDir.exists() && !runtimeDir.renameTo(backupDir)) {
+                runtimeDir.deleteRecursively()
+            }
+            if (!stagingDir.renameTo(runtimeDir)) {
+                if (backupDir.exists()) backupDir.renameTo(runtimeDir)
+                throw IOException("Could not promote staged native runtime")
+            }
+            backupDir.deleteRecursively()
             Logger.d(TAG, "Native runtime extracted successfully to ${runtimeDir.absolutePath}")
-            extractionFailed = false
         } catch (e: Exception) {
             Logger.e(TAG, "Failed during native runtime extraction", e)
+            stagingDir.deleteRecursively()
             extractionFailed = true
         }
 
@@ -99,6 +137,38 @@ object NativeRuntime {
             environment = defaultEnv,
             extractionFailed = extractionFailed
         )
+    }
+
+    private fun isRuntimeReady(
+        runtimeDir: File,
+        usrLibDir: File,
+        binDir: File,
+        marker: File
+    ): Boolean {
+        if (!marker.isFile) return false
+        val markerText = runCatching { marker.readText() }.getOrNull() ?: return false
+        if (!markerText.contains("version=$RUNTIME_VERSION")) return false
+        if (!markerText.contains("abi=${Build.SUPPORTED_ABIS.firstOrNull().orEmpty()}")) return false
+        return runtimeDir.isDirectory &&
+            usrLibDir.isDirectory &&
+            usrLibDir.listFiles()?.isNotEmpty() == true &&
+            File(binDir, "node").exists() &&
+            File(binDir, "ffmpeg").exists()
+    }
+
+    /** True for a real ELF shared object (guards against Git LFS pointer text). */
+    private fun isElf(file: File): Boolean {
+        if (!file.isFile || file.length() < 4) return false
+        return runCatching {
+            file.inputStream().use { input ->
+                val magic = ByteArray(4)
+                input.read(magic) == 4 &&
+                    magic[0] == 0x7f.toByte() &&
+                    magic[1] == 'E'.code.toByte() &&
+                    magic[2] == 'L'.code.toByte() &&
+                    magic[3] == 'F'.code.toByte()
+            }
+        }.getOrDefault(false)
     }
 
     private fun extractZipLib(zipFile: File, destDir: File) {

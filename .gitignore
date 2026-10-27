@@ -42,7 +42,6 @@ build/
 **/build/
 .gradle/
 .kotlin/
-docs/
 
 # Android binary outputs
 *.apk
@@ -63,19 +62,11 @@ dump.xml
 *.trace
 
 # ------------------------------------------------------------------------------
-# 3. Test Folders (Unit & Instrumented Tests Across All Submodules)
+# 3. Test Folders
 # ------------------------------------------------------------------------------
-**/src/test/
-**/src/androidTest/
-**/src/testDebug/
-**/src/testRelease/
-**/src/androidTestDebug/
-**/src/androidTestRelease/
-test/
-**/test/
-tests/
-**/tests/
-
+# Tests and docs are versioned. Only their build outputs are ignored (see the
+# build/ rules above). Do not re-add **/src/test/ or tests/ here: CI must be able
+# to see and run the suite.
 
 # ------------------------------------------------------------------------------
 # 4. IDE & Editor Specific Files
@@ -150,7 +141,7 @@ replay_pid*
 *~
 
 # ------------------------------------------------------------------------------
-# 9. Local Documentation & Design Prototypes (Do Not Share)
+# 9. Local Design Prototypes (Do Not Share)
 # ------------------------------------------------------------------------------
-SocialDL_Technical_Specification.md
+# The technical specification lives in docs/ and is versioned with the code.
 socialdl_material_3_mobile_downloader_app.html

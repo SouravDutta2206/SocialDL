@@ -35,6 +35,21 @@ sealed class DownloadError(val userMessage: String) {
     /** Server rejected the download (HTTP error status). */
     data object ServerError : DownloadError("The server rejected the download")
 
+    /** Permanent 404/410: the media was deleted, made private, or the URL expired. */
+    data object NotFound : DownloadError("This media is no longer available")
+
+    /** 401/403: signed-out, region-locked, or a revoked CDN token. */
+    data object AccessDenied : DownloadError("The server refused access to this media")
+
+    /** 429 after bridge/downloader retries. */
+    data object RateLimited : DownloadError("Too many requests — try again in a few minutes")
+
+    /** ENOSPC or another local write failure. */
+    data object StorageFull : DownloadError("Not enough free storage to save this download")
+
+    /** MediaStore/SAF permission missing (e.g. Android 9 storage permission). */
+    data object StoragePermission : DownloadError("Storage permission is required to save this download")
+
     /** FFmpeg video+audio merge failed (ffmpeg log kept in Logger only). */
     data object MuxFailed : DownloadError("Error while merging video and audio")
 
@@ -54,12 +69,30 @@ sealed class DownloadError(val userMessage: String) {
             if (throwable is CancellationException) return Interrupted
             val message = throwable.message.orEmpty()
             return when (throwable) {
+                is HttpStatusException -> when (throwable.code) {
+                    404, 410 -> NotFound
+                    401, 403 -> AccessDenied
+                    429 -> RateLimited
+                    else -> ServerError
+                }
+
+                is RangeInvalidException,
+                is RangeNotSatisfiableException,
+                is RangeNotSupportedException -> ServerError
+
+                is SecurityException -> StoragePermission
+
                 is SocketTimeoutException,
                 is UnknownHostException,
                 is ConnectException,
                 is SocketException -> NetworkFailure
 
-                is IOException -> if (HTTP_ERROR_REGEX.containsMatchIn(message)) ServerError else NetworkFailure
+                is IOException -> when {
+                    message.contains("ENOSPC", ignoreCase = true) ||
+                        message.contains("No space left", ignoreCase = true) -> StorageFull
+                    HTTP_ERROR_REGEX.containsMatchIn(message) -> ServerError
+                    else -> NetworkFailure
+                }
 
                 else -> Unknown
             }
