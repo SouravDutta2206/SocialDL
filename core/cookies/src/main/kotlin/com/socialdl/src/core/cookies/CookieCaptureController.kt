@@ -3,6 +3,7 @@ package com.socialdl.src.core.cookies
 import android.webkit.CookieManager
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.model.Platform
+import kotlinx.coroutines.CancellationException
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -43,18 +44,30 @@ class CookieCaptureController @Inject constructor(
 
     /**
      * Auto-detect check, run from `onPageFinished`: the WebView has settled on
-     * [CookieCaptureConfig.successOrigin] and its jar now carries a marker session
-     * cookie (the same SAPISID pair yt-dlp itself keys on).
+     * [CookieCaptureConfig.successOrigin] (or a sibling host such as
+     * `m.youtube.com`) and its jar now carries a marker session cookie (the same
+     * SAPISID pair yt-dlp itself keys on).
      */
     fun isLoginComplete(config: CookieCaptureConfig, currentUrl: String?): Boolean {
-        if (currentUrl == null || !currentUrl.startsWith(config.successOrigin)) return false
-        val cookie = CookieManager.getInstance().getCookie(config.successOrigin) ?: return false
-        return config.markerCookies.any { cookie.contains("$it=") }
+        if (currentUrl == null || !currentUrl.startsWith("https://", ignoreCase = true)) return false
+        if (!CaptureHostPolicy.matchesSuccessHost(
+                CaptureHostPolicy.hostOf(currentUrl),
+                config.successOrigin
+            )
+        ) {
+            return false
+        }
+        val cookie = runCatching {
+            CookieManager.getInstance().getCookie(config.successOrigin)
+        }.getOrNull()
+        return hasMarkerCookies(config, cookie)
     }
 
     /**
-     * Manual "I'm signed in" fallback path: skip the marker heuristic on the
-     * *current* URL and just try harvesting from the configured origins.
+     * Manual "I'm signed in" fallback path: skip the success-URL heuristic and
+     * harvest from the configured origins, but still require the marker cookies —
+     * otherwise the first anonymous `VISITOR_INFO1_LIVE` cookie would be persisted
+     * as a "signed-in" jar and Settings would lie.
      */
     suspend fun manualCapture(config: CookieCaptureConfig, currentUrl: String?): CaptureOutcome {
         if (currentUrl.isNullOrBlank()) return CaptureOutcome.NotSignedIn
@@ -69,12 +82,37 @@ class CookieCaptureController @Inject constructor(
         return try {
             val manager = CookieManager.getInstance()
             manager.setAcceptCookie(true)
+            // WebView commits cookies on its own schedule; flush before reading so
+            // the final accounts/youtube redirect's Set-Cookie headers are visible
+            // to the app-side CookieManager. Without this a freshly finished login
+            // can harvest an empty/stale jar on some WebView builds.
+            runCatching { manager.flush() }
+                .onFailure { Logger.w(tag, "CookieManager.flush() failed before harvest", it) }
+
             val harvests = config.harvests.mapNotNull { candidate ->
                 val header = manager.getCookie(candidate.url)
                 if (header.isNullOrBlank()) null else candidate.copy(header = header)
             }
             if (harvests.isEmpty()) {
                 Logger.w(tag, "Harvest found no cookies across configured origins")
+                return CaptureOutcome.NotSignedIn
+            }
+
+            // Only a marker-bearing jar counts as signed in. This is the same check
+            // auto-detect uses, so the manual fallback can no longer persist an
+            // anonymous jar that merely happens to contain some cookies.
+            val successHeader = harvests.firstOrNull { harvest ->
+                CaptureHostPolicy.matchesSuccessHost(
+                    CaptureHostPolicy.hostOf(harvest.url),
+                    config.successOrigin
+                )
+            }?.header
+            if (!hasMarkerCookies(config, successHeader)) {
+                Logger.w(
+                    tag,
+                    "No ${config.markerCookies.joinToString("/")} marker in " +
+                        "${config.successOrigin}; refusing to store a signed-out jar"
+                )
                 return CaptureOutcome.NotSignedIn
             }
 
@@ -85,10 +123,20 @@ class CookieCaptureController @Inject constructor(
             val cookieCount = countLines(jar)
             Logger.i(tag, "Captured ${config.platform.name} cookie jar with $cookieCount cookies")
             CaptureOutcome.Success(cookieCount)
+        } catch (e: CancellationException) {
+            // Never turn a screen-leave into a "capture failed" toast / save.
+            throw e
         } catch (e: Exception) {
             Logger.e(tag, "Cookie harvest failed", e)
             CaptureOutcome.Failure(e.message ?: "Cookie capture failed")
         }
+    }
+
+    /** Marker names are matched exactly, so `SAPISID` cannot match `__Secure-3PAPISID`. */
+    private fun hasMarkerCookies(config: CookieCaptureConfig, header: String?): Boolean {
+        if (header.isNullOrBlank()) return false
+        val present = NetscapeCookieJarWriter.parseHeader(header).mapTo(HashSet()) { it.first }
+        return config.markerCookies.any { marker -> marker in present }
     }
 
     private fun countLines(jar: String): Int =

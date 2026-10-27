@@ -28,7 +28,8 @@ fun SocialDLNavHost(
     ) {
         homeScreen(
             onNavigateToSettings = { navController.navigateToSettings() },
-            onNavigateToSignInYouTube = { navController.navigateToCookieCapture() }
+            onNavigateToSignInYouTube = { navController.navigateToCookieCapture() },
+            onNavigateToSignInInstagram = { navController.navigateToInstagramCookieCapture() }
         )
 
         downloadsScreen(

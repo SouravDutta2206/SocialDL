@@ -28,8 +28,15 @@ class CookieCaptureViewModel @Inject constructor(
         val config: CookieCaptureConfig? = null,
         /** True from manual/auto harvest start until the outcome lands. */
         val busy: Boolean = false,
-        /** One-shot terminal state; the screen acknowledges it, then routes back. */
+        /** One-shot success; the screen acknowledges it, then routes back. */
         val result: CaptureOutcome? = null,
+        /**
+         * Non-terminal feedback shown above the WebView. Used when the harvest
+         * found no signed-in session or failed — the screen stays open so the
+         * user can finish the redirect / retry instead of being popped back
+         * silently to a "Not signed in" row.
+         */
+        val message: String? = null,
         /** True when the user hit Cancel. */
         val cancelled: Boolean = false,
     )
@@ -53,9 +60,8 @@ class CookieCaptureViewModel @Inject constructor(
                 .onFailure { error ->
                     _uiState.update {
                         it.copy(
-                            result = CaptureOutcome.Failure(
-                                error.message ?: "Cookie sign-in is not available for this platform"
-                            )
+                            message = error.message
+                                ?: "Cookie sign-in is not available for this platform"
                         )
                     }
                 }
@@ -87,17 +93,35 @@ class CookieCaptureViewModel @Inject constructor(
         _uiState.update { it.copy(result = null) }
     }
 
+    /** Clears the transient message once the user has seen it. */
+    fun dismissMessage() {
+        _uiState.update { it.copy(message = null) }
+    }
+
     private fun harvest(manual: Boolean = false) {
         val config = _uiState.value.config ?: return
         viewModelScope.launch {
-            _uiState.update { it.copy(busy = true) }
+            _uiState.update { it.copy(busy = true, message = null) }
             val outcome = if (manual) {
                 val url = lastPageUrl
                 controller.manualCapture(config, url)
             } else {
                 controller.harvestAndStore(config)
             }
-            _uiState.update { it.copy(busy = false, result = outcome) }
+            when (outcome) {
+                is CaptureOutcome.Success ->
+                    _uiState.update { it.copy(busy = false, result = outcome) }
+                CaptureOutcome.NotSignedIn ->
+                    _uiState.update {
+                        it.copy(
+                            busy = false,
+                            message = "Not signed in yet. Finish the sign-in above " +
+                                "(including any 2FA redirect back to the site), then tap ✓."
+                        )
+                    }
+                is CaptureOutcome.Failure ->
+                    _uiState.update { it.copy(busy = false, message = outcome.message) }
+            }
         }
     }
 }

@@ -17,7 +17,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -168,26 +167,34 @@ class SettingsViewModel @Inject constructor(
             initialValue = CookiesUiState()
         )
 
-    /** Sets [cookiesActionMessage] and clears it after a display window. */
-    private suspend fun setActionMessage(message: String) {
-        cookiesActionMessage.value = message
+    /** Sets [target]'s message and clears it after a display window. */
+    private suspend fun setActionMessage(
+        target: MutableStateFlow<String?>,
+        message: String,
+    ) {
+        target.value = message
         delay(4_000)
-        if (cookiesActionMessage.value == message) cookiesActionMessage.value = null
+        if (target.value == message) target.value = null
+    }
+
+    /** Shared copy for the manual `cookies.txt` import outcome. */
+    private fun importMessage(
+        outcome: CookieStore.ImportOutcome,
+        platformName: String,
+    ): String = when (outcome) {
+        is CookieStore.ImportOutcome.Success ->
+            "Cookies imported — you're signed in for $platformName extraction."
+        is CookieStore.ImportOutcome.Rejected ->
+            "Import rejected: ${outcome.reason}"
+        CookieStore.ImportOutcome.Unreadable ->
+            "Import failed: the selected file could not be read."
     }
 
     /** Manual `cookies.txt` import fallback (§2.6) — validates before accepting. */
     fun importCookies(uri: Uri) {
         viewModelScope.launch {
-            setActionMessage(
-                when (val outcome = cookieStore.importNetscapeFile(Platform.YOUTUBE, uri)) {
-                    is CookieStore.ImportOutcome.Success ->
-                        "Cookies imported — you're signed in for YouTube extraction."
-                    is CookieStore.ImportOutcome.Rejected ->
-                        "Import rejected: ${outcome.reason}"
-                    CookieStore.ImportOutcome.Unreadable ->
-                        "Import failed: the selected file could not be read."
-                }
-            )
+            val outcome = cookieStore.importNetscapeFile(Platform.YOUTUBE, uri)
+            setActionMessage(cookiesActionMessage, importMessage(outcome, "YouTube"))
         }
     }
 
@@ -195,7 +202,7 @@ class SettingsViewModel @Inject constructor(
     fun clearCookies() {
         viewModelScope.launch {
             cookieStore.clear(Platform.YOUTUBE)
-            setActionMessage("YouTube cookies cleared.")
+            setActionMessage(cookiesActionMessage, "YouTube cookies cleared.")
         }
     }
 
@@ -204,35 +211,43 @@ class SettingsViewModel @Inject constructor(
     data class InstagramCookiesUiState(
         val present: Boolean = false,
         val lastRefreshedAt: Long? = null,
+        /** Copy for import/clear outcomes; self-clears after a few seconds. */
+        val actionMessage: String? = null,
     )
 
-    val instagramCookiesUiState: StateFlow<InstagramCookiesUiState> =
-        cookieStore.lastRefreshedAt(Platform.INSTAGRAM)
-            .map { lastRefreshed ->
-                InstagramCookiesUiState(
-                    present = cookieStore.hasCookies(Platform.INSTAGRAM),
-                    lastRefreshedAt = lastRefreshed,
-                )
-            }
-            // hasCookies() stats the encrypted blob — never on the main thread.
-            .flowOn(Dispatchers.IO)
-            .stateIn(
-                scope = viewModelScope,
-                started = SharingStarted.WhileSubscribed(5000),
-                initialValue = InstagramCookiesUiState()
-            )
+    private val instagramActionMessage = MutableStateFlow<String?>(null)
+
+    val instagramCookiesUiState: StateFlow<InstagramCookiesUiState> = combine(
+        cookieStore.lastRefreshedAt(Platform.INSTAGRAM),
+        instagramActionMessage
+    ) { lastRefreshed, actionMessage ->
+        InstagramCookiesUiState(
+            present = cookieStore.hasCookies(Platform.INSTAGRAM),
+            lastRefreshedAt = lastRefreshed,
+            actionMessage = actionMessage,
+        )
+    }
+        // hasCookies() stats the encrypted blob — never on the main thread.
+        .flowOn(Dispatchers.IO)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = InstagramCookiesUiState()
+        )
 
     /** Destructive — UI confirms before calling. */
     fun clearInstagramCookies() {
         viewModelScope.launch {
             cookieStore.clear(Platform.INSTAGRAM)
+            setActionMessage(instagramActionMessage, "Instagram cookies cleared.")
         }
     }
 
     /** Manual cookies.txt fallback for gallery-dl (§2.6 escape hatch). */
     fun importInstagramCookies(uri: Uri) {
         viewModelScope.launch {
-            cookieStore.importNetscapeFile(Platform.INSTAGRAM, uri)
+            val outcome = cookieStore.importNetscapeFile(Platform.INSTAGRAM, uri)
+            setActionMessage(instagramActionMessage, importMessage(outcome, "Instagram"))
         }
     }
 }

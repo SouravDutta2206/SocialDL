@@ -34,11 +34,19 @@ data class HomeUiState(
     val detectedPlatform: Platform? = null,
     val mediaItems: List<MediaItem> = emptyList(),
     /**
-     * Set when the last extraction hit `ExtractionError.AuthWallDetected` — drives
-     * the "Sign in with <platform>" card CTA (§2.6 recapture flow). Cleared on the
-     * next extraction attempt, sign-in completion, or failure of another kind.
+     * Set when the last extraction hit `ExtractionError.AuthWallDetected` on a
+     * platform with a capture route — drives the "Sign in with <platform>" card
+     * CTA (§2.6 recapture flow). Cleared on the next extraction attempt,
+     * sign-in completion, or failure of another kind.
      */
     val authWallUrl: String? = null,
+
+    /**
+     * Platform that can resolve [authWallUrl] through its WebView cookie capture
+     * route. Null for platforms without a capture flow (Twitter/Threads/unknown),
+     * which keep the generic error only.
+     */
+    val authWallPlatform: Platform? = null,
 
     /**
      * False for single-format platforms (Instagram/Twitter/Threads): the card
@@ -220,7 +228,14 @@ class HomeViewModel @Inject constructor(
     private fun extractMedia(extractor: MediaExtractor, url: String) {
         extractionJob?.cancel()
         extractionJob = viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, mediaItems = emptyList(), authWallUrl = null) }
+            _uiState.update {
+                it.copy(
+                    isLoading = true,
+                    mediaItems = emptyList(),
+                    authWallUrl = null,
+                    authWallPlatform = null
+                )
+            }
             try {
                 when (val result = extractor.extract(url)) {
                     is ExtractionResult.Success -> {
@@ -245,19 +260,23 @@ class HomeViewModel @Inject constructor(
                     is ExtractionResult.Error -> {
                         val errMsg = result.cause.message
                         Logger.w(tag, "Extraction failed for $url: $errMsg")
-                        // §2.6 recapture flow: only YouTube surfaces the sign-in card.
-                        // Instagram auth walls are resolved from Settings → Instagram login;
-                        // Home stays a pure search surface (product decision, Oct 2026).
+                        // §2.6 recapture flow: both YouTube and Instagram have a
+                        // WebView capture route with auto-retry on success. Other
+                        // platforms (Twitter/Threads) have no capture flow, so they
+                        // keep the generic error only.
                         val authWallPlatform =
-                            (result.cause as? ExtractionError.AuthWallDetected)?.platform
+                            (result.cause as? ExtractionError.AuthWallDetected)
+                                ?.platform
+                                ?.takeIf {
+                                    it == Platform.YOUTUBE || it == Platform.INSTAGRAM
+                                }
                         _uiState.update {
                             it.copy(
                                 isLoading = false,
                                 mediaItems = emptyList(),
                                 showsFormatPicker = true,
-                                authWallUrl = if (authWallPlatform != null &&
-                                    authWallPlatform != Platform.INSTAGRAM
-                                ) url else null
+                                authWallUrl = url.takeIf { authWallPlatform != null },
+                                authWallPlatform = authWallPlatform
                             )
                         }
                         messageBus.post(errMsg ?: "Extraction failed", isError = true)
@@ -279,13 +298,15 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Called when the YouTube cookie-capture route returned to Home carrying
+     * Called when a cookie-capture route returned to Home carrying
      * `COOKIE_CAPTURE_RESULT_KEY` = true: re-run extraction on the URL that
-     * originally hit the wall, automatically — no manual round-trip.
+     * originally hit the wall, automatically — no manual round-trip. Works for
+     * both the YouTube and Instagram capture routes because the extractor is
+     * resolved from the pending URL.
      */
     fun onAuthSignInCompleted() {
         val pending = _uiState.value.authWallUrl ?: return
-        _uiState.update { it.copy(authWallUrl = null) }
+        _uiState.update { it.copy(authWallUrl = null, authWallPlatform = null) }
         val extractor = extractorRegistry.resolve(pending)
         if (extractor == null) {
             // Don't silently drop the pending retry — tell the user to re-paste.

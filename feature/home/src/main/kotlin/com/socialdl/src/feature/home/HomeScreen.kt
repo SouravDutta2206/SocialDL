@@ -49,6 +49,7 @@ import com.socialdl.src.core.common.util.readClipboardText
 import kotlinx.coroutines.launch
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
+import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.model.uiKey
 import com.socialdl.src.core.ui.component.BatchDownloadBottomSheet
 import com.socialdl.src.core.ui.component.FormatBottomSheet
@@ -68,6 +69,7 @@ import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 fun HomeScreen(
     onNavigateToSettings: () -> Unit,
     onSignInWithYouTube: () -> Unit = {},
+    onSignInWithInstagram: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
@@ -151,10 +153,17 @@ fun HomeScreen(
             )
 
             // §2.6 recapture flow: the last extraction hit an auth wall — offer the
-            // direct "Sign in with YouTube" action; the navigation graph auto-retries
-            // the same URL when the capture screen completes successfully.
-            uiState.authWallUrl?.let {
-                AuthWallSignInCard(onSignInWithYouTube = onSignInWithYouTube)
+            // platform's direct sign-in action; the navigation graph auto-retries the
+            // same URL when the capture screen completes successfully.
+            uiState.authWallPlatform?.let { platform ->
+                AuthWallSignInCard(
+                    platform = platform,
+                    onSignIn = if (platform == Platform.INSTAGRAM) {
+                        onSignInWithInstagram
+                    } else {
+                        onSignInWithYouTube
+                    }
+                )
             }
 
             // Result Cards List or Empty State
@@ -352,7 +361,11 @@ fun HomeScreen(
 
 /** §2.6 recapture card: matches the mock's error-state offering a direct "Sign in" action. */
 @Composable
-private fun AuthWallSignInCard(onSignInWithYouTube: () -> Unit) {
+private fun AuthWallSignInCard(
+    platform: Platform,
+    onSignIn: () -> Unit,
+) {
+    val isInstagram = platform == Platform.INSTAGRAM
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = SocialDLBg,
@@ -364,24 +377,32 @@ private fun AuthWallSignInCard(onSignInWithYouTube: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "YouTube needs you signed in",
+                text = if (isInstagram) {
+                    "Instagram needs you signed in"
+                } else {
+                    "YouTube needs you signed in"
+                },
                 style = MaterialTheme.typography.titleSmall,
                 color = SocialDLOnSurface
             )
             Text(
-                text = "Age-restricted and bot-checked videos need a signed-in session. Sign in once with YouTube, then this video is retried automatically.",
+                text = if (isInstagram) {
+                    "Private posts and reels need a signed-in session. Sign in once with Instagram, then this post is retried automatically."
+                } else {
+                    "Age-restricted and bot-checked videos need a signed-in session. Sign in once with YouTube, then this video is retried automatically."
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = SocialDLOnSurfaceVariant
             )
             Button(
-                onClick = onSignInWithYouTube,
+                onClick = onSignIn,
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = SocialDLAccentButton,
                     contentColor = Color.White
                 )
             ) {
-                Text("Sign in with YouTube")
+                Text(if (isInstagram) "Sign in with Instagram" else "Sign in with YouTube")
             }
         }
     }
