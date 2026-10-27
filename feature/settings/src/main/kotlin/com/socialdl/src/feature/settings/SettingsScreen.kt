@@ -269,6 +269,7 @@ fun SettingsScreen(
                         InstagramCookiesSettingsPanel(
                             present = instagramCookiesUiState.present,
                             lastRefreshedAt = instagramCookiesUiState.lastRefreshedAt,
+                            actionMessage = instagramCookiesUiState.actionMessage,
                             onSignIn = onNavigateToInstagramCookieCapture,
                             onImport = { instagramCookiesFilePicker.launch(arrayOf("*/*")) },
                             onClear = { showClearInstagramCookiesDialog = true }
@@ -595,6 +596,7 @@ private fun CookiesSettingsPanel(
 private fun InstagramCookiesSettingsPanel(
     present: Boolean,
     lastRefreshedAt: Long?,
+    actionMessage: String?,
     onSignIn: () -> Unit,
     onImport: () -> Unit,
     onClear: () -> Unit
@@ -657,6 +659,14 @@ private fun InstagramCookiesSettingsPanel(
                     color = SocialDLAccent
                 )
             }
+        }
+
+        actionMessage?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = SocialDLOnSurfaceVariant
+            )
         }
     }
 }

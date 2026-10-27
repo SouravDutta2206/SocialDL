@@ -29,6 +29,11 @@ data class CookieCaptureConfig(
      * unaddressable full-screen WebView.
      */
     val allowedHosts: List<String>,
+    /**
+     * Domain-family matchers for hosts that cannot be enumerated as suffixes,
+     * e.g. Google's country domains (`google.co.in`, `google.com.au`).
+     */
+    val allowedHostPatterns: List<Regex> = emptyList(),
     /** Toolbar copy shown above the WebView. */
     val title: String,
     val subtitle: String,
@@ -80,11 +85,23 @@ object YoutubeCookieCapture {
         harvests = HARVESTS,
         userAgent = userAgent,
         allowedHosts = listOf(
+            // YouTube properties the sign-in flow can bounce through.
             "youtube.com",
+            "youtu.be",
+            "youtube-nocookie.com",
+            "ytimg.com",
+            "ggpht.com",
+            "googlevideo.com",
+            // Google sign-in + its static/asset and account hosts.
             "google.com",
-            "accounts.google.com",
-            "myaccount.google.com",
+            "gstatic.com",
+            "googleusercontent.com",
+            "googleapis.com",
+            "gvt1.com",
+            "gvt2.com",
+            "recaptcha.net",
         ),
+        allowedHostPatterns = listOf(CaptureHostPolicy.GOOGLE_COUNTRY_DOMAIN),
         title = "Sign in with YouTube",
         subtitle = "Sign in normally: tap the profile icon and log in. SocialDL never sees your password.",
     )
@@ -128,7 +145,18 @@ object InstagramCookieCapture {
         markerCookies = MARKER_COOKIES,
         harvests = HARVESTS,
         userAgent = USER_AGENT,
-        allowedHosts = listOf("instagram.com", "facebook.com"),
+        allowedHosts = listOf(
+            "instagram.com",
+            // Facebook OAuth ("Log in with Facebook") + Accounts Center.
+            "facebook.com",
+            // Meta's account/OAuth hops that can be reached from the login flow.
+            "meta.com",
+            // Static/CDN/JS hosts used by the login page. Only main-frame loads
+            // open externally now, so these are mostly future-proofing.
+            "cdninstagram.com",
+            "fbcdn.net",
+            "facebook.net",
+        ),
         title = "Sign in with Instagram",
         subtitle = "Log in normally (2FA included). SocialDL never sees your password; only cookies are stored encrypted.",
         userAgentOverride = USER_AGENT,

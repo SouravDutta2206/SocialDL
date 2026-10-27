@@ -85,6 +85,27 @@ class CookieStoreImpl @Inject constructor(
         return File(File(context.filesDir, "cookies"), name)
     }
 
+    /**
+     * Scratch directory for atomic writes. `EncryptedFile` authenticates the
+     * ciphertext with the **file name** as associated data
+     * (`EncryptedFile.openFileOutput()` / `openFileInput()` pass `mFile.getName()`),
+     * so the staging copy MUST keep the exact basename of the final jar. Writing
+     * `<jar>.tmp` and renaming it used to leave every saved jar undecryptable.
+     *
+     * A sibling directory is used so the rename stays on the same filesystem
+     * (atomic on Android's ext4/f2fs).
+     */
+    private val stagingDir: File by lazy {
+        File(File(context.filesDir, "cookies"), ".staging").also { dir ->
+            dir.mkdirs()
+            // Sweep a half-written file left by a crash in a previous process.
+            dir.listFiles()?.forEach { stale -> runCatching { stale.delete() } }
+        }
+    }
+
+    private fun stagingFileFor(target: File): File =
+        File(stagingDir, target.name).also { runCatching { it.delete() } }
+
     override fun hasCookies(platform: Platform): Boolean {
         val file = jarFile(platform)
         return file.exists() && file.length() > 0
@@ -100,12 +121,13 @@ class CookieStoreImpl @Inject constructor(
         }
         mutex.withLock {
             withContext(Dispatchers.IO) {
-                // Write the encrypted jar to a sibling temp file, then rename over
-                // the target. A crash mid-write must not destroy the last good jar.
+                // Write the encrypted jar to a staging file with the SAME basename,
+                // then rename over the target. A crash mid-write must not destroy
+                // the last good jar, and EncryptedFile's file-name AAD must match
+                // between write and read.
                 val target = jarFile(platform)
                 target.parentFile?.mkdirs()
-                val temp = File(target.parentFile, "${target.name}.tmp")
-                runCatching { temp.delete() }
+                val temp = stagingFileFor(target)
                 createEncryptedFile(temp).openFileOutput().use { out ->
                     out.write(jarContent.toByteArray())
                 }
@@ -116,6 +138,10 @@ class CookieStoreImpl @Inject constructor(
                         throw IOException("Could not atomically replace ${target.name}")
                     }
                 }
+                // Older builds staged as `<jar>.tmp`; those files were encrypted
+                // under a different AAD name and can never be decrypted. Remove any
+                // survivor instead of leaving dead ciphertext on disk.
+                runCatching { File(target.parentFile, "${target.name}.tmp").delete() }
             }
             context.cookieMetaStore.edit {
                 it[Keys.lastRefreshed(platform)] = System.currentTimeMillis()
@@ -129,6 +155,10 @@ class CookieStoreImpl @Inject constructor(
             withContext(Dispatchers.IO) {
                 val file = jarFile(platform)
                 if (file.exists()) file.delete()
+                // A crash could have left a staging copy behind; it is encrypted
+                // under the same key as the real jar, so drop it with the jar.
+                runCatching { File(stagingDir, file.name).delete() }
+                runCatching { File(file.parentFile, "${file.name}.tmp").delete() }
             }
             // Clearing only the encrypted jar leaves the live WebView session
             // behind: the next capture would auto-succeed and "sign out" would be

@@ -2,8 +2,12 @@ package com.socialdl.src.core.cookies.ui
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Bitmap
+import android.os.Message
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -20,8 +24,10 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -36,9 +42,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.socialdl.src.core.common.util.Logger
+import com.socialdl.src.core.cookies.CaptureHostPolicy
 import com.socialdl.src.core.cookies.CaptureOutcome
 import com.socialdl.src.core.cookies.CookieCaptureConfig
 import com.socialdl.src.core.model.Platform
+
+private const val TAG = "CookieCapture"
 
 /**
  * Full-screen interactive WebView host for cookie capture (§2.6) — a real, visible
@@ -61,19 +71,15 @@ fun CookieCaptureScreen(
         viewModel.initialize(platform)
     }
 
-    // Deliver the one-shot result exactly once, on either terminal path.
-    // acknowledgeResult() nulls the outcome, so this LaunchedEffect cannot re-fire.
+    // Deliver the one-shot result exactly once. Failure/NotSignedIn are shown
+    // inline instead of being treated as terminal, so the user can finish the
+    // redirect (or retry) without losing the WebView session.
     LaunchedEffect(uiState.result, uiState.cancelled) {
         when {
             uiState.cancelled -> onResult(false)
             uiState.result is CaptureOutcome.Success -> {
                 viewModel.acknowledgeResult()
                 onResult(true)
-            }
-            uiState.result is CaptureOutcome.Failure ||
-                uiState.result is CaptureOutcome.NotSignedIn -> {
-                viewModel.acknowledgeResult()
-                onResult(false)
             }
         }
     }
@@ -113,7 +119,7 @@ fun CookieCaptureScreen(
             }
             IconButton(
                 onClick = viewModel::onManualSignInClicked,
-                enabled = !uiState.busy
+                enabled = !uiState.busy && uiState.config != null
             ) {
                 Icon(
                     imageVector = Icons.Default.Check,
@@ -123,12 +129,42 @@ fun CookieCaptureScreen(
             }
         }
 
+        uiState.message?.let { message ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF2B1B1B))
+                    .padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = message,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFFFB4AB)
+                )
+                TextButton(onClick = viewModel::dismissMessage) {
+                    Text("Dismiss", color = Color(0xFFFFB4AB))
+                }
+            }
+        }
+
         Box(modifier = Modifier.fillMaxSize()) {
             val config = uiState.config
             if (config != null) {
                 CaptureWebView(config = config, onSettled = viewModel::onPageFinished)
             } else {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            }
+            if (uiState.busy) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0x66000000)),
+                    contentAlignment = Alignment.Center
+                ) {
                     CircularProgressIndicator()
                 }
             }
@@ -143,6 +179,7 @@ private fun CaptureWebView(
     onSettled: (url: String?) -> Unit,
 ) {
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var loading by remember { mutableStateOf(true) }
 
     // Deterministic teardown on BOTH the composable-leaves-composition path and
     // the ambient cancellation path (§2.6: destroy() on every exit path).
@@ -158,65 +195,207 @@ private fun CaptureWebView(
         }
     }
 
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = { context ->
-            WebView(context).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                // Google blocks embedded WebViews ("This browser or app may not be
-                // secure") by fingerprinting the UA: the "; wv)" marker and the
-                // legacy "Version/4.0 " prefix give the WebView away. Strip both so
-                // the WebView is indistinguishable from the device's own Chrome —
-                // this keeps accounts.google.com reachable mid sign-in flow (§2.6).
-                val defaultUa = settings.userAgentString
-                val cleanDeviceUa = defaultUa
-                    .replace("Version/4.0 ", "")
-                    .replace("; wv)", ")")
-                settings.userAgentString = config.userAgentOverride
-                    ?: cleanDeviceUa.ifBlank { config.userAgent ?: defaultUa }
-                val cookieManager = CookieManager.getInstance()
-                cookieManager.setAcceptCookie(true)
-                cookieManager.setAcceptThirdPartyCookies(this, true)
-                webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(
-                        view: WebView,
-                        request: WebResourceRequest
-                    ): Boolean {
-                        // Only the platform's own sign-in hosts may load inside this
-                        // unaddressable full-screen surface. Everything else opens in
-                        // an external browser (or is ignored for non-web schemes), so
-                        // a redirect cannot turn the capture screen into a phishing
-                        // page the user cannot inspect.
-                        if (request.url.scheme?.lowercase() !in setOf("http", "https")) {
-                            return true
+    Box(modifier = Modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { context ->
+                WebView(context).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    // Google blocks embedded WebViews ("This browser or app may not be
+                    // secure") by fingerprinting the UA: the "; wv)" marker and the
+                    // legacy "Version/4.0 " prefix give the WebView away. Strip both so
+                    // the WebView is indistinguishable from the device's own Chrome —
+                    // this keeps accounts.google.com reachable mid sign-in flow (§2.6).
+                    val defaultUa = settings.userAgentString
+                    val cleanDeviceUa = defaultUa
+                        .replace("Version/4.0 ", "")
+                        .replace("; wv)", ")")
+                    val captureUa = config.userAgentOverride
+                        ?: cleanDeviceUa.ifBlank { config.userAgent ?: defaultUa }
+                    settings.userAgentString = captureUa
+                    val cookieManager = CookieManager.getInstance()
+                    cookieManager.setAcceptCookie(true)
+                    cookieManager.setAcceptThirdPartyCookies(this, true)
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView,
+                            request: WebResourceRequest
+                        ): Boolean {
+                            return handleNavigation(view, request, config)
                         }
-                        if (isAllowedHost(request.url.host, config.allowedHosts)) {
-                            return false
-                        }
-                        runCatching {
-                            view.context.startActivity(Intent(Intent.ACTION_VIEW, request.url))
-                        }
-                        return true
-                    }
 
-                    override fun onPageFinished(view: WebView, url: String?) {
-                        onSettled(url)
+                        override fun onPageStarted(
+                            view: WebView,
+                            url: String?,
+                            favicon: Bitmap?
+                        ) {
+                            loading = true
+                        }
+
+                        override fun onPageFinished(view: WebView, url: String?) {
+                            loading = false
+                            onSettled(url)
+                        }
+
+                        override fun onReceivedError(
+                            view: WebView,
+                            request: WebResourceRequest,
+                            error: WebResourceError
+                        ) {
+                            if (request.isForMainFrame) {
+                                loading = false
+                                Logger.w(
+                                    TAG,
+                                    "Main-frame load failed (${error.errorCode} " +
+                                        "${error.description}) at ${request.url}"
+                                )
+                            }
+                        }
                     }
-                }
-                loadUrl(config.loginUrl)
-            }.also { webViewRef = it }
+                    // Google's sign-in occasionally opens a popup (account chooser /
+                    // re-auth step). Without multi-window support the popup never
+                    // loads and the opener page spins forever, so route the popup's
+                    // first real URL into this visible WebView instead.
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onCreateWindow(
+                            view: WebView,
+                            isDialog: Boolean,
+                            isUserGesture: Boolean,
+                            resultMsg: Message
+                        ): Boolean {
+                            return openPopupInPlace(view, config, resultMsg)
+                        }
+                    }
+                    settings.setSupportMultipleWindows(true)
+                    loadUrl(config.loginUrl)
+                }.also { webViewRef = it }
+            }
+        )
+        if (loading) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+            )
         }
-    )
-}
-
-private fun isAllowedHost(host: String?, allowedHosts: List<String>): Boolean {
-    val normalized = host?.lowercase()?.removeSuffix(".") ?: return false
-    return allowedHosts.any { allowed ->
-        normalized == allowed || normalized.endsWith(".$allowed")
     }
 }
+
+/**
+ * Applies the navigation allowlist to a main-frame load.
+ *
+ * Only main-frame navigations to a non-allowlisted host are handed to an external
+ * browser. Subframe navigations (ads, reCAPTCHA variants, Google's static asset
+ * frames) are blocked in place — previously they too launched the external
+ * browser, which backgrounded the app and left the sign-in page waiting forever.
+ */
+private fun handleNavigation(
+    view: WebView,
+    request: WebResourceRequest,
+    config: CookieCaptureConfig,
+): Boolean {
+    val url = request.url
+    if (url.scheme?.lowercase() !in HTTP_SCHEMES) {
+        Logger.w(TAG, "Blocked non-web navigation (${url.scheme})")
+        return true
+    }
+    if (CaptureHostPolicy.isAllowedHost(
+            url.host,
+            config.allowedHosts,
+            config.allowedHostPatterns
+        )
+    ) {
+        return false
+    }
+    if (!request.isForMainFrame) {
+        Logger.d(TAG, "Blocked disallowed subframe host ${url.host}")
+        return true
+    }
+    Logger.w(TAG, "Opening non-allowlisted host externally: ${url.host}")
+    runCatching {
+        view.context.startActivity(Intent(Intent.ACTION_VIEW, url))
+    }.onFailure {
+        Logger.w(TAG, "Could not open ${url.host} externally", it)
+    }
+    return true
+}
+
+/**
+ * Intercepts a `window.open()` popup and loads its first real navigation in the
+ * otherwise visible WebView. Cookies live in the process-wide CookieManager, so
+ * the session continues seamlessly in the visible view.
+ */
+@SuppressLint("SetJavaScriptEnabled")
+private fun openPopupInPlace(
+    opener: WebView,
+    config: CookieCaptureConfig,
+    resultMsg: Message,
+): Boolean {
+    val popup = WebView(opener.context).apply {
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.userAgentString = opener.settings.userAgentString
+        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+        webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: WebResourceRequest
+            ): Boolean {
+                // Let http(s) commits reach onPageStarted, where the allowlist is
+                // checked before the URL is handed to the visible WebView.
+                if (request.url.scheme?.lowercase() !in HTTP_SCHEMES) {
+                    view.post {
+                        runCatching {
+                            view.stopLoading()
+                            view.destroy()
+                        }
+                    }
+                    return true
+                }
+                return false
+            }
+
+            override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
+                if (url.isNullOrBlank() || url == "about:blank") return
+                val scheme = url.substringBefore(':').lowercase()
+                val allowed = scheme in HTTP_SCHEMES &&
+                    CaptureHostPolicy.isAllowedHost(
+                        CaptureHostPolicy.hostOf(url),
+                        config.allowedHosts,
+                        config.allowedHostPatterns
+                    )
+                if (!allowed) {
+                    Logger.w(TAG, "Discarded popup navigation: $url")
+                    view.post {
+                        runCatching {
+                            view.stopLoading()
+                            view.destroy()
+                        }
+                    }
+                    return
+                }
+                view.stopLoading()
+                opener.post {
+                    runCatching { opener.loadUrl(url) }
+                        .onFailure { Logger.w(TAG, "Popup transfer failed", it) }
+                    runCatching { view.destroy() }
+                }
+            }
+        }
+    }
+    val transport = resultMsg.obj as? WebView.WebViewTransport
+    if (transport == null) {
+        runCatching { popup.destroy() }
+        return false
+    }
+    transport.webView = popup
+    resultMsg.sendToTarget()
+    return true
+}
+
+private val HTTP_SCHEMES = setOf("http", "https")
