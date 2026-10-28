@@ -24,6 +24,32 @@ import javax.inject.Singleton
  * destination file, and a worker re-run after process death/system stop
  * restarts the file from byte 0. Retry/backoff exists only within a single
  * chunk's attempt loop, never across runs.
+ *
+ * Chunked 206 responses are validated against their own `Content-Range`:
+ * - `Content-Range` must start at the requested offset and end no later than the
+ *   requested end. Its claimed length (`end - start + 1`) must match both the
+ *   response `Content-Length` (when present) and the bytes actually read.
+ * - The first resolved total is pinned for the rest of the download. Later
+ *   responses may omit it (`*`) but may not change it.
+ * - A strong `ETag` is pinned and sent as `If-Range` on later requests. A
+ *   `Last-Modified` is pinned for response-to-response consistency only; it is
+ *   never sent as an If-Range date because HTTP dates are weak validators by
+ *   default (RFC 9110 §8.8.2.2). Weak `ETag`s are ignored for both purposes.
+ *   The pinned validator is re-checked on later 206 responses whenever the
+ *   same validator header is present; a changed value fails.
+ * - Without a strong `ETag`, representation identity cannot be proven. Only the
+ *   range/total/body checks apply; a later response that omits the validator
+ *   cannot be verified and relies on server correctness.
+ * - When a total is known, the download only completes if the written byte
+ *   count and the destination length equal that total.
+ *
+ * Each chunk is appended as it is read. An oversized buffer is rejected before
+ * it is written; a short body may already have appended a prefix when the
+ * mismatch is detected at end-of-stream, but that chunk and download fail and
+ * the prefix is never treated as a completed file.
+ *
+ * A response that violates these rules fails with [RangeInvalidException]
+ * (non-retryable) instead of silently producing a corrupt file.
  */
 @Singleton
 class ChunkedDownloader @Inject constructor(
@@ -94,6 +120,7 @@ class ChunkedDownloader @Inject constructor(
 
         var downloadedBytes = 0L
         var totalBytes: Long? = null
+        var representationValidator: RepresentationValidator? = null
 
         while (totalBytes == null || downloadedBytes < totalBytes) {
             if (isStopped()) {
@@ -117,14 +144,21 @@ class ChunkedDownloader @Inject constructor(
                 }
                 chunkAttempts++
                 try {
-                    val call = streamingClient.newCall(
-                        Request.Builder()
-                            .url(url)
-                            .header("User-Agent", DEFAULT_USER_AGENT)
-                            .header("Accept-Encoding", "identity")
-                            .header("Range", "bytes=$chunkStart-$chunkEnd")
-                            .build()
-                    )
+                    val requestBuilder = Request.Builder()
+                        .url(url)
+                        .header("User-Agent", DEFAULT_USER_AGENT)
+                        .header("Accept-Encoding", "identity")
+                        .header("Range", "bytes=$chunkStart-$chunkEnd")
+                    // Pin the representation across chunks with a strong ETag.
+                    // Last-Modified is never sent as If-Range: HTTP dates are
+                    // weak validators by default (RFC 9110 §8.8.2.2), and a
+                    // compliant server may answer 200, which cannot be appended.
+                    if (chunkStart > 0L) {
+                        representationValidator
+                            ?.takeIf { it.type.ifRangeEligible }
+                            ?.let { requestBuilder.header("If-Range", it.value) }
+                    }
+                    val call = streamingClient.newCall(requestBuilder.build())
                     // Registered so the worker can abort the blocked read the instant
                     // the network drops instead of waiting out the read timeout.
                     canceller?.register(call)
@@ -132,13 +166,25 @@ class ChunkedDownloader @Inject constructor(
                     try {
                         call.execute().use { response ->
                         if (response.code == 416) {
-                            if (totalBytes == null) {
-                                // Unknown size and the server says the range is
-                                // past EOF: everything up to chunkStart is all
-                                // the server has — treat it as complete.
-                                Logger.d(tag, "HTTP 416 Range Not Satisfiable at byte $chunkStart. Marking complete.")
+                            val knownTotal = totalBytes
+                            if (knownTotal == null) {
+                                // Unknown size: only a matching unsatisfied-range
+                                // total proves that everything up to chunkStart is
+                                // all the server has. Without it a malformed or
+                                // truncated response could look like EOF.
+                                val unsatisfiedTotal = parseUnsatisfiedRangeTotal(
+                                    response.header("Content-Range")
+                                ) ?: throw RangeNotSatisfiableException(
+                                    "HTTP error 416: missing Content-Range (bytes */total) at byte $chunkStart; cannot confirm EOF"
+                                )
+                                if (unsatisfiedTotal != chunkStart) {
+                                    throw RangeNotSatisfiableException(
+                                        "HTTP error 416: Content-Range total=$unsatisfiedTotal does not match downloaded=$chunkStart"
+                                    )
+                                }
+                                Logger.d(tag, "HTTP 416 at byte $chunkStart with total=$unsatisfiedTotal. Marking complete.")
                                 chunkSuccess = true
-                                totalBytes = chunkStart
+                                totalBytes = unsatisfiedTotal
                                 return@use
                             }
                             // totalBytes was already resolved but the remaining
@@ -147,7 +193,7 @@ class ChunkedDownloader @Inject constructor(
                             // and completing would silently persist a truncated
                             // file — fail the download.
                             throw RangeNotSatisfiableException(
-                                "HTTP error 416: Range Not Satisfiable at byte $chunkStart of resolved total=$totalBytes"
+                                "HTTP error 416: Range Not Satisfiable at byte $chunkStart of resolved total=$knownTotal"
                             )
                         }
 
@@ -171,8 +217,15 @@ class ChunkedDownloader @Inject constructor(
                             // honored it for this URL). Retrying the same request
                             // yields the same 200 — fail fast instead of burning
                             // backoff cycles and full-body connection discards.
-                            Logger.w(tag, "Server returned 200 OK for ranged request at byte $chunkStart. Aborting.")
-                            throw RangeNotSupportedException("HTTP error 200: server ignored the Range request at byte $chunkStart")
+                            val reason = if (representationValidator?.type?.ifRangeEligible == true) {
+                                "server ignored If-Range (representation may have changed)"
+                            } else {
+                                "server ignored the Range request"
+                            }
+                            Logger.w(tag, "Server returned 200 OK for ranged request at byte $chunkStart. Aborting: $reason")
+                            throw RangeNotSupportedException(
+                                "HTTP error 200: server ignored the Range request at byte $chunkStart ($reason)"
+                            )
                         }
 
                         if (response.code != 206) {
@@ -181,9 +234,9 @@ class ChunkedDownloader @Inject constructor(
 
                         val body = response.body ?: throw IOException("Empty response body for chunk $chunkStart-$chunkEnd")
 
-                        // Never append a body that does not match the requested range:
-                        // a wrong start/end (or a full-object response) silently
-                        // corrupts the file.
+                        // Never append a body that does not match its own
+                        // Content-Range: a wrong start/end, a short/long body, or
+                        // a changed total silently corrupts the file.
                         val contentRange = parseContentRange(response.header("Content-Range"))
                             ?: throw RangeInvalidException(
                                 "Missing/invalid Content-Range for chunk $chunkStart-$chunkEnd"
@@ -198,15 +251,54 @@ class ChunkedDownloader @Inject constructor(
                                 "Content-Range ends at ${contentRange.end}, past requested $chunkEnd"
                             )
                         }
-                        contentRange.total?.let {
-                            totalBytes = it
-                            Logger.d(tag, "Resolved totalBytes=$it from Content-Range")
+                        val claimedBytes = contentRange.end - contentRange.start + 1
+                        contentRange.total?.let { responseTotal ->
+                            val knownTotal = totalBytes
+                            if (knownTotal == null) {
+                                totalBytes = responseTotal
+                                Logger.d(tag, "Resolved totalBytes=$responseTotal from Content-Range")
+                            } else if (knownTotal != responseTotal) {
+                                // The object changed size underneath us; completing
+                                // would produce a truncated or corrupt file.
+                                throw RangeInvalidException(
+                                    "Content-Range total changed from $knownTotal to $responseTotal at byte $chunkStart"
+                                )
+                            }
                         }
 
-                        val expectedBytes = chunkEnd - chunkStart + 1
-                        if (body.contentLength() > expectedBytes) {
+                        // Pin the first validator the server supplies. Only a
+                        // strong ETag is eligible for If-Range. Last-Modified is
+                        // comparison-only because HTTP dates are weak validators
+                        // by default (RFC 9110 §8.8.2.2); weak ETags are ignored.
+                        // A later 206 is checked against the pinned validator so
+                        // a server that ignored If-Range cannot splice in a
+                        // different representation of the same length.
+                        val pinnedValidator = representationValidator
+                        if (pinnedValidator == null) {
+                            val strongEtag = response.header(ValidatorType.ETAG.headerName)
+                                ?.takeUnless { it.startsWith("W/", ignoreCase = true) }
+                            val lastModified = response.header(ValidatorType.LAST_MODIFIED.headerName)
+                            representationValidator = when {
+                                strongEtag != null ->
+                                    RepresentationValidator(ValidatorType.ETAG, strongEtag)
+                                lastModified != null ->
+                                    RepresentationValidator(ValidatorType.LAST_MODIFIED, lastModified)
+                                else -> null
+                            }
+                        } else {
+                            val currentValue = response.header(pinnedValidator.type.headerName)
+                            if (currentValue != null && currentValue != pinnedValidator.value) {
+                                throw RangeInvalidException(
+                                    "Representation ${pinnedValidator.type.headerName} changed " +
+                                        "from ${pinnedValidator.value} to $currentValue at byte $chunkStart"
+                                )
+                            }
+                        }
+
+                        val declaredBytes = body.contentLength()
+                        if (declaredBytes >= 0L && declaredBytes != claimedBytes) {
                             throw RangeInvalidException(
-                                "Chunk body ${body.contentLength()} bytes exceeds requested $expectedBytes"
+                                "Chunk body Content-Length $declaredBytes does not match Content-Range claim $claimedBytes"
                             )
                         }
                         var chunkBytesRead = 0L
@@ -219,9 +311,9 @@ class ChunkedDownloader @Inject constructor(
 
                                 while (input.read(buffer).also { bytesRead = it } != -1) {
                                     if (isStopped()) throw CancellationException("Download was stopped")
-                                    if (chunkBytesRead + bytesRead > expectedBytes) {
+                                    if (chunkBytesRead + bytesRead > claimedBytes) {
                                         throw RangeInvalidException(
-                                            "Chunk body exceeded requested range $chunkStart-$chunkEnd"
+                                            "Chunk body exceeded Content-Range claim of $claimedBytes bytes"
                                         )
                                     }
                                     output.write(buffer, 0, bytesRead)
@@ -240,8 +332,10 @@ class ChunkedDownloader @Inject constructor(
                             }
                         }
 
-                        if (chunkBytesRead == 0L) {
-                            throw IOException("Empty chunk body for range $chunkStart-$chunkEnd")
+                        if (chunkBytesRead != claimedBytes) {
+                            throw RangeInvalidException(
+                                "Chunk body was $chunkBytesRead bytes but Content-Range claims $claimedBytes"
+                            )
                         }
 
                             chunkSuccess = true
@@ -276,6 +370,20 @@ class ChunkedDownloader @Inject constructor(
             if (!chunkSuccess) {
                 throw IOException("Failed to download chunk $chunkStart-$chunkEnd after $MAX_RETRIES_PER_CHUNK attempts", lastError)
             }
+        }
+
+        val resolvedTotal = totalBytes
+            ?: throw RangeInvalidException("Chunked download finished without a resolvable total")
+        if (downloadedBytes != resolvedTotal) {
+            throw RangeInvalidException(
+                "Downloaded $downloadedBytes bytes but Content-Range total was $resolvedTotal"
+            )
+        }
+        val writtenLength = destination.length()
+        if (writtenLength != downloadedBytes) {
+            throw RangeInvalidException(
+                "Destination length $writtenLength differs from written bytes $downloadedBytes"
+            )
         }
     }
 
@@ -351,6 +459,20 @@ class ChunkedDownloader @Inject constructor(
         }
     }
 
+    private enum class ValidatorType(
+        val headerName: String,
+        /** Only strong ETags may be sent as If-Range (RFC 9110 §13.1.5). */
+        val ifRangeEligible: Boolean,
+    ) {
+        ETAG("ETag", ifRangeEligible = true),
+        LAST_MODIFIED("Last-Modified", ifRangeEligible = false),
+    }
+
+    private data class RepresentationValidator(
+        val type: ValidatorType,
+        val value: String,
+    )
+
     private data class ContentRange(
         val start: Long,
         val end: Long,
@@ -358,6 +480,13 @@ class ChunkedDownloader @Inject constructor(
     )
 
     private val contentRangeRegex = Regex("""bytes\s+(\d+)-(\d+)/(\d+|\*)""", RegexOption.IGNORE_CASE)
+    private val unsatisfiedRangeRegex = Regex("""bytes\s+\*/\s*(\d+)""", RegexOption.IGNORE_CASE)
+
+    private fun parseUnsatisfiedRangeTotal(value: String?): Long? {
+        if (value.isNullOrBlank()) return null
+        val match = unsatisfiedRangeRegex.matchEntire(value.trim()) ?: return null
+        return match.groupValues[1].toLongOrNull()?.takeIf { it >= 0L }
+    }
 
     private fun parseContentRange(value: String?): ContentRange? {
         if (value.isNullOrBlank()) return null
