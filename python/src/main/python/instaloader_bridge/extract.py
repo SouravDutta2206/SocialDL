@@ -23,6 +23,9 @@ from common.envelope import (
     succeed,
 )
 
+# Sign-in markers only. Rate-limit phrasing must never live here: "please wait a
+# few minutes" is Instagram's 429 text, and keeping it in this table reported a
+# rate-limited fetch as an auth wall (finding #7).
 _AUTH_MARKERS = (
     "login required",
     "login_required",
@@ -33,7 +36,18 @@ _AUTH_MARKERS = (
     "checkpoint",
     "401",
     "unauthorized",
-    "please wait a few minutes",
+)
+
+# Checked before the auth table and before the "post metadata failed" branch, so a
+# 429 can never be reported as a sign-in wall or as an unavailable post. The typed
+# TooManyRequestsException covers the first 429, but Instaloader retries and then
+# wraps the final one in a plain ConnectionException ("HTTP error 429: Too Many
+# Requests"), so the text markers are required as well.
+_RATE_LIMIT_MARKERS = (
+    "please wait",
+    "rate limit",
+    "too many requests",
+    "429",
 )
 
 _SHORTCODE_RE = re.compile(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)")
@@ -76,27 +90,33 @@ def extract(url):
 
 
 def _failure_envelope(error):
-    """Maps anonymous-fetch failures, keeping raw text in debug_log only."""
+    """Maps anonymous-fetch failures, keeping raw text in debug_log only.
+
+    Order matters (finding #7):
+
+    1. rate limits — a 429 is a transport failure, even though its text used to
+       sit in the auth table and was therefore reported as a sign-in wall;
+    2. unavailable — an empty post-metadata response. Checked *after* rate limits
+       so it cannot mask a 429 response;
+    3. auth wall — login/private/401 markers via the shared classifier, whose
+       auth list no longer contains rate-limit phrasing;
+    4. network / unavailable fallback.
+    """
     text = str(error).lower()
+
+    if isinstance(error, instaloader.TooManyRequestsException) or _matches_any(
+        text, _RATE_LIMIT_MARKERS
+    ):
+        return fail(
+            RATE_LIMITED,
+            "Instagram is rate-limiting requests — try again in a few minutes",
+            tail=[str(error)],
+        )
 
     if "fetching post metadata failed" in text:
         return fail(
             UNAVAILABLE,
             "This Instagram post is private, deleted, or unavailable",
-            tail=[str(error)],
-        )
-
-    if "401" in text or "unauthorized" in text or "please wait a few minutes" in text:
-        return fail(
-            AUTH_WALL,
-            "Instagram needs a signed-in session for this content",
-            tail=[str(error)],
-        )
-
-    if "please wait" in text or "rate limit" in text or "429" in text:
-        return fail(
-            RATE_LIMITED,
-            "Instagram is rate-limiting requests — try again in a few minutes",
             tail=[str(error)],
         )
 
@@ -111,6 +131,10 @@ def _failure_envelope(error):
         return fail(NETWORK, "Couldn't reach Instagram — check your connection", tail=[str(error)])
 
     return fail(UNAVAILABLE, "Couldn't load this Instagram post", tail=[str(error)])
+
+
+def _matches_any(text, markers):
+    return any(marker in text for marker in markers)
 
 
 def _shortcode(url):
@@ -129,7 +153,13 @@ def _normalize(post):
                     media_type="video",
                     url=node.video_url,
                     thumbnail_url=node.display_url,
-                    duration=getattr(post, "video_duration", None),
+                    # Per-node duration only. Instaloader 4.15.5's
+                    # PostSidecarNode exposes no duration field, so getattr yields
+                    # None today; it is forward-compatible if a later version adds
+                    # one. Never fall back to post.video_duration: that value
+                    # describes a single item of the carousel, so copying it onto
+                    # every video item invents metadata (finding #9).
+                    duration=getattr(node, "video_duration", None),
                 ))
             else:
                 items.append(_item(
@@ -145,6 +175,8 @@ def _normalize(post):
             media_type="video",
             url=post.video_url,
             thumbnail_url=post.url,
+            # A single video's own duration is the post's duration, so taking it
+            # from the post is correct for this typename (unlike a sidecar).
             duration=getattr(post, "video_duration", None),
         ))
     else:
