@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.socialdl.src.core.common.util.readClipboardText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
@@ -77,8 +78,17 @@ fun HomeScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val resolvingItemId by viewModel.resolvingItemId.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
-    val requestDownloadPermissions = rememberDownloadPermissionRequest()
     var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
+    // Permissions are requested once on first launch (RequestStartupPermissions);
+    // here we only enforce the storage grant the export needs and say why.
+    val requestDownloadPermissions = rememberDownloadPermissionGate(
+        onStorageDenied = {
+            toastMessage = ToastMessage(
+                message = "Storage permission is required to save downloads",
+                type = ToastType.ERROR
+            )
+        }
+    )
     var selectedItemForSheet by remember { mutableStateOf<MediaItem?>(null) }
     var sheetInitialTab by remember { mutableStateOf(FormatKind.VIDEO) }
     var showBatchSheet by remember { mutableStateOf(false) }
@@ -252,6 +262,9 @@ fun HomeScreen(
                                 toastMessage = ToastMessage(
                                     message = "Download queued: $title (${format.label})"
                                 )
+                            } catch (e: CancellationException) {
+                                // Leaving the screen cancels the enqueue; that is not a failure.
+                                throw e
                             } catch (e: Exception) {
                                 toastMessage = ToastMessage(
                                     message = "Couldn't queue download: ${e.message ?: "unknown error"}",
