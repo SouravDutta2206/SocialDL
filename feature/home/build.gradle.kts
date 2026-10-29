@@ -25,6 +25,7 @@ dependencies {
     implementation(project(":core:python"))
     implementation(project(":core:cookies"))
     implementation(project(":core:download"))
+    implementation(project(":core:settings"))
     implementation(project(":extraction:api"))
 
 
@@ -52,4 +53,7 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.android.compiler)
     implementation(libs.hilt.navigation.compose)
+
+    // Testing
+    testImplementation(libs.junit)
 }

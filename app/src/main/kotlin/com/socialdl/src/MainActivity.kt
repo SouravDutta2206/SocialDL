@@ -25,6 +25,7 @@ import com.socialdl.src.core.ui.theme.SocialDLBg
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 import com.socialdl.src.core.ui.theme.SocialDLTheme
+import com.socialdl.src.feature.home.RequestStartupPermissions
 import com.socialdl.src.navigation.SocialDLNavHost
 import com.socialdl.src.navigation.TopLevelDestination
 import dagger.hilt.android.AndroidEntryPoint
@@ -36,6 +37,10 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             SocialDLTheme {
+                // One-shot: asks for notifications (API 33+) / storage (API <= 28)
+                // the first time the app is launched, then never again.
+                RequestStartupPermissions()
+
                 val navController = rememberNavController()
                 val navBackStackEntry by navController.currentBackStackEntryAsState()
                 val currentDestination = navBackStackEntry?.destination

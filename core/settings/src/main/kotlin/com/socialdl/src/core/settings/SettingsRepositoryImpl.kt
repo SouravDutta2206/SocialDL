@@ -33,6 +33,7 @@ class SettingsRepositoryImpl @Inject constructor(
         val MAX_CONCURRENT_DOWNLOADS = intPreferencesKey("max_concurrent_downloads")
         val WIFI_ONLY_DOWNLOADS = booleanPreferencesKey("wifi_only_downloads")
         val FORCE_H264_TRANSCODE = booleanPreferencesKey("force_h264_transcode")
+        val STARTUP_PERMISSIONS_REQUESTED = booleanPreferencesKey("startup_permissions_requested")
     }
 
     override val theme: Flow<AppTheme> = context.dataStore.data.map { prefs ->
@@ -73,6 +74,10 @@ class SettingsRepositoryImpl @Inject constructor(
 
     override val forceH264Transcode: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[Keys.FORCE_H264_TRANSCODE] ?: false
+    }
+
+    override val startupPermissionsRequested: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.STARTUP_PERMISSIONS_REQUESTED] ?: false
     }
 
     override suspend fun setTheme(theme: AppTheme) {
@@ -128,6 +133,12 @@ class SettingsRepositoryImpl @Inject constructor(
     override suspend fun setForceH264Transcode(force: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[Keys.FORCE_H264_TRANSCODE] = force
+        }
+    }
+
+    override suspend fun setStartupPermissionsRequested(requested: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.STARTUP_PERMISSIONS_REQUESTED] = requested
         }
     }
 }

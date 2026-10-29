@@ -165,6 +165,10 @@ class HomeViewModel @Inject constructor(
                     customAuthor = item.author,
                     groupId = groupId
                 )
+            } catch (e: CancellationException) {
+                // The batch scope is going away; stop enqueuing instead of logging
+                // each remaining item as a failure.
+                throw e
             } catch (e: Exception) {
                 Logger.e(tag, "Failed to enqueue batch item '${item.title}'", e)
             }
@@ -190,6 +194,9 @@ class HomeViewModel @Inject constructor(
             try {
                 downloadManager.enqueueDownload(mediaItem = item, selectedFormat = format)
                 messageBus.post("Download queued: ${item.title} (${format.label})")
+            } catch (e: CancellationException) {
+                // ViewModel cleared mid-enqueue: not a user-facing failure.
+                throw e
             } catch (e: Exception) {
                 Logger.e(tag, "Failed to enqueue direct download for '${item.title}'", e)
                 messageBus.post("Couldn't queue download: ${e.message ?: "unknown error"}", isError = true)
