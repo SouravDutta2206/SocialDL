@@ -1,11 +1,6 @@
 package com.socialdl.src.core.download
 
 import android.content.Context
-import androidx.work.Constraints
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.workDataOf
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadProgressInfo
@@ -16,14 +11,18 @@ import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.MuxStrategy
 import com.socialdl.src.core.settings.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -41,6 +40,7 @@ class DownloadManager @Inject constructor(
     private val eventBus: DownloadEventBus,
     private val jobRepository: DownloadJobRepository,
     private val settingsRepository: SettingsRepository,
+    private val workScheduler: DownloadWorkScheduler,
 ) {
     private val tag = "DownloadManager"
     private val scope = CoroutineScope(
@@ -48,6 +48,20 @@ class DownloadManager @Inject constructor(
             Logger.e(tag, "Uncaught error in DownloadManager scope", e)
         }
     )
+
+    /**
+     * Phase 3 (finding #3) enqueue serialization.
+     *
+     * The Room transaction in [DownloadJobRepository.createJobIfNoActiveDuplicate]
+     * makes the duplicate-check-and-insert atomic at the DB layer. This mutex
+     * additionally covers the non-transactional WorkManager enqueue window: a
+     * caller that coalesces onto another caller's job can only return that id
+     * AFTER the winner's work request has been handed to WorkManager.
+     *
+     * Held only across "check-and-create row + enqueue work" — never across the
+     * settings reads or entity construction above it.
+     */
+    private val enqueueMutex = Mutex()
 
     /** Live jobs (non-terminal + FAILED cards) straight from Room. */
     val jobs: Flow<List<DownloadJobEntity>> = jobRepository.observeJobs
@@ -80,6 +94,17 @@ class DownloadManager @Inject constructor(
      * Builds the durable job row, writes it to Room FIRST, then enqueues a
      * WorkRequest whose input contains only KEY_JOB_ID. The worker reads its
      * entire config from the row, so enqueue-before-insert must never happen.
+     *
+     * Coalescing contract (Phase 3 / finding #3) — exactly one active job and one
+     * WorkRequest per `(sourceUrl, carouselIndex, formatId)` identity:
+     * 1. Settings-derived fields and the entity are built BEFORE the lock, so a
+     *    slow DataStore read never serializes unrelated enqueues.
+     * 2. Under [enqueueMutex], the duplicate check and insert happen in one Room
+     *    transaction ([DownloadJobRepository.createJobIfNoActiveDuplicate]) and
+     *    the winner enqueues its WorkRequest before the lock is released.
+     * 3. A caller that coalesces onto an existing job returns that job's id and
+     *    enqueues nothing. Because the loser can only reach the check after the
+     *    winner's enqueue finished, the returned id always has live work behind it.
      */
     suspend fun enqueueDownload(
         mediaItem: MediaItem,
@@ -90,17 +115,6 @@ class DownloadManager @Inject constructor(
         groupId: String? = null
     ): String {
         startupReconciled.await()
-
-        // Idempotency: tapping download twice for the same stream slot must not
-        // launch two workers or produce two files/history rows.
-        jobRepository.findActiveDuplicate(
-            sourceUrl = mediaItem.sourceUrl,
-            carouselIndex = mediaItem.carouselIndex ?: 0,
-            formatId = selectedFormat.id
-        )?.let { existing ->
-            Logger.i(tag, "Download already active as ${existing.id}; coalescing duplicate request")
-            return existing.id
-        }
 
         val jobId = UUID.randomUUID().toString()
 
@@ -126,10 +140,6 @@ class DownloadManager @Inject constructor(
 
         val title = customTitle ?: mediaItem.title
         val author = customAuthor ?: mediaItem.author
-
-        // Destructive replace: starting the same download again discards a
-        // lingering FAILED record for it — no X-to-remove round-trip needed.
-        jobRepository.discardFailedJob(mediaItem.sourceUrl, mediaItem.carouselIndex ?: 0)
 
         // If format requires muxing, resolve paired audio stream upfront
         // (non-placeholder path; placeholders re-resolve in the worker via JIT).
@@ -178,33 +188,45 @@ class DownloadManager @Inject constructor(
             updatedAt = System.currentTimeMillis()
         )
 
-        jobRepository.insertJob(job)
-
         // Wi-Fi-only is evaluated at enqueue time and encoded as a WorkManager
         // constraint, so the OS will not start the job on metered data.
         val wifiOnly = settingsRepository.wifiOnlyDownloads.first()
-        val workRequest = OneTimeWorkRequestBuilder<DownloadWorker>()
-            .setInputData(workDataOf(DownloadWorker.KEY_JOB_ID to jobId))
-            .setConstraints(
-                Constraints.Builder()
-                    .setRequiredNetworkType(
-                        if (wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED
-                    )
-                    .build()
-            )
-            .addTag(jobId)
-            .build()
 
-        try {
-            WorkManager.getInstance(context).enqueue(workRequest)
-        } catch (e: Exception) {
-            // Do not leave a QUEUED zombie row: delete it and rethrow so callers
-            // (batch counting) report a truthful enqueued count.
-            Logger.e(tag, "WorkManager enqueue failed for job $jobId; deleting row", e)
-            jobRepository.deleteJob(jobId)
-            throw e
+        return enqueueMutex.withLock {
+            // The transaction is authoritative: it also performs the destructive
+            // replace of a lingering FAILED record for this source/carousel slot.
+            val stored = jobRepository.createJobIfNoActiveDuplicate(job)
+            if (stored.id != jobId) {
+                Logger.i(tag, "Download already active as ${stored.id}; coalescing duplicate request")
+                return@withLock stored.id
+            }
+
+            try {
+                workScheduler.enqueue(jobId, wifiOnly)
+            } catch (e: CancellationException) {
+                // The caller was cancelled while WorkManager was persisting the
+                // request. The rollback must survive that cancellation: a QUEUED row
+                // whose worker may never exist would swallow the next tap as a
+                // duplicate. If the request did get persisted, the orphaned work
+                // aborts on its missing row (DownloadWorker's guard read).
+                withContext(NonCancellable) {
+                    Logger.i(tag, "Enqueue cancelled for job $jobId; rolling back the queued row")
+                    jobRepository.deleteJob(jobId)
+                    runCatching { workScheduler.cancel(jobId) }
+                }
+                throw e
+            } catch (e: Exception) {
+                // Do not leave a QUEUED zombie row: delete it and rethrow so callers
+                // (batch counting) report a truthful enqueued count. NonCancellable so
+                // a cancellation racing this failure cannot skip the cleanup.
+                withContext(NonCancellable) {
+                    Logger.e(tag, "WorkManager enqueue failed for job $jobId; deleting row", e)
+                    jobRepository.deleteJob(jobId)
+                }
+                throw e
+            }
+            jobId
         }
-        return jobId
     }
 
     /**
@@ -216,7 +238,7 @@ class DownloadManager @Inject constructor(
     suspend fun cancelDownload(jobId: String) {
         Logger.i(tag, "Cancel requested for job $jobId")
         jobRepository.deleteJob(jobId)
-        WorkManager.getInstance(context).cancelAllWorkByTag(jobId)
+        workScheduler.cancel(jobId)
     }
 
     /** Same deletion for the FAILED card's "X" (background work is already dead). */
@@ -234,11 +256,10 @@ class DownloadManager @Inject constructor(
      */
     private suspend fun reconcileOnStartup() = withContext(Dispatchers.IO) {
         try {
-            val workManager = WorkManager.getInstance(context)
             val jobs = jobRepository.getActiveJobs()
             jobs.forEach { job ->
                 Logger.i(tag, "Reconciling dead job ${job.id} (${job.status}) as FAILED(INTERRUPTED)")
-                workManager.cancelAllWorkByTag(job.id)
+                workScheduler.cancel(job.id)
                 // P1-3 sweep: a MediaStore row created with IS_PENDING=1 during an
                 // interrupted export is deleted if still pending.
                 job.pendingUri?.let { uri ->
