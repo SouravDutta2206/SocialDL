@@ -13,7 +13,6 @@ import com.socialdl.src.core.model.DownloadStatus
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MuxStrategy
-import com.socialdl.src.core.model.allFormats
 import com.socialdl.src.core.settings.SettingsRepository
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.ExtractorRegistry
@@ -277,6 +276,11 @@ class DownloadWorker @AssistedInject constructor(
      * formats (batch/playlist items that defer extraction to download time).
      * Writes the initial DOWNLOADING(0f) progress row; marks FAILED and returns
      * null on any resolution failure (the caller stops without further work).
+     *
+     * Invariant: a JIT-resolved stream always has the job's requested
+     * [FormatKind]; an unparseable stored kind fails as
+     * [DownloadError.InvalidFormatKind], and a missing resolved kind fails as
+     * [DownloadError.FormatUnavailable] instead of substituting another kind.
      */
     private suspend fun resolveEffectiveFormats(job: DownloadJobEntity): ResolvedStreams? {
         val jobId = job.id
@@ -284,6 +288,21 @@ class DownloadWorker @AssistedInject constructor(
             tag,
             "[$jobId] Acquiring streams: container=${job.container}, requiresMuxing=${job.requiresMuxing}, isPlaceholder=${job.isPlaceholder}"
         )
+
+        // Fail closed on corrupt/legacy kind metadata: FormatKind.from() defaults
+        // to VIDEO, which could turn an audio job into a video export. The enqueue
+        // path always writes a valid kind, so this only affects damaged rows.
+        val requestedKind = FormatSelector.requestedKindOrNull(job.formatKind)
+        if (requestedKind == null) {
+            Logger.e(
+                tag,
+                "[$jobId] Stored formatKind '${job.formatKind}' is missing or invalid for " +
+                    "${job.sourceUrl} — failing closed"
+            )
+            markFailed(jobId, DownloadError.InvalidFormatKind)
+            return null
+        }
+
         // The first transition doubles as the "still active" guard: a row already
         // FAILED by startup reconciliation, or deleted by cancel, matches zero
         // rows and the pipeline must not start downloading for it.
@@ -315,7 +334,7 @@ class DownloadWorker @AssistedInject constructor(
                 }
         }
         var effectiveContainer = job.container
-        var effectiveFormatKind = FormatKind.from(job.formatKind)
+        var effectiveFormatKind = requestedKind
         var effectiveFormatLabel = job.formatLabel
         var effectiveFormatId = job.formatId
         var resolvedViaExtraction = false
@@ -343,25 +362,34 @@ class DownloadWorker @AssistedInject constructor(
                         return null
                     }
 
-                    val requestedKind = FormatKind.from(job.formatKind)
+                    // Refresh the stream within the requested kind only: an audio
+                    // placeholder must never become a video download (or vice versa).
                     // Prefer the exact persisted format id (same stream the user
                     // picked) over "first of kind", which may silently upgrade or
                     // downgrade the selection after a URL refresh.
-                    val exactFormat = job.formatId
-                        .takeIf { !job.isPlaceholder && it.isNotBlank() }
-                        ?.let { id -> resolvedItem.allFormats().firstOrNull { it.id == id } }
-                    val resolvedFormat = exactFormat ?: when (requestedKind) {
-                        FormatKind.IMAGE -> resolvedItem.imageFormats.firstOrNull()
-                            ?: resolvedItem.videoFormats.firstOrNull()
-                        FormatKind.AUDIO -> resolvedItem.audioFormats.firstOrNull()
-                            ?: resolvedItem.videoFormats.firstOrNull()
-                        FormatKind.VIDEO -> resolvedItem.videoFormats.firstOrNull()
-                            ?: resolvedItem.audioFormats.firstOrNull()
-                    }
+                    val resolvedFormat = FormatSelector.select(
+                        item = resolvedItem,
+                        requestedKind = requestedKind,
+                        exactFormatId = job.formatId,
+                        allowExact = !job.isPlaceholder,
+                    )
 
-                    if (resolvedFormat == null || resolvedFormat.directUrl.isNullOrBlank()) {
-                        Logger.e(tag, "[$jobId] No direct stream URL resolved for ${job.sourceUrl}")
-                        markFailed(jobId, DownloadError.MissingStream)
+                    // Defensive invariant: selection must stay in the requested kind
+                    // and yield a direct URL before any bytes are downloaded.
+                    if (resolvedFormat == null ||
+                        !FormatSelector.isUsable(resolvedFormat, requestedKind)
+                    ) {
+                        Logger.e(
+                            tag,
+                            "[$jobId] Format unavailable for ${job.sourceUrl}: " +
+                                "requested=$requestedKind, resolvedId=${resolvedFormat?.id}, " +
+                                "resolvedKind=${resolvedFormat?.kind}, " +
+                                "image=${resolvedItem.imageFormats.size}, " +
+                                "video=${resolvedItem.videoFormats.size}, " +
+                                "audio=${resolvedItem.audioFormats.size}, " +
+                                "exactFormatId=${job.formatId}"
+                        )
+                        markFailed(jobId, DownloadError.FormatUnavailable)
                         return null
                     }
 

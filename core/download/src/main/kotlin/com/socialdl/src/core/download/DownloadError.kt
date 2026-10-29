@@ -26,6 +26,23 @@ sealed class DownloadError(val userMessage: String) {
     /** Format resolved but no direct stream URL is available. */
     data object MissingStream : DownloadError("Could not find a downloadable stream for this format")
 
+    /**
+     * The extracted item has no usable stream of the requested media kind
+     * (audio/video/image). Never resolved by substituting another kind.
+     */
+    data object FormatUnavailable : DownloadError(
+        "This format isn't available for this media — pick another quality"
+    )
+
+    /**
+     * The job row's stored format kind is blank or unrecognized. Only corrupt or
+     * legacy rows can reach this path; guessing a kind could export the wrong
+     * media type, so the worker fails closed.
+     */
+    data object InvalidFormatKind : DownloadError(
+        "This download's format information is invalid — start it again"
+    )
+
     /** Format requires muxing but no audio track could be resolved. */
     data object MissingAudioStream : DownloadError("This format needs merging but no audio track was available")
 
