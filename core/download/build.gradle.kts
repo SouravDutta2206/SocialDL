@@ -12,6 +12,8 @@ android {
 
     defaultConfig {
         minSdk = 24
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
@@ -21,6 +23,14 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    testOptions {
+        unitTests {
+            // Robolectric spins up a real Android runtime (with a working SQLite)
+            // for the Phase 3 enqueue-coalescing tests around Room.
+            isIncludeAndroidResources = true
+        }
     }
 }
 
@@ -52,5 +62,14 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.mockwebserver)
+    // Robolectric + AndroidX test core: in-memory Room instance and a real
+    // Android Context for the enqueue-coalescing / concurrency tests (Phase 3).
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+
+    // On-device Phase 3 test: real SQLite + real WorkManager scheduler.
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.runner)
 }
 

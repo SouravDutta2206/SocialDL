@@ -42,6 +42,9 @@ build/
 **/build/
 .gradle/
 .kotlin/
+docs/
+**/test/
+**/androidTest/
 
 # Android binary outputs
 *.apk
@@ -145,3 +148,4 @@ replay_pid*
 # ------------------------------------------------------------------------------
 # The technical specification lives in docs/ and is versioned with the code.
 socialdl_material_3_mobile_downloader_app.html
+

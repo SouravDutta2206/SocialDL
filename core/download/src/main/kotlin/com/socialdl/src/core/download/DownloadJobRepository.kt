@@ -56,14 +56,58 @@ class DownloadJobRepository @Inject constructor(
 
     suspend fun getJob(id: String): DownloadJobEntity? = jobDao.getJob(id)
 
+    /**
+     * Raw row write for tests/seeding. Enqueue paths must go through
+     * [createJobIfNoActiveDuplicate], which coalesces atomically.
+     */
     suspend fun insertJob(entity: DownloadJobEntity) = jobDao.insertJob(entity)
 
-    /** Existing active job for the same source slot + stream, if any. */
+    /**
+     * Read-only snapshot of the active job for the same source slot + stream.
+     *
+     * NOT a coalescing gate: a check-then-insert built on this query is racy
+     * (two callers can both see `null`). Use [createJobIfNoActiveDuplicate] for
+     * any enqueue decision.
+     */
     suspend fun findActiveDuplicate(
         sourceUrl: String,
         carouselIndex: Int,
         formatId: String
     ): DownloadJobEntity? = jobDao.findActiveDuplicate(sourceUrl, carouselIndex, formatId)
+
+    /**
+     * Authoritative coalescing gate (finding #3 / Phase 3).
+     *
+     * The duplicate lookup and the insert run inside ONE Room transaction, so two
+     * concurrent callers for the same `(sourceUrl, carouselIndex, formatId)` can
+     * never both observe "no active job" and insert two rows: the second caller
+     * blocks on the DB transaction and sees the first caller's committed row.
+     *
+     * The caller must treat the returned row as the winner:
+     * - `returned.id == entity.id` → this caller created the row and owns the
+     *   single WorkManager enqueue that follows.
+     * - `returned.id != entity.id` → another caller already owns the job; return
+     *   the existing id and enqueue nothing.
+     *
+     * Destructive replace (§10 UX) is folded into the same transaction: a FAILED
+     * record for the same source/carousel slot is discarded only when no active
+     * duplicate exists, so a retry replaces the failure card atomically.
+     *
+     * NOTE: the transaction does not cover the WorkManager enqueue — that window
+     * is closed by the caller's enqueue mutex ([DownloadManager]).
+     */
+    suspend fun createJobIfNoActiveDuplicate(entity: DownloadJobEntity): DownloadJobEntity =
+        database.withTransaction {
+            jobDao.findActiveDuplicate(
+                sourceUrl = entity.sourceUrl,
+                carouselIndex = entity.carouselIndex,
+                formatId = entity.formatId
+            )?.let { existing -> return@withTransaction existing }
+
+            jobDao.deleteFailedJob(entity.sourceUrl, entity.carouselIndex)
+            jobDao.insertJob(entity)
+            entity
+        }
 
     /** Transition-checked full-row update (used for non-standard writes like workId, pendingUri). */
     suspend fun updateJob(entity: DownloadJobEntity) {
@@ -204,13 +248,10 @@ class DownloadJobRepository @Inject constructor(
     /** Snapshot for startup reconciliation. */
     suspend fun getActiveJobs(): List<DownloadJobEntity> = jobDao.getActiveJobs()
 
-    /**
-     * Destructive replace (§10 UX): a new enqueue of the same [sourceUrl]/carousel
-     * slot discards any FAILED record for it first.
-     */
-    suspend fun discardFailedJob(sourceUrl: String, carouselIndex: Int) {
-        jobDao.deleteFailedJob(sourceUrl, carouselIndex)
-    }
+    // NOTE: the destructive FAILED-row replace (§10 UX) used to live here as a
+    // standalone DISCARD step before the insert. It is now part of
+    // createJobIfNoActiveDuplicate's transaction, because a standalone delete
+    // could interleave with a concurrent insert and drop a fresh failure card.
 
     /**
      * Startup reconciliation failure write: jobs that lost their WorkManager work
