@@ -1,11 +1,13 @@
 package com.socialdl.src.core.download
 
 import android.content.Context
+import android.net.Uri
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.socialdl.src.core.common.util.Logger
+import com.socialdl.src.core.common.util.MediaStorageUtils
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.ffmpeg.FFmpegEvent
 import com.socialdl.src.core.ffmpeg.FFmpegProcessExecutor
@@ -20,6 +22,7 @@ import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -44,12 +47,16 @@ import java.util.Locale
  * [DownloadManager.reconcileOnStartup] cancels + fails everything left over.
  * Nothing ever re-runs or restarts from byte 0.
  *
- * Instant-cancellation guard reads: before export and again right before the
- * history-insert, the job row is re-read. If the user cancelled (row deleted),
- * the current step aborts and `finally` cleans scratch. Cancellation landing
- * *during* the MediaStore copy may finish the export before the guard — the
- * accepted outcome is an exported file with no active card and no history
- * record. Never a zombie UI card, never a retry.
+ * Instant-cancellation guard reads: before export, right after the pending
+ * MediaStore row is created, and again before publish (IS_PENDING=0). If the user
+ * cancelled (row deleted), the current step aborts and `finally` cleans scratch.
+ * Cancelling *during* the copy deletes the row that export created and rethrows,
+ * and a cancel that wins after publish but before the history transaction
+ * compensates by deleting the just-published file — a cancelled job never leaves a
+ * visible file without a history record. Residual window: process death between
+ * IS_PENDING=0 and the history commit, which startup reconciliation cannot sweep
+ * (the row is no longer pending); publishing is therefore as late as possible.
+ * Never a zombie UI card, never a retry.
  */
 @HiltWorker
 class DownloadWorker @AssistedInject constructor(
@@ -633,8 +640,9 @@ class DownloadWorker @AssistedInject constructor(
     /**
      * Exports [finalFile] to MediaStore / scoped storage (§9.7) and persists the
      * Room history row (§10). Guard reads against instant cancellation run before
-     * the export step and again right before the success transaction.
-     * [resolvedContainer] is the container actually downloaded (JIT-resolved
+     * the export step, right after the pending row is created, and again before
+     * publish; a cancel that wins after publish compensates by deleting the file.
+     * [resolved] carries the container actually downloaded (JIT-resolved
      * placeholders may differ from the stale [DownloadJobEntity.container]).
      * Returns true on success; false (FAILED written) on export failure.
      */
@@ -687,44 +695,107 @@ class DownloadWorker @AssistedInject constructor(
                     return@export false
                 }
                 true
+            },
+            onBeforePublish = {
+                // Phase 5 (#5): copy and publish are separate steps. Publishing is
+                // the last point at which a cancel can still delete the file
+                // instead of leaving a visible row with no history record, so
+                // re-read the job row here and refuse to publish a dead job.
+                val current = jobRepository.getJob(jobId)
+                val stillExporting = current != null && current.status == DownloadStatus.EXPORTING
+                if (!stillExporting) {
+                    Logger.i(
+                        tag,
+                        "[$jobId] Job is no longer active before publish " +
+                            "(status=${current?.status}); discarding the export"
+                    )
+                }
+                stillExporting
             }
         )
 
         if (outputUri == null) {
+            // A cancel deletes the job row; the exporter then deletes the row it
+            // created and reports null. That is a cancellation, not an export
+            // failure, and a deleted row must never be marked FAILED.
+            if (jobRepository.getJob(jobId) == null) {
+                Logger.i(tag, "[$jobId] Job row missing during export — cancelled; nothing published")
+                return false
+            }
             Logger.e(tag, "[$jobId] Failed to write file to MediaStore")
             markFailed(jobId, DownloadError.ExportFailed)
             return false
         }
 
-        // Guard read #2: after the export, before the history transaction. A cancel
-        // landing here leaves an exported file with no active card and no history
-        // record (accepted micro-window; the user can delete it via gallery).
-        if (jobRepository.getJob(jobId) == null) {
-            Logger.i(tag, "[$jobId] Job row missing after export — cancelled; history skipped")
-            return false
-        }
+        // The file is published from here on. Any cancel that wins before the
+        // history transaction commits must delete exactly this export's URI, so a
+        // cancelled job leaves neither a visible file nor a history row.
+        var historyRecorded = false
+        try {
+            // Guard read #2: after the export, before the history transaction.
+            if (jobRepository.getJob(jobId) == null) {
+                Logger.i(tag, "[$jobId] Job row missing after export — cancelled; deleting the published file")
+                deletePublishedExport(jobId, outputUri)
+                return false
+            }
 
-        // Persist to Room: delete the EXPORTING row + insert history atomically
-        // (§10). A zero-row delete means a cancel won the race; do not record a
-        // completion for it.
-        val recorded = jobRepository.finishJobSuccessfully(
-            job = resolvedJob,
-            outputUri = outputUri.toString(),
-            fileSizeBytes = finalFile.length()
-        )
-        if (!recorded) return false
-
-        notificationManager.notifyCompleted(jobId, resolvedJob.title)
-        Logger.i(tag, "[$jobId] Download completed successfully: uri=$outputUri, size=${finalFile.length()}")
-        eventBus.emit(
-            DownloadEvent.Completed(
-                jobId = jobId,
-                title = resolvedJob.title,
+            // Persist to Room: delete the EXPORTING row + insert history atomically
+            // (§10). A zero-row delete means a cancel won the race; do not record a
+            // completion for it.
+            historyRecorded = jobRepository.finishJobSuccessfully(
+                job = resolvedJob,
                 outputUri = outputUri.toString(),
                 fileSizeBytes = finalFile.length()
             )
-        )
-        return true
+            if (!historyRecorded) {
+                Logger.i(tag, "[$jobId] Cancelled before the history insert; deleting the published file")
+                deletePublishedExport(jobId, outputUri)
+                return false
+            }
+
+            notificationManager.notifyCompleted(jobId, resolvedJob.title)
+            Logger.i(tag, "[$jobId] Download completed successfully: uri=$outputUri, size=${finalFile.length()}")
+            eventBus.emit(
+                DownloadEvent.Completed(
+                    jobId = jobId,
+                    title = resolvedJob.title,
+                    outputUri = outputUri.toString(),
+                    fileSizeBytes = finalFile.length()
+                )
+            )
+            return true
+        } catch (e: CancellationException) {
+            // Cancelled while the history transaction (or the completion signal)
+            // was in flight. Compensate only when history was NOT written: deleting
+            // the file after a committed history row would leave that row dangling.
+            if (!historyRecorded) {
+                Logger.i(tag, "[$jobId] Export cancelled before history committed; deleting the published file")
+                deletePublishedExport(jobId, outputUri)
+            }
+            throw e
+        }
+    }
+
+    /**
+     * Phase 5 (#5) compensation: deletes exactly the MediaStore row this export
+     * created — never another job's URI and never a user file. Runs in a
+     * [NonCancellable] context because a cancellation is precisely when it is
+     * needed; the resolver delete itself is blocking, so no suspension point can be
+     * cancelled out from under it.
+     */
+    private suspend fun deletePublishedExport(jobId: String, outputUri: Uri) {
+        withContext(NonCancellable) {
+            val deleted = MediaStorageUtils.deleteMediaFromStorage(appContext, outputUri.toString())
+            if (deleted) {
+                Logger.i(tag, "[$jobId] Deleted exported file $outputUri (no history record written)")
+            } else {
+                Logger.w(
+                    tag,
+                    "[$jobId] Exported file $outputUri was already gone or could not be deleted; " +
+                        "no history record was written"
+                )
+            }
+        }
     }
 
     private suspend fun markFailed(jobId: String, error: DownloadError) {
