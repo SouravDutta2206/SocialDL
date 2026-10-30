@@ -1,5 +1,6 @@
 package com.socialdl.src.core.ffmpeg
 
+import android.os.Build
 import com.socialdl.src.core.common.util.Logger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -105,7 +106,7 @@ class FFmpegProcessExecutor @Inject constructor(
             delay(timeoutMs)
             timedOut = true
             Logger.w(tag, "ffmpeg timed out after ${timeoutMs}ms; killing process")
-            process.destroyForcibly()
+            process.destroyForciblyCompat()
         }
 
         // runInterruptible makes waitFor() respond to coroutine cancellation (a
@@ -142,9 +143,9 @@ class FFmpegProcessExecutor @Inject constructor(
             waiter.cancel()
             stderrJob.cancel()
             stdoutJob.cancel()
-            if (process.isAlive) {
+            if (process.isAliveCompat()) {
                 Logger.d(tag, "Forcibly killing active ffmpeg process on flow cancel")
-                process.destroyForcibly()
+                process.destroyForciblyCompat()
             }
         }
     }
@@ -195,3 +196,28 @@ class FFmpegProcessExecutor @Inject constructor(
         )
     }
 }
+
+/**
+ * [Process.destroyForcibly] is API 26+; minSdk is 24. On older releases SIGTERM
+ * ([Process.destroy]) is the only signal available, which ffmpeg handles by exiting.
+ */
+private fun Process.destroyForciblyCompat() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        destroyForcibly()
+    } else {
+        destroy()
+    }
+}
+
+/** [Process.isAlive] is API 26+; older releases report liveness via [Process.exitValue]. */
+private fun Process.isAliveCompat(): Boolean =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        isAlive
+    } else {
+        try {
+            exitValue()
+            false
+        } catch (_: IllegalThreadStateException) {
+            true
+        }
+    }
