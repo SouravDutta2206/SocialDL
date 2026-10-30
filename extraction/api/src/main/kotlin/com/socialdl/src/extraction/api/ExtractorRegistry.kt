@@ -20,9 +20,4 @@ class ExtractorRegistry @Inject constructor(
         if (trimmed.isEmpty()) return null
         return extractors.firstOrNull { it.supports(trimmed) }
     }
-
-    /**
-     * Returns all currently registered extractors.
-     */
-    fun allExtractors(): List<MediaExtractor> = extractors.toList()
 }

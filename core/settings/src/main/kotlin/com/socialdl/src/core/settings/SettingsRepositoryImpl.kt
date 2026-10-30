@@ -26,7 +26,6 @@ class SettingsRepositoryImpl @Inject constructor(
 
     private object Keys {
         val THEME = stringPreferencesKey("app_theme")
-        val ACCENT_COLOR = intPreferencesKey("accent_color")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val VIDEO_FOLDER_URI = stringPreferencesKey("video_folder_uri")
         val AUDIO_FOLDER_URI = stringPreferencesKey("audio_folder_uri")
@@ -42,10 +41,6 @@ class SettingsRepositoryImpl @Inject constructor(
             AppTheme.SYSTEM.name -> AppTheme.SYSTEM
             else -> AppTheme.DARK // Default to dark per spec
         }
-    }
-
-    override val accentColor: Flow<Int> = context.dataStore.data.map { prefs ->
-        prefs[Keys.ACCENT_COLOR] ?: 0xFFEF4444.toInt()
     }
 
     override val fallbackSearchEngine: Flow<SearchEngine> = context.dataStore.data.map { prefs ->
@@ -83,12 +78,6 @@ class SettingsRepositoryImpl @Inject constructor(
     override suspend fun setTheme(theme: AppTheme) {
         context.dataStore.edit { prefs ->
             prefs[Keys.THEME] = theme.name
-        }
-    }
-
-    override suspend fun setAccentColor(color: Int) {
-        context.dataStore.edit { prefs ->
-            prefs[Keys.ACCENT_COLOR] = color
         }
     }
 

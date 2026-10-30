@@ -27,8 +27,4 @@ class DownloadEventBus @Inject constructor() {
     suspend fun emit(event: DownloadEvent) {
         _events.emit(event)
     }
-
-    fun tryEmit(event: DownloadEvent): Boolean {
-        return _events.tryEmit(event)
-    }
 }

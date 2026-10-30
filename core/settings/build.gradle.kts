@@ -24,8 +24,6 @@ android {
 }
 
 dependencies {
-    implementation(project(":core:common"))
-
     implementation(libs.datastore.preferences)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)

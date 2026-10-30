@@ -24,9 +24,4 @@ open class FFmpegBinaryProvider @Inject constructor(
     binaryName = "ffmpeg",
     binaryPathSelector = { paths: NativeRuntime.Paths -> paths.ffmpegPath },
     context = context,
-) {
-    open fun ensureExtracted(): String? {
-        if (context == null) return null
-        return resolveRuntime()?.usrLibDir
-    }
-}
+)

@@ -11,7 +11,6 @@ import kotlinx.coroutines.flow.Flow
  */
 interface SettingsRepository {
     val theme: Flow<AppTheme>
-    val accentColor: Flow<Int>
     val fallbackSearchEngine: Flow<SearchEngine>
     val videoFolderUri: Flow<Uri?>
     val audioFolderUri: Flow<Uri?>
@@ -28,7 +27,6 @@ interface SettingsRepository {
     val startupPermissionsRequested: Flow<Boolean>
 
     suspend fun setTheme(theme: AppTheme)
-    suspend fun setAccentColor(color: Int)
     suspend fun setFallbackSearchEngine(engine: SearchEngine)
     suspend fun setVideoFolderUri(uri: Uri?)
     suspend fun setAudioFolderUri(uri: Uri?)

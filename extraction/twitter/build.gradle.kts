@@ -18,8 +18,6 @@ android {
 
 dependencies {
     implementation(project(":extraction:api"))
-    implementation(project(":core:common"))
-    implementation(project(":core:python"))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)

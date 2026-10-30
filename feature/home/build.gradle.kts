@@ -22,7 +22,6 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:model"))
     implementation(project(":core:ui"))
-    implementation(project(":core:python"))
     implementation(project(":core:cookies"))
     implementation(project(":core:download"))
     implementation(project(":core:settings"))

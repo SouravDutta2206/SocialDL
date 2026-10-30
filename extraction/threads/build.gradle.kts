@@ -18,8 +18,6 @@ android {
 
 dependencies {
     implementation(project(":extraction:api"))
-    implementation(project(":core:common"))
-    implementation(project(":core:network"))
 
     implementation(libs.kotlinx.coroutines.core)
 

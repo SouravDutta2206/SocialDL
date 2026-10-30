@@ -3,7 +3,6 @@ package com.socialdl.src.core.download
 import android.content.Context
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.database.entity.DownloadJobEntity
-import com.socialdl.src.core.model.DownloadProgressInfo
 import com.socialdl.src.core.model.DownloadStatus
 import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MediaFormat
@@ -66,13 +65,6 @@ class DownloadManager @Inject constructor(
     /** Live jobs (non-terminal + FAILED cards) straight from Room. */
     val jobs: Flow<List<DownloadJobEntity>> = jobRepository.observeJobs
 
-    /** UI projection flow (used by Home for inline overlays keyed by [DownloadJobEntity.uiKey]). */
-    val progressInfos: Flow<List<DownloadProgressInfo>> = jobRepository.observeProgressInfos
-
-    /** Same as [progressInfos], keyed by the MediaItem uiKey identity formula. */
-    val progressInfoByKey: Flow<Map<String, DownloadProgressInfo>> =
-        jobRepository.observeProgressInfoByKey
-
     /**
      * Barrier: reconciliation must finish before a new enqueue can be inserted.
      * Otherwise a fast first enqueue could be observed by the startup snapshot
@@ -112,7 +104,6 @@ class DownloadManager @Inject constructor(
         container: String? = null,
         customTitle: String? = null,
         customAuthor: String? = null,
-        groupId: String? = null
     ): String {
         startupReconciled.await()
 
@@ -153,7 +144,7 @@ class DownloadManager @Inject constructor(
         Logger.i(
             tag,
             "Enqueuing job $jobId for '$title', format: ${selectedFormat.label}, container: $finalContainer, " +
-                "pairedAudio=${pairedAudio?.id}, groupId=$groupId"
+                "pairedAudio=${pairedAudio?.id}"
         )
 
         val job = DownloadJobEntity(
@@ -168,14 +159,12 @@ class DownloadManager @Inject constructor(
             formatLabel = selectedFormat.label,
             formatKind = selectedFormat.kind.name,
             container = finalContainer,
-            groupId = groupId,
             status = DownloadStatus.QUEUED,
             progress = 0f,
             totalBytes = selectedFormat.approxSizeBytes,
             directUrl = selectedFormat.directUrl?.takeIf { it.isNotBlank() },
             requiresMuxing = selectedFormat.requiresMuxing,
             audioDirectUrl = pairedAudio?.directUrl?.takeIf { it.isNotBlank() },
-            audioContainer = pairedAudio?.container ?: "M4A",
             muxStrategy = if (forceH264) {
                 MuxStrategy.FORCE_H264.name
             } else {

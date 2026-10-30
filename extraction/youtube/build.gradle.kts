@@ -23,7 +23,6 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:python"))
     implementation(project(":core:cookies"))
-    implementation(project(":core:ffmpeg"))
     implementation(project(":core:node"))
 
     implementation(libs.kotlinx.coroutines.core)

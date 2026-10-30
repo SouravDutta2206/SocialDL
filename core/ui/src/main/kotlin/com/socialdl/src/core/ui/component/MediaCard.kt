@@ -35,7 +35,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.socialdl.src.core.common.util.toTimeString
-import com.socialdl.src.core.model.DownloadProgressInfo
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.ui.theme.SocialDLCard
@@ -46,7 +45,7 @@ import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 /**
  * Result media card matching the YTDLnis / SocialDL mock.
  * Features full bleed preview image, gradient overlay, title, author, duration badge,
- * floating Audio/Video buttons, and inline download progress overlay.
+ * and floating Audio/Video buttons.
  */
 @Composable
 fun MediaCard(
@@ -54,9 +53,6 @@ fun MediaCard(
     onCardClick: () -> Unit,
     onQuickAudioDownload: () -> Unit,
     onQuickVideoDownload: () -> Unit,
-    activeDownload: DownloadProgressInfo? = null,
-    onPauseResumeDownload: (() -> Unit)? = null,
-    onCancelDownload: (() -> Unit)? = null,
     isResolving: Boolean = false,
     modifier: Modifier = Modifier
 ) {
@@ -181,15 +177,6 @@ fun MediaCard(
                         onClick = onQuickVideoDownload
                     )
                 }
-            }
-
-            // Inline Download Progress Overlay (if actively downloading)
-            if (activeDownload != null && onCancelDownload != null) {
-                ProgressOverlayCard(
-                    info = activeDownload,
-                    onPauseResume = onPauseResumeDownload,
-                    onCancel = onCancelDownload
-                )
             }
 
             // Loading overlay when fetching presets on-demand

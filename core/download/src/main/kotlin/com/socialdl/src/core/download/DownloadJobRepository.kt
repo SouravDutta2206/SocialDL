@@ -7,13 +7,10 @@ import com.socialdl.src.core.database.dao.DownloadDao
 import com.socialdl.src.core.database.dao.DownloadJobDao
 import com.socialdl.src.core.database.entity.DownloadHistoryEntity
 import com.socialdl.src.core.database.entity.DownloadJobEntity
-import com.socialdl.src.core.model.DownloadProgressInfo
 import com.socialdl.src.core.model.DownloadStatus
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaContainer
-import com.socialdl.src.core.model.uiKey
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -43,17 +40,6 @@ class DownloadJobRepository @Inject constructor(
     /** All jobs visible to the UI (non-terminal plus FAILED cards), React to DB writes. */
     val observeJobs: Flow<List<DownloadJobEntity>> = jobDao.observeActiveJobs()
 
-    /** Same as [observeJobs], projected to the UI-facing [DownloadProgressInfo]. */
-    val observeProgressInfos: Flow<List<DownloadProgressInfo>> =
-        observeJobs.map { jobs -> jobs.map { it.toProgressInfo() } }
-
-    /**
-     * Live jobs keyed by the shared MediaItem [uiKey] formula
-     * (`"$sourceUrl_$carouselIndex"`), for Home dedup and inline overlays.
-     */
-    val observeProgressInfoByKey: Flow<Map<String, DownloadProgressInfo>> =
-        observeJobs.map { jobs -> jobs.associate { it.uiKey() to it.toProgressInfo() } }
-
     suspend fun getJob(id: String): DownloadJobEntity? = jobDao.getJob(id)
 
     /**
@@ -61,19 +47,6 @@ class DownloadJobRepository @Inject constructor(
      * [createJobIfNoActiveDuplicate], which coalesces atomically.
      */
     suspend fun insertJob(entity: DownloadJobEntity) = jobDao.insertJob(entity)
-
-    /**
-     * Read-only snapshot of the active job for the same source slot + stream.
-     *
-     * NOT a coalescing gate: a check-then-insert built on this query is racy
-     * (two callers can both see `null`). Use [createJobIfNoActiveDuplicate] for
-     * any enqueue decision.
-     */
-    suspend fun findActiveDuplicate(
-        sourceUrl: String,
-        carouselIndex: Int,
-        formatId: String
-    ): DownloadJobEntity? = jobDao.findActiveDuplicate(sourceUrl, carouselIndex, formatId)
 
     /**
      * Authoritative coalescing gate (finding #3 / Phase 3).
@@ -108,19 +81,6 @@ class DownloadJobRepository @Inject constructor(
             jobDao.insertJob(entity)
             entity
         }
-
-    /** Transition-checked full-row update (used for non-standard writes like workId, pendingUri). */
-    suspend fun updateJob(entity: DownloadJobEntity) {
-        val current = jobDao.getJob(entity.id)
-        if (current == null) {
-            Logger.w(tag, "updateJob: job ${entity.id} missing; refusing to resurrect")
-            return
-        }
-        require(isTransitionAllowed(current.status, entity.status)) {
-            "Illegal download status transition ${current.status} -> ${entity.status} for job ${entity.id}"
-        }
-        jobDao.updateJob(entity)
-    }
 
     /**
      * Progress ticks / phase updates written straight to Room (the UI observes
@@ -278,39 +238,5 @@ class DownloadJobRepository @Inject constructor(
         else -> null
     }
 
-    private fun isTransitionAllowed(from: DownloadStatus, to: DownloadStatus): Boolean {
-        if (from == to) return from in nonTerminal
-        return when (to) {
-            DownloadStatus.DOWNLOADING -> from == DownloadStatus.QUEUED
-            DownloadStatus.MUXING -> from == DownloadStatus.DOWNLOADING
-            DownloadStatus.EXPORTING -> from == DownloadStatus.DOWNLOADING || from == DownloadStatus.MUXING
-            DownloadStatus.COMPLETED -> from == DownloadStatus.EXPORTING
-            DownloadStatus.FAILED -> from in nonTerminal
-            DownloadStatus.QUEUED -> false
-            DownloadStatus.PAUSED,
-            DownloadStatus.CANCELLED -> false
-        }
-    }
-
     private fun now(): Long = System.currentTimeMillis()
-
-    private val nonTerminal = listOf(
-        DownloadStatus.QUEUED,
-        DownloadStatus.DOWNLOADING,
-        DownloadStatus.MUXING,
-        DownloadStatus.EXPORTING
-    )
 }
-
-/** Shared identity formula: matches [MediaItem.uiKey] used by LazyColumn keys and batch selection. */
-fun DownloadJobEntity.uiKey(): String = "${sourceUrl}_${carouselIndex}"
-
-/** UI projection used by core:ui composables (MediaCard, ProgressOverlayCard). */
-fun DownloadJobEntity.toProgressInfo(): DownloadProgressInfo = DownloadProgressInfo(
-    id = id,
-    status = status,
-    progress = progress,
-    downloadedBytes = downloadedBytes,
-    totalBytes = totalBytes,
-    errorMessage = errorMessage
-)

@@ -31,7 +31,6 @@ import javax.inject.Inject
 data class HomeUiState(
     val query: String = "",
     val isLoading: Boolean = false,
-    val detectedPlatform: Platform? = null,
     val mediaItems: List<MediaItem> = emptyList(),
     /**
      * Set when the last extraction hit `ExtractionError.AuthWallDetected` on a
@@ -150,7 +149,6 @@ class HomeViewModel @Inject constructor(
     }
 
     suspend fun startBatchDownload(items: List<Pair<MediaItem, MediaFormat>>): List<String> {
-        val groupId = java.util.UUID.randomUUID().toString()
         // Enqueue items individually: a mid-loop failure must not silently lose the
         // remaining items after the caller announced selectedPairs.size. Return the
         // ACTUAL enqueued IDs so toasts report a truthful count.
@@ -163,7 +161,6 @@ class HomeViewModel @Inject constructor(
                     container = format.container,
                     customTitle = item.title,
                     customAuthor = item.author,
-                    groupId = groupId
                 )
             } catch (e: CancellationException) {
                 // The batch scope is going away; stop enqueuing instead of logging
@@ -205,12 +202,7 @@ class HomeViewModel @Inject constructor(
     }
 
     fun onQueryChange(newQuery: String) {
-        val platform = if (newQuery.isNotBlank()) {
-            UrlPlatformResolver.resolvePlatform(newQuery)
-        } else {
-            null
-        }
-        _uiState.update { it.copy(query = newQuery, detectedPlatform = platform) }
+        _uiState.update { it.copy(query = newQuery) }
     }
 
     fun submitQuery(query: String) {

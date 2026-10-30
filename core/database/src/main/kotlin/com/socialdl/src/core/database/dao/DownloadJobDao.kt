@@ -4,7 +4,6 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
-import androidx.room.Update
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadStatus
 import kotlinx.coroutines.flow.Flow
@@ -19,9 +18,6 @@ interface DownloadJobDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertJob(entity: DownloadJobEntity)
-
-    @Update
-    suspend fun updateJob(entity: DownloadJobEntity)
 
     @Query("SELECT * FROM download_jobs WHERE id = :id")
     suspend fun getJob(id: String): DownloadJobEntity?
@@ -109,11 +105,6 @@ interface DownloadJobDao {
             "WHERE id = :id AND status != 'FAILED'"
     )
     suspend fun markFailed(id: String, message: String?, updatedAt: Long)
-
-    @Query(
-        "UPDATE download_jobs SET status = :status, updatedAt = :updatedAt WHERE id = :id"
-    )
-    suspend fun updateStatus(id: String, status: DownloadStatus, updatedAt: Long)
 
     /**
      * Persist JIT-resolved stream metadata without rewriting the whole row (which

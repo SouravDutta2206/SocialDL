@@ -102,15 +102,4 @@ open class PythonEngine @Inject constructor(
             }
         }
     }
-
-    /**
-     * Helper to verify Chaquopy runtime is initialized and accessible.
-     */
-    fun isAvailable(): Boolean {
-        return try {
-            Python.isStarted()
-        } catch (e: Exception) {
-            false
-        }
-    }
 }

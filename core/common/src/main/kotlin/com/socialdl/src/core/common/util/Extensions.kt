@@ -37,18 +37,6 @@ fun Long?.toHumanReadableSize(): String {
 }
 
 /**
- * Validates whether a string looks like a URL (has a recognized scheme or is host-like).
- */
-fun String.isLikelyUrl(): Boolean {
-    val trimmed = this.trim()
-    if (trimmed.isBlank()) return false
-    // Has explicit scheme
-    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return true
-    // Looks like a domain (contains a dot, no spaces)
-    return !trimmed.contains(' ') && trimmed.contains('.')
-}
-
-/**
  * Ensures a URL string has an https:// scheme prefix, healing the common
  * "ttps://..." clipboard typo (dropped leading h) on the way.
  */

@@ -35,9 +35,6 @@ interface DownloadDao {
     @Query("UPDATE download_history SET missingSince = NULL WHERE id IN (:ids)")
     suspend fun clearMissing(ids: List<String>)
 
-    @Query("DELETE FROM download_history")
-    suspend fun clearHistory()
-
     companion object {
         const val SQLITE_BIND_LIMIT = 500
     }
