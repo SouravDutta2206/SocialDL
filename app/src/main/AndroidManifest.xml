@@ -34,12 +34,8 @@
                 tools:node="remove" />
         </provider>
 
-        <!-- WorkManager foreground execution (P1-1): downloads continue while the
-             app is backgrounded; the FGS type is required on Android 14+. -->
-        <service
-            android:name="androidx.work.impl.foreground.SystemForegroundService"
-            android:foregroundServiceType="dataSync"
-            tools:node="merge" />
+        <!-- WorkManager foreground execution (P1-1): the dataSync service type is
+             declared by :core:download, the module that promotes the job. -->
 
         <!-- In-notification Cancel action: removes the Room row (instant UI
              deletion) then cancels the WorkManager job. -->
