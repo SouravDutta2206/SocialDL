@@ -56,10 +56,10 @@ _AUTH_WALL_MARKERS = (
 def _resolve_node_runtime(node_dir, native_bin_dir):
     """Finds the bundled Node binary for yt-dlp's js_runtimes option, or None.
 
-    Preference order: NativeRuntime's bin/node symlink (already exec-proven by the
+    Preference order: the runtime's bin/node symlink (already exec-proven by the
     boot smoke test) → nativeLibraryDir/libnode.so → `node` on PATH (desktop/dev).
 
-    Both directories are passed in by the Kotlin side ([NativeRuntime.Paths.binDir]
+    Both directories are passed in by the Kotlin side ([ResolvedNativeComponent.binDir]
     and nativeLibraryDir) — the path contract has ONE owner, so Python no longer
     re-derives filesDir by walking parent directories.
     """
@@ -78,9 +78,9 @@ def _ensure_native_env(ld_library_path):
     """Spawns of node/ffmpeg must see the support libraries extracted from
     libnode.zip.so (e.g. libz.so.1).
 
-    Kotlin's [NativeRuntime.Paths.ldLibraryPath] is the single source of truth —
-    it already contains usr/lib + nativeLibraryDir + /system/lib64. Previously
-    Python re-derived the same value with subtly different merge semantics.
+    Kotlin's [ResolvedNativeComponent.ldLibraryPath] is the single source of truth —
+    it already contains usr/lib + /system/lib64. Previously Python re-derived the
+    same value with subtly different merge semantics.
     """
     if not ld_library_path:
         return
@@ -209,7 +209,7 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
     Metadata only (skip_download=True) - byte downloads and muxing happen in Kotlin/FFmpeg.
 
     `native_bin_dir` / `native_ld_library_path` come from the Kotlin side's
-    [NativeRuntime.Paths] so the native runtime contract has a single owner.
+    [ResolvedNativeComponent] so the native runtime contract has a single owner.
     """
     is_playlist = _is_playlist_url(url)
     ydl_opts = {

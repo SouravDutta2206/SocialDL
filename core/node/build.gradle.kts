@@ -25,6 +25,7 @@ android {
 
 dependencies {
     implementation(project(":core:common"))
+    api(project(":core:runtime"))
 
     implementation(libs.kotlinx.coroutines.core)
 

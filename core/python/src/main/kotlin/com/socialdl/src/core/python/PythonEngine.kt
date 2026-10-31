@@ -16,7 +16,9 @@ import javax.inject.Singleton
  * Coroutine-safe bridge to the Chaquopy Python runtime.
  *
  * Guiding principles (§2.1 / §2.2 / §Phase 2):
- * 1. Lazily starts Chaquopy on a dedicated single-thread [PythonDispatcher] (Python's GIL).
+ * 1. Lazily starts Chaquopy on a small dedicated [PythonDispatcher] pool. The GIL still
+ *    serializes bytecode, but it is released on network I/O, so one slow or cancelled
+ *    extraction no longer queues every later call behind it.
  * 2. Enforces a JSON-only boundary: scripts always return JSON strings; Kotlin parses them.
  * 3. Wraps calls in [runInterruptible] + timeout, converting tracebacks to [PythonExecutionException].
  */

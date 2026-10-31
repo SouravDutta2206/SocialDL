@@ -33,6 +33,7 @@ include(":app")
 
 // ── Core ──
 include(":core:common")
+include(":core:runtime")
 include(":core:model")
 include(":core:ui")
 include(":core:network")

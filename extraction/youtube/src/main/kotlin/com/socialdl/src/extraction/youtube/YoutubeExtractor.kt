@@ -23,6 +23,8 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -103,6 +105,13 @@ class YoutubeExtractor @Inject constructor(
 
     private val tag = "YoutubeExtractor"
 
+    /**
+     * A large playlist maps every entry concurrently; without a cap that is one network
+     * fetch per entry at once. Four keeps the fan-out bounded (the UI only shows one row
+     * at a time anyway). Single videos are unaffected.
+     */
+    private val thumbnailPermits = Semaphore(MAX_CONCURRENT_THUMBNAIL_FETCHES)
+
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
@@ -129,10 +138,12 @@ class YoutubeExtractor @Inject constructor(
         // the extracted native runtime paths are owned by NativeRuntime on
         // the Kotlin side — passed to the bridge so Python never re-derives
         // filesDir or rebuilds LD_LIBRARY_PATH with drift-prone merge semantics.
+        // The bridge calls os.path.join on these, so they must cross as Strings.
         val runtimePaths = nodeBinaryProvider.resolveRuntime()
+        val nodeBinDir = runtimePaths?.binDir?.absolutePath
         Logger.d(
             tag,
-            "Extracting YouTube metadata for $normalizedUrl (nodeDir=$nodeDir, binDir=${runtimePaths?.binDir})"
+            "Extracting YouTube metadata for $normalizedUrl (nodeDir=$nodeDir, binDir=$nodeBinDir)"
         )
 
         return try {
@@ -146,7 +157,7 @@ class YoutubeExtractor @Inject constructor(
                     normalizedUrl,
                     cookieFilePath,
                     nodeDir,
-                    runtimePaths?.binDir,
+                    nodeBinDir,
                     runtimePaths?.ldLibraryPath
                 ) { it }
             }
@@ -207,7 +218,12 @@ class YoutubeExtractor @Inject constructor(
             return ExtractionResult.Error(mapErrorKind(parsed.error, parsed.detail, Platform.YOUTUBE))
         }
 
-        if (parsed.is_playlist && parsed.entries.isNotEmpty()) {
+        if (parsed.is_playlist) {
+            // An empty playlist (private, deleted, or filtered out) must not fall through
+            // to the single-video branch and render a placeholder card.
+            if (parsed.entries.isEmpty()) {
+                return ExtractionResult.Error(ExtractionError.ContentUnavailable("This playlist has no videos"))
+            }
             val mediaItems = coroutineScope {
                 parsed.entries.mapIndexed { index, entryDto ->
                     async(Dispatchers.Default) {
@@ -234,7 +250,9 @@ class YoutubeExtractor @Inject constructor(
         carouselIndex: Int?
     ): MediaItem {
         val duration = dto.duration?.roundToInt() ?: 0
-        val cachedThumb = thumbnailCache.store(dto.thumbnail_url) ?: dto.thumbnail_url
+        val cachedThumb = thumbnailPermits.withPermit {
+            thumbnailCache.store(dto.thumbnail_url)
+        } ?: dto.thumbnail_url
 
         // 1. Partition formats into audio-only, progressive (audio+video), and video-only (§4.2)
         val audioFormats = mutableListOf<MediaFormat>()
@@ -448,5 +466,9 @@ class YoutubeExtractor @Inject constructor(
     private fun extractChunkSize(dto: YtDlpFormatDto): Long? {
         val options = dto.downloader_options?.jsonObject ?: return null
         return options["http_chunk_size"]?.jsonPrimitive?.longOrNull
+    }
+
+    private companion object {
+        const val MAX_CONCURRENT_THUMBNAIL_FETCHES = 4
     }
 }

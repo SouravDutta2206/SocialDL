@@ -12,6 +12,13 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- Manually installed native helper packages. Package visibility on
+         Android 11+ requires these to be declared explicitly. -->
+    <queries>
+        <package android:name="com.socialdl.src.helper.ffmpeg" />
+        <package android:name="com.socialdl.src.helper.node" />
+    </queries>
+
     <application
         android:name=".SocialDLApplication"
         android:allowBackup="true"
