@@ -123,7 +123,7 @@ class DownloadJobRepository @Inject constructor(
      * if the row is gone or already FAILED).
      */
     suspend fun markFailed(id: String, error: DownloadError) {
-        jobDao.failJob(id, error.userMessage, now())
+        jobDao.markFailed(id, error.userMessage, now())
     }
 
     /**

@@ -6,6 +6,20 @@ import kotlinx.coroutines.flow.asSharedFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 
+sealed interface DownloadEvent {
+    /**
+     * One-shot UI toast signal emitted right before the success transaction commits.
+     * Room [DownloadJobRepository.observeJobs] is the lifecycle truth; this bus
+     * carries NO lifecycle state and must never be used for status.
+     */
+    data class Completed(
+        val jobId: String,
+        val title: String,
+        val outputUri: String,
+        val fileSizeBytes: Long
+    ) : DownloadEvent
+}
+
 /**
  * One-shot UI toast signal channel from [DownloadWorker] to feature ViewModels.
  *

@@ -99,7 +99,10 @@ interface DownloadJobDao {
     )
     suspend fun updatePendingUri(id: String, pendingUri: String, updatedAt: Long): Int
 
-    /** Marks a job FAILED in one statement unless it already is; never resurrects a FAILED row. */
+    /**
+     * Marks a job FAILED unless it already is. Never resurrects a FAILED row, and is a
+     * no-op when the row is gone.
+     */
     @Query(
         "UPDATE download_jobs SET status = 'FAILED', errorMessage = :message, updatedAt = :updatedAt " +
             "WHERE id = :id AND status != 'FAILED'"
@@ -124,12 +127,4 @@ interface DownloadJobDao {
         formatLabel: String,
         updatedAt: Long
     ): Int
-
-    /** Final failure write: status + message in one statement (used after guard reads).
-     *  Idempotent like [markFailed]: no-op if the row is gone or already FAILED. */
-    @Query(
-        "UPDATE download_jobs SET status = 'FAILED', errorMessage = :message, updatedAt = :updatedAt " +
-            "WHERE id = :id AND status != 'FAILED'"
-    )
-    suspend fun failJob(id: String, message: String?, updatedAt: Long)
 }

@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
-import java.util.regex.Pattern
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -33,13 +32,6 @@ class FFmpegProcessExecutor @Inject constructor(
         const val MAX_CAPTURED_CHARS = 16 * 1024
         const val MAX_ERROR_TAIL_CHARS = 4 * 1024
     }
-
-    private val frameRegex = Pattern.compile("""frame=\s*(\d+)""")
-    private val fpsRegex = Pattern.compile("""fps=\s*([\d\.]+)""")
-    private val sizeRegex = Pattern.compile("""size=\s*(\d+)kB""")
-    private val timeRegex = Pattern.compile("""time=\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)""")
-    private val bitrateRegex = Pattern.compile("""bitrate=\s*([\d\.]+)kbits/s""")
-    private val speedRegex = Pattern.compile("""speed=\s*([\d\.]+)x""")
 
     suspend fun run(
         args: List<String>,
@@ -94,7 +86,6 @@ class FFmpegProcessExecutor @Inject constructor(
                     // Keep the TAIL of the log: ffmpeg reports the real failure at
                     // the end, not in the first 4 KB.
                     appendBounded(errorBuffer, line)
-                    parseProgress(line)?.let { trySend(it) }
                 }
             } catch (e: Exception) {
                 Logger.e(tag, "Error reading ffmpeg stderr", e)
@@ -150,51 +141,6 @@ class FFmpegProcessExecutor @Inject constructor(
         }
     }
 
-    /**
-     * Parses tokens like "frame=  120 fps= 60 size= 2048kB time=00:00:04.00 bitrate=4194.3kbits/s speed=2.1x"
-     */
-    fun parseProgress(line: String): FFmpegEvent.Progress? {
-        val timeMatcher = timeRegex.matcher(line)
-        val frameMatcher = frameRegex.matcher(line)
-
-        // Must at least contain time or frame to be a progress line
-        if (!timeMatcher.find() && !frameMatcher.find()) {
-            return null
-        }
-
-        var timeSeconds: Double? = null
-        timeMatcher.reset()
-        if (timeMatcher.find()) {
-            val h = timeMatcher.group(1)?.toDoubleOrNull() ?: 0.0
-            val m = timeMatcher.group(2)?.toDoubleOrNull() ?: 0.0
-            val s = timeMatcher.group(3)?.toDoubleOrNull() ?: 0.0
-            timeSeconds = h * 3600 + m * 60 + s
-        }
-
-        frameMatcher.reset()
-        val frame = if (frameMatcher.find()) frameMatcher.group(1)?.toLongOrNull() else null
-
-        val fpsMatcher = fpsRegex.matcher(line)
-        val fps = if (fpsMatcher.find()) fpsMatcher.group(1)?.toFloatOrNull() else null
-
-        val sizeMatcher = sizeRegex.matcher(line)
-        val sizeKb = if (sizeMatcher.find()) sizeMatcher.group(1)?.toLongOrNull() else null
-
-        val bitrateMatcher = bitrateRegex.matcher(line)
-        val bitrateKbps = if (bitrateMatcher.find()) bitrateMatcher.group(1)?.toFloatOrNull() else null
-
-        val speedMatcher = speedRegex.matcher(line)
-        val speed = if (speedMatcher.find()) speedMatcher.group(1)?.toFloatOrNull() else null
-
-        return FFmpegEvent.Progress(
-            frame = frame,
-            fps = fps,
-            sizeKb = sizeKb,
-            timeSeconds = timeSeconds,
-            bitrateKbps = bitrateKbps,
-            speed = speed
-        )
-    }
 }
 
 /**

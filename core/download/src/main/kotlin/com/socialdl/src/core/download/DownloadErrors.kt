@@ -7,6 +7,42 @@ import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 
+/** 416 on a range that the resolved total says must exist. The file cannot be completed. */
+internal class RangeNotSatisfiableException(message: String) : IOException(message)
+
+/** The server returned 200 for a ranged (non-zero-offset) request, so Range support is gone. */
+internal class RangeNotSupportedException(message: String) : IOException(message)
+
+/** A 206 response did not match the requested range or body. Corruption guard. */
+internal class RangeInvalidException(message: String) : IOException(message)
+
+/** Non-2xx response, with the HTTP status and Retry-After kept for typed error mapping. */
+internal class HttpStatusException(
+    val code: Int,
+    val retryAfterMs: Long?,
+    message: String,
+) : IOException(message)
+
+/** True for ENOSPC or "No space left on device". Waiting does not fix it. */
+internal fun Throwable.isStorageFull(): Boolean =
+    this is IOException && message.orEmpty().let {
+        it.contains("ENOSPC", ignoreCase = true) || it.contains("No space left", ignoreCase = true)
+    }
+
+/** The single retry rule: can repeating the same request succeed? */
+internal fun Throwable.isRetryableTransferError(): Boolean = when (this) {
+    is RangeNotSatisfiableException,
+    is RangeNotSupportedException,
+    is RangeInvalidException -> false
+    is HttpStatusException -> code == 408 || code == 429 || code in 500..599
+    is SocketTimeoutException,
+    is ConnectException,
+    is UnknownHostException,
+    is SocketException -> true
+    is IOException -> !isStorageFull()
+    else -> false
+}
+
 /**
  * Typed, user-facing error categories for the download pipeline (§9).
  *
@@ -81,18 +117,20 @@ sealed class DownloadError(val userMessage: String) {
 
     companion object {
         private val HTTP_ERROR_REGEX = Regex("""HTTP error (\d{3})""")
+        private const val MAX_CAUSE_DEPTH = 8
 
         fun from(throwable: Throwable): DownloadError {
             if (throwable is CancellationException) return Interrupted
-            val message = throwable.message.orEmpty()
-            return when (throwable) {
-                is HttpStatusException -> when (throwable.code) {
-                    404, 410 -> NotFound
-                    401, 403 -> AccessDenied
-                    429 -> RateLimited
-                    else -> ServerError
-                }
 
+            // Classify on the whole cause chain. A wrapped failure keeps its typed cause.
+            val chain = generateSequence(throwable) { previous ->
+                previous.cause?.takeIf { cause -> cause !== previous }
+            }.take(MAX_CAUSE_DEPTH).toList()
+
+            chain.filterIsInstance<HttpStatusException>().firstOrNull()?.let { return fromStatus(it.code) }
+            if (chain.any { it.isStorageFull() }) return StorageFull
+
+            return when (throwable) {
                 is RangeInvalidException,
                 is RangeNotSatisfiableException,
                 is RangeNotSupportedException -> ServerError
@@ -104,15 +142,19 @@ sealed class DownloadError(val userMessage: String) {
                 is ConnectException,
                 is SocketException -> NetworkFailure
 
-                is IOException -> when {
-                    message.contains("ENOSPC", ignoreCase = true) ||
-                        message.contains("No space left", ignoreCase = true) -> StorageFull
-                    HTTP_ERROR_REGEX.containsMatchIn(message) -> ServerError
-                    else -> NetworkFailure
-                }
+                is IOException ->
+                    if (HTTP_ERROR_REGEX.containsMatchIn(throwable.message.orEmpty())) ServerError
+                    else NetworkFailure
 
                 else -> Unknown
             }
+        }
+
+        private fun fromStatus(code: Int): DownloadError = when (code) {
+            404, 410 -> NotFound
+            401, 403 -> AccessDenied
+            429 -> RateLimited
+            else -> ServerError
         }
     }
 }

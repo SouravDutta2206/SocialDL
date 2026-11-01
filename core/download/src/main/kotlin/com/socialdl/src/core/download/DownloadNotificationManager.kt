@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -13,7 +14,11 @@ import androidx.work.ForegroundInfo
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.toHumanReadableSize
 import com.socialdl.src.core.model.DownloadStatus
+import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -108,7 +113,7 @@ class DownloadNotificationManager @Inject constructor(
         }
     }
 
-    fun buildNotification(
+    private fun buildNotification(
         jobId: String,
         title: String,
         status: DownloadStatus,
@@ -172,6 +177,50 @@ private object BuilderProgress {
     ) {
         if (status == DownloadStatus.DOWNLOADING || status == DownloadStatus.QUEUED) {
             builder.setProgress(100, percent, percent == 0)
+        }
+    }
+}
+
+/**
+ * The in-notification Cancel action (P1-1): runs the SAME instant-deletion
+ * semantics as the UI X — delete the Room row (card vanishes), then cancel the
+ * WorkManager job; the running worker's guard read aborts the pipeline.
+ */
+@AndroidEntryPoint
+class DownloadCancelReceiver : BroadcastReceiver() {
+
+    @Inject
+    lateinit var downloadManager: DownloadManager
+
+    override fun onReceive(context: Context, intent: Intent) {
+        val jobId = intent.getStringExtra(EXTRA_JOB_ID) ?: return
+        val result = goAsync()
+        CoroutineScope(Dispatchers.Default).launch {
+            try {
+                // runCatching: an unhandled exception here (Room not ready,
+                // WorkManager init failure) would crash the process during a
+                // user-initiated cancel from the notification shade.
+                runCatching { downloadManager.cancelDownload(jobId) }
+                    .onFailure { Logger.e("DownloadCancelReceiver", "Cancel action failed for job $jobId", it) }
+            } finally {
+                result.finish()
+            }
+        }
+    }
+
+    companion object {
+        const val EXTRA_JOB_ID = "job_id"
+
+        fun pendingIntent(context: Context, jobId: String): PendingIntent {
+            val intent = Intent(context, DownloadCancelReceiver::class.java).apply {
+                putExtra(EXTRA_JOB_ID, jobId)
+            }
+            return PendingIntent.getBroadcast(
+                context,
+                jobIdNotificationId(jobId),
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
         }
     }
 }

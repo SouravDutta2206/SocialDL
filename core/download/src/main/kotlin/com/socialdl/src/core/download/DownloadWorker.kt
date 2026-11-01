@@ -1,29 +1,20 @@
 package com.socialdl.src.core.download
 
 import android.content.Context
-import android.net.Uri
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.socialdl.src.core.common.util.Logger
-import com.socialdl.src.core.common.util.MediaStorageUtils
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.ffmpeg.FFmpegEvent
 import com.socialdl.src.core.ffmpeg.FFmpegProcessExecutor
 import com.socialdl.src.core.model.DownloadStatus
-import com.socialdl.src.core.model.FormatKind
-import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MuxStrategy
-import com.socialdl.src.core.settings.SettingsRepository
-import com.socialdl.src.extraction.api.ExtractionResult
-import com.socialdl.src.extraction.api.ExtractorRegistry
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
@@ -63,29 +54,13 @@ class DownloadWorker @AssistedInject constructor(
     @Assisted private val appContext: Context,
     @Assisted workerParams: WorkerParameters,
     private val chunkedDownloader: ChunkedDownloader,
-    private val mediaStoreExporter: MediaStoreExporter,
     private val ffmpegProcessExecutor: FFmpegProcessExecutor,
     private val jobRepository: DownloadJobRepository,
-    private val eventBus: DownloadEventBus,
     private val concurrencyGate: DownloadConcurrencyGate,
-    private val extractorRegistry: ExtractorRegistry,
     private val notificationManager: DownloadNotificationManager,
-    private val settingsRepository: SettingsRepository,
+    private val streamResolver: StreamResolver,
+    private val outputExporter: OutputExporter,
 ) : CoroutineWorker(appContext, workerParams) {
-
-    /** Effective stream configuration after optional JIT resolution of a placeholder format. */
-    private data class ResolvedStreams(
-        val directUrl: String,
-        val audioDirectUrl: String,
-        val requiresMuxing: Boolean,
-        val videoChunkSize: Long,
-        val audioChunkSize: Long,
-        val muxStrategy: MuxStrategy?,
-        val container: String,
-        val formatKind: FormatKind,
-        val formatLabel: String,
-        val formatId: String,
-    )
 
     private val tag = "DownloadWorker"
 
@@ -230,8 +205,14 @@ class DownloadWorker @AssistedInject constructor(
     /** Returns true when the job exported + persisted successfully; false otherwise (FAILED already written when applicable). */
     private suspend fun runPipeline(job: DownloadJobEntity, scratchDir: File): Boolean {
         promoteToForeground(job)
-        val resolved = resolveEffectiveFormats(job)
-        if (resolved == null) return false // failure already written
+        val resolved = when (val outcome = streamResolver.resolve(job)) {
+            is ResolveOutcome.Ready -> outcome.streams
+            is ResolveOutcome.Failed -> {
+                jobRepository.markFailed(job.id, outcome.error)
+                return false
+            }
+            ResolveOutcome.Inactive -> return false
+        }
 
         val finalFile = if (resolved.requiresMuxing) {
             val videoTemp = File(scratchDir, "video.tmp")
@@ -275,217 +256,7 @@ class DownloadWorker @AssistedInject constructor(
             if (mediaTemp.renameTo(convertedFile)) convertedFile else mediaTemp
         }
 
-        return exportAndPersist(job, finalFile, resolved)
-    }
-
-    /**
-     * Effective stream configuration after optionally JIT-resolving placeholder
-     * formats (batch/playlist items that defer extraction to download time).
-     * Writes the initial DOWNLOADING(0f) progress row; marks FAILED and returns
-     * null on any resolution failure (the caller stops without further work).
-     *
-     * Invariant: a JIT-resolved stream always has the job's requested
-     * [FormatKind]; an unparseable stored kind fails as
-     * [DownloadError.InvalidFormatKind], and a missing resolved kind fails as
-     * [DownloadError.FormatUnavailable] instead of substituting another kind.
-     */
-    private suspend fun resolveEffectiveFormats(job: DownloadJobEntity): ResolvedStreams? {
-        val jobId = job.id
-        Logger.i(
-            tag,
-            "[$jobId] Acquiring streams: container=${job.container}, requiresMuxing=${job.requiresMuxing}, isPlaceholder=${job.isPlaceholder}"
-        )
-
-        // Fail closed on corrupt/legacy kind metadata: FormatKind.from() defaults
-        // to VIDEO, which could turn an audio job into a video export. The enqueue
-        // path always writes a valid kind, so this only affects damaged rows.
-        val requestedKind = FormatSelector.requestedKindOrNull(job.formatKind)
-        if (requestedKind == null) {
-            Logger.e(
-                tag,
-                "[$jobId] Stored formatKind '${job.formatKind}' is missing or invalid for " +
-                    "${job.sourceUrl} — failing closed"
-            )
-            markFailed(jobId, DownloadError.InvalidFormatKind)
-            return null
-        }
-
-        // The first transition doubles as the "still active" guard: a row already
-        // FAILED by startup reconciliation, or deleted by cancel, matches zero
-        // rows and the pipeline must not start downloading for it.
-        val started = jobRepository.registerProgress(
-            id = jobId,
-            status = DownloadStatus.DOWNLOADING,
-            progress = 0f,
-            downloadedBytes = 0L,
-            totalBytes = job.totalBytes
-        )
-        if (!started) {
-            Logger.i(tag, "[$jobId] Job is no longer active at start; aborting before download")
-            return null
-        }
-
-        var effectiveDirectUrl = job.directUrl
-        var effectiveAudioDirectUrl = job.audioDirectUrl
-        var effectiveRequiresMuxing = job.requiresMuxing
-        var effectiveVideoChunkSize = job.videoChunkSize
-        var effectiveAudioChunkSize = job.audioChunkSize
-        var effectiveMuxStrategy = job.muxStrategy?.let { strategy ->
-            // Unparseable stored value must NOT silently fall through to a null
-            // strategy: buildMuxArgs(null) transcodes audio instead of copying.
-            // REMUX_COPY (c:v copy) is the closest-to-intent recovery.
-            runCatching { MuxStrategy.valueOf(strategy) }
-                .getOrElse {
-                    Logger.w(tag, "[$jobId] Unparseable stored muxStrategy '$strategy' — defaulting to REMUX_COPY")
-                    MuxStrategy.REMUX_COPY
-                }
-        }
-        var effectiveContainer = job.container
-        var effectiveFormatKind = requestedKind
-        var effectiveFormatLabel = job.formatLabel
-        var effectiveFormatId = job.formatId
-        var resolvedViaExtraction = false
-        val forceH264 = runCatching { settingsRepository.forceH264Transcode.first() }
-            .getOrDefault(false)
-
-        // Resolve when the job is a placeholder, its signed URL expired, or a
-        // legacy row has no container to derive an extension/MIME from.
-        if (job.isPlaceholder || effectiveDirectUrl.isNullOrBlank() || effectiveContainer.isBlank()) {
-            Logger.i(tag, "[$jobId] JIT resolving stream formats for: ${job.sourceUrl}")
-
-            val extractor = extractorRegistry.resolve(job.sourceUrl)
-            if (extractor == null) {
-                Logger.e(tag, "[$jobId] No extractor available for ${job.sourceUrl}")
-                markFailed(jobId, DownloadError.NoExtractor)
-                return null
-            }
-
-            when (val result = extractor.extract(job.sourceUrl)) {
-                is ExtractionResult.Success -> {
-                    val resolvedItem = result.items.firstOrNull()
-                    if (resolvedItem == null) {
-                        Logger.e(tag, "[$jobId] No media item returned for ${job.sourceUrl}")
-                        markFailed(jobId, DownloadError.ExtractionFailed)
-                        return null
-                    }
-
-                    // Refresh the stream within the requested kind only: an audio
-                    // placeholder must never become a video download (or vice versa).
-                    // Prefer the exact persisted format id (same stream the user
-                    // picked) over "first of kind", which may silently upgrade or
-                    // downgrade the selection after a URL refresh.
-                    val resolvedFormat = FormatSelector.select(
-                        item = resolvedItem,
-                        requestedKind = requestedKind,
-                        exactFormatId = job.formatId,
-                        allowExact = !job.isPlaceholder,
-                    )
-
-                    // Defensive invariant: selection must stay in the requested kind
-                    // and yield a direct URL before any bytes are downloaded.
-                    if (resolvedFormat == null ||
-                        !FormatSelector.isUsable(resolvedFormat, requestedKind)
-                    ) {
-                        Logger.e(
-                            tag,
-                            "[$jobId] Format unavailable for ${job.sourceUrl}: " +
-                                "requested=$requestedKind, resolvedId=${resolvedFormat?.id}, " +
-                                "resolvedKind=${resolvedFormat?.kind}, " +
-                                "image=${resolvedItem.imageFormats.size}, " +
-                                "video=${resolvedItem.videoFormats.size}, " +
-                                "audio=${resolvedItem.audioFormats.size}, " +
-                                "exactFormatId=${job.formatId}"
-                        )
-                        markFailed(jobId, DownloadError.FormatUnavailable)
-                        return null
-                    }
-
-                    effectiveDirectUrl = resolvedFormat.directUrl
-                    effectiveRequiresMuxing = resolvedFormat.requiresMuxing
-                    effectiveVideoChunkSize = resolvedFormat.httpChunkSizeBytes ?: 0L
-                    effectiveMuxStrategy = resolvedFormat.muxStrategy
-                    effectiveFormatKind = resolvedFormat.kind
-                    effectiveFormatLabel = resolvedFormat.label
-                    effectiveFormatId = resolvedFormat.id
-
-                    // Only accept an explicit container when it is actually
-                    // producible for this stream; otherwise adopt the codec-derived
-                    // container instead of relabeling bytes (P0-5/P0-6).
-                    val autoContainer = MediaContainer.recommendedFor(resolvedFormat)
-                    val requestedContainer = job.container
-                        .takeIf { it.isNotBlank() && !it.equals("Default", ignoreCase = true) }
-                    effectiveContainer = requestedContainer
-                        ?.takeIf { MediaContainer.isCompatible(resolvedFormat, it) }
-                        ?.let { MediaContainer.extensionOf(it) }
-                        ?: autoContainer.extension
-                    effectiveContainer = effectiveContainer.uppercase(Locale.ROOT)
-
-                    // Force-H.264 applies only to muxed, non-HDR streams: a full
-                    // re-encode of HDR would destroy the dynamic range.
-                    if (forceH264 && resolvedFormat.requiresMuxing && !resolvedFormat.isHdr) {
-                        effectiveContainer = MediaContainer.MP4.extension.uppercase(Locale.ROOT)
-                        effectiveMuxStrategy = MuxStrategy.FORCE_H264
-                    }
-
-                    if (resolvedFormat.requiresMuxing) {
-                        val pairedAudio = resolvedItem.audioFormats.find { it.id == resolvedFormat.pairedAudioFormatId }
-                            ?: resolvedItem.audioFormats.firstOrNull()
-                        effectiveAudioDirectUrl = pairedAudio?.directUrl
-                        effectiveAudioChunkSize = pairedAudio?.httpChunkSizeBytes ?: 0L
-                    }
-                    resolvedViaExtraction = true
-                }
-                is ExtractionResult.Error -> {
-                    Logger.e(tag, "[$jobId] JIT stream resolution failed: ${result.cause.message}")
-                    markFailed(jobId, DownloadError.ExtractionFailed)
-                    return null
-                }
-            }
-        }
-
-        if (effectiveDirectUrl.isNullOrBlank()) {
-            Logger.e(tag, "[$jobId] Missing direct download URL")
-            markFailed(jobId, DownloadError.MissingStream)
-            return null
-        }
-
-        // Persist resolved metadata with a targeted UPDATE so export derives
-        // extension/MIME/RELATIVE_PATH from the stream actually downloaded. A zero
-        // row count means the user cancelled while extraction was running.
-        if (resolvedViaExtraction) {
-            val persisted = jobRepository.updateResolvedMetadata(
-                id = jobId,
-                container = effectiveContainer,
-                formatId = effectiveFormatId,
-                formatKind = effectiveFormatKind,
-                formatLabel = effectiveFormatLabel
-            )
-            if (!persisted) return null
-        }
-
-        // P0-3 gate: a mux-required format with no audio track must fail before any
-        // bytes are downloaded — never silently fall through to a video-only export.
-        if (effectiveRequiresMuxing && effectiveAudioDirectUrl.isNullOrBlank()) {
-            Logger.e(tag, "[$jobId] Format requires muxing but no audio stream was resolved")
-            markFailed(jobId, DownloadError.MissingAudioStream)
-            return null
-        }
-
-        return ResolvedStreams(
-            directUrl = effectiveDirectUrl,
-            // Non-mux jobs legitimately have no audio URL (DownloadManager stores
-            // null); the mux path is already gated above on requiresMuxing having
-            // a non-blank audio URL, so orEmpty() can never be observed as a URL.
-            audioDirectUrl = effectiveAudioDirectUrl.orEmpty(),
-            requiresMuxing = effectiveRequiresMuxing,
-            videoChunkSize = effectiveVideoChunkSize,
-            audioChunkSize = effectiveAudioChunkSize,
-            muxStrategy = effectiveMuxStrategy,
-            container = effectiveContainer,
-            formatKind = effectiveFormatKind,
-            formatLabel = effectiveFormatLabel,
-            formatId = effectiveFormatId
-        )
+        return outputExporter.exportAndPersist(job, finalFile, resolved)
     }
 
     /**
@@ -604,7 +375,7 @@ class DownloadWorker @AssistedInject constructor(
         val ext = container.lowercase(Locale.ROOT)
         val muxedFile = File(scratchDir, "muxed.$ext")
 
-        val ffmpegArgs = buildMuxArgs(
+        val ffmpegArgs = MuxArgs.build(
             videoFile = videoTemp,
             audioFile = audioTemp,
             outputFile = muxedFile,
@@ -616,9 +387,6 @@ class DownloadWorker @AssistedInject constructor(
         var muxError = ""
         ffmpegProcessExecutor.run(ffmpegArgs).collect { event ->
             when (event) {
-                is FFmpegEvent.Progress -> {
-                    Logger.d(tag, "[$jobId] Mux progress: timeSeconds=${event.timeSeconds}")
-                }
                 is FFmpegEvent.Completed -> {
                     muxSuccess = true
                 }
@@ -635,167 +403,6 @@ class DownloadWorker @AssistedInject constructor(
         }
 
         return muxedFile
-    }
-
-    /**
-     * Exports [finalFile] to MediaStore / scoped storage (§9.7) and persists the
-     * Room history row (§10). Guard reads against instant cancellation run before
-     * the export step, right after the pending row is created, and again before
-     * publish; a cancel that wins after publish compensates by deleting the file.
-     * [resolved] carries the container actually downloaded (JIT-resolved
-     * placeholders may differ from the stale [DownloadJobEntity.container]).
-     * Returns true on success; false (FAILED written) on export failure.
-     */
-    private suspend fun exportAndPersist(
-        job: DownloadJobEntity,
-        finalFile: File,
-        resolved: ResolvedStreams
-    ): Boolean {
-        val jobId = job.id
-
-        // Guard read #1: row gone => user cancelled mid-pipeline; abort silently.
-        if (jobRepository.getJob(jobId) == null) {
-            Logger.i(tag, "[$jobId] Job row missing before export — cancelled; aborting")
-            return false
-        }
-
-        Logger.i(tag, "[$jobId] Exporting ${finalFile.length()} bytes to MediaStore...")
-        val exporting = jobRepository.registerProgress(
-            id = jobId,
-            status = DownloadStatus.EXPORTING,
-            progress = 0.95f,
-            downloadedBytes = finalFile.length(),
-            totalBytes = finalFile.length()
-        )
-        if (!exporting) {
-            Logger.i(tag, "[$jobId] Job became terminal before export; aborting")
-            return false
-        }
-
-        val resolvedJob = job.copy(
-            container = resolved.container,
-            formatId = resolved.formatId,
-            formatKind = resolved.formatKind.name,
-            formatLabel = resolved.formatLabel
-        )
-
-        val outputUri = mediaStoreExporter.export(
-            file = finalFile,
-            title = resolvedJob.title,
-            author = resolvedJob.author,
-            container = resolved.container,
-            kind = resolved.formatKind,
-            onPendingRowCreated = { pendingUri ->
-                // P1-3: record the pending MediaStore row durably, and re-check the
-                // cancellation guard right after row creation so cancels mid-copy
-                // abort before the (long) file copy starts.
-                val persisted = jobRepository.setPendingUri(jobId, pendingUri.toString())
-                if (!persisted) {
-                    Logger.i(tag, "[$jobId] Job row missing after pending-row creation — cancelled")
-                    return@export false
-                }
-                true
-            },
-            onBeforePublish = {
-                // Phase 5 (#5): copy and publish are separate steps. Publishing is
-                // the last point at which a cancel can still delete the file
-                // instead of leaving a visible row with no history record, so
-                // re-read the job row here and refuse to publish a dead job.
-                val current = jobRepository.getJob(jobId)
-                val stillExporting = current != null && current.status == DownloadStatus.EXPORTING
-                if (!stillExporting) {
-                    Logger.i(
-                        tag,
-                        "[$jobId] Job is no longer active before publish " +
-                            "(status=${current?.status}); discarding the export"
-                    )
-                }
-                stillExporting
-            }
-        )
-
-        if (outputUri == null) {
-            // A cancel deletes the job row; the exporter then deletes the row it
-            // created and reports null. That is a cancellation, not an export
-            // failure, and a deleted row must never be marked FAILED.
-            if (jobRepository.getJob(jobId) == null) {
-                Logger.i(tag, "[$jobId] Job row missing during export — cancelled; nothing published")
-                return false
-            }
-            Logger.e(tag, "[$jobId] Failed to write file to MediaStore")
-            markFailed(jobId, DownloadError.ExportFailed)
-            return false
-        }
-
-        // The file is published from here on. Any cancel that wins before the
-        // history transaction commits must delete exactly this export's URI, so a
-        // cancelled job leaves neither a visible file nor a history row.
-        var historyRecorded = false
-        try {
-            // Guard read #2: after the export, before the history transaction.
-            if (jobRepository.getJob(jobId) == null) {
-                Logger.i(tag, "[$jobId] Job row missing after export — cancelled; deleting the published file")
-                deletePublishedExport(jobId, outputUri)
-                return false
-            }
-
-            // Persist to Room: delete the EXPORTING row + insert history atomically
-            // (§10). A zero-row delete means a cancel won the race; do not record a
-            // completion for it.
-            historyRecorded = jobRepository.finishJobSuccessfully(
-                job = resolvedJob,
-                outputUri = outputUri.toString(),
-                fileSizeBytes = finalFile.length()
-            )
-            if (!historyRecorded) {
-                Logger.i(tag, "[$jobId] Cancelled before the history insert; deleting the published file")
-                deletePublishedExport(jobId, outputUri)
-                return false
-            }
-
-            notificationManager.notifyCompleted(jobId, resolvedJob.title)
-            Logger.i(tag, "[$jobId] Download completed successfully: uri=$outputUri, size=${finalFile.length()}")
-            eventBus.emit(
-                DownloadEvent.Completed(
-                    jobId = jobId,
-                    title = resolvedJob.title,
-                    outputUri = outputUri.toString(),
-                    fileSizeBytes = finalFile.length()
-                )
-            )
-            return true
-        } catch (e: CancellationException) {
-            // Cancelled while the history transaction (or the completion signal)
-            // was in flight. Compensate only when history was NOT written: deleting
-            // the file after a committed history row would leave that row dangling.
-            if (!historyRecorded) {
-                Logger.i(tag, "[$jobId] Export cancelled before history committed; deleting the published file")
-                deletePublishedExport(jobId, outputUri)
-            }
-            throw e
-        }
-    }
-
-    /**
-     * Phase 5 (#5) compensation: deletes exactly the MediaStore row this export
-     * created — never another job's URI and never a user file. Runs in a
-     * [NonCancellable] context because a cancellation is precisely when it is
-     * needed; the resolver delete itself is blocking, so no suspension point can be
-     * cancelled out from under it.
-     */
-    private suspend fun deletePublishedExport(jobId: String, outputUri: Uri) {
-        withContext(NonCancellable) {
-            val deleted = MediaStorageUtils.deleteMediaFromStorage(appContext, outputUri.toString())
-            if (deleted) {
-                Logger.i(tag, "[$jobId] Deleted exported file $outputUri (no history record written)")
-            } else {
-                Logger.w(
-                    tag,
-                    "[$jobId] Exported file $outputUri was already gone or could not be deleted; " +
-                        "no history record was written"
-                )
-            }
-        }
     }
 
     private suspend fun markFailed(jobId: String, error: DownloadError) {
@@ -817,49 +424,5 @@ class DownloadWorker @AssistedInject constructor(
             totalBytes = totalBytes
         )
         maybeRefreshForeground(jobId)
-    }
-
-    private fun buildMuxArgs(
-        videoFile: File,
-        audioFile: File,
-        outputFile: File,
-        container: String,
-        muxStrategy: MuxStrategy? = null
-    ): List<String> {
-        // -nostdin prevents ffmpeg from consuming stdin; explicit -map picks the
-        // first video of input 0 and the first audio of input 1, so a stream with
-        // an unexpected extra track cannot be muxed by accident.
-        val inputs = listOf(
-            "-y",
-            "-nostdin",
-            "-i", videoFile.absolutePath,
-            "-i", audioFile.absolutePath,
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-shortest"
-        )
-        val codecArgs = when (container.uppercase(Locale.ROOT)) {
-            "MP4", "MOV" -> when (muxStrategy) {
-                MuxStrategy.REMUX_COPY -> listOf("-c", "copy", "-movflags", "+faststart")
-                MuxStrategy.FORCE_H264 -> listOf(
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "23",
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-movflags", "+faststart"
-                )
-                MuxStrategy.TRANSCODE_AUDIO_ONLY, null -> listOf(
-                    "-c:v", "copy",
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-movflags", "+faststart"
-                )
-            }
-            "WEBM" -> listOf("-c:v", "copy", "-c:a", "libopus", "-b:a", "160k")
-            // MKV (and the defensive fallback) copies any codec pair losslessly.
-            else -> listOf("-c", "copy")
-        }
-        return inputs + codecArgs + outputFile.absolutePath
     }
 }

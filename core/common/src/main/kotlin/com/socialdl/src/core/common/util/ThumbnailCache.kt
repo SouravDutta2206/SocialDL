@@ -4,12 +4,13 @@ import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -28,9 +29,18 @@ import javax.inject.Singleton
 open class ThumbnailCache @Inject constructor(
     // Nullable only as a JVM-test seam (fakes pass null and override store());
     // Dagger always supplies the real application context.
-    @ApplicationContext private val context: Context?
+    @ApplicationContext private val context: Context?,
+    httpClient: OkHttpClient,
 ) {
     private val tag = "ThumbnailCache"
+
+    // Thumbnails keep their own, shorter timeouts.
+    private val thumbnailClient: OkHttpClient by lazy {
+        httpClient.newBuilder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .build()
+    }
     // 50MB LRU cap; internal var so tests can shrink it.
     internal var maxCacheSizeBytes = 50L * 1024L * 1024L
 
@@ -86,59 +96,48 @@ open class ThumbnailCache @Inject constructor(
                     return@synchronized "file://${cachedNow.absolutePath}"
                 }
 
-                var connection: HttpURLConnection? = null
                 val tmp = File(dir, "$hash.tmp")
                 try {
-                    val url = URL(sourceUrl)
-                    connection = (url.openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 10_000
-                        readTimeout = 15_000
-                        instanceFollowRedirects = true
-                        setRequestProperty("Accept", "image/*")
-                    }
-                    connection.connect()
+                    val request = Request.Builder()
+                        .url(sourceUrl)
+                        .header("Accept", "image/*")
+                        .build()
+                    thumbnailClient.newCall(request).execute().use { response ->
+                        if (!response.isSuccessful) return@synchronized sourceUrl
+                        val body = response.body ?: return@synchronized sourceUrl
 
-                    if (connection.responseCode !in 200..299) {
-                        return@synchronized sourceUrl
-                    }
-
-                    val mime = connection.contentType?.substringBefore(';')?.trim() ?: ""
-                    if (mime.isNotEmpty() && !mime.startsWith("image/", ignoreCase = true)) {
-                        Logger.w(tag, "Thumbnail rejected: content-type '$mime' for $sourceUrl")
-                        return@synchronized sourceUrl
-                    }
-
-                    val declaredLength = connection.contentLengthLong
-                    if (declaredLength > MAX_THUMBNAIL_BYTES) {
-                        Logger.w(tag, "Thumbnail rejected: declared $declaredLength bytes for $sourceUrl")
-                        return@synchronized sourceUrl
-                    }
-
-                    val ext = extensionFor(mime, sourceUrl)
-                    val cachedFile = File(dir, "$hash.$ext")
-
-                    val written = connection.inputStream.use { input ->
-                        FileOutputStream(tmp).use { output ->
-                            copyBounded(input, output, MAX_THUMBNAIL_BYTES)
+                        val mime = body.contentType()?.toString()?.substringBefore(';')?.trim().orEmpty()
+                        if (mime.isNotEmpty() && !mime.startsWith("image/", ignoreCase = true)) {
+                            Logger.w(tag, "Thumbnail rejected: content-type '$mime' for $sourceUrl")
+                            return@synchronized sourceUrl
                         }
-                    }
-                    if (written <= 0L) {
-                        tmp.delete()
-                        return@synchronized sourceUrl
-                    }
 
-                    if (tmp.renameTo(cachedFile)) {
-                        enforceCacheCap()
-                        return@synchronized "file://${cachedFile.absolutePath}"
-                    }
-                    if (cachedFile.exists()) {
-                        tmp.delete()
-                        return@synchronized "file://${cachedFile.absolutePath}"
+                        val declaredLength = body.contentLength()
+                        if (declaredLength > MAX_THUMBNAIL_BYTES) {
+                            Logger.w(tag, "Thumbnail rejected: declared $declaredLength bytes for $sourceUrl")
+                            return@synchronized sourceUrl
+                        }
+
+                        val cachedFile = File(dir, "$hash.${extensionFor(mime, sourceUrl)}")
+                        val written = body.byteStream().use { input ->
+                            FileOutputStream(tmp).use { output -> copyBounded(input, output, MAX_THUMBNAIL_BYTES) }
+                        }
+                        if (written <= 0L) {
+                            tmp.delete()
+                            return@synchronized sourceUrl
+                        }
+                        if (tmp.renameTo(cachedFile)) {
+                            enforceCacheCap()
+                            return@synchronized "file://${cachedFile.absolutePath}"
+                        }
+                        if (cachedFile.exists()) {
+                            tmp.delete()
+                            return@synchronized "file://${cachedFile.absolutePath}"
+                        }
                     }
                 } catch (e: Exception) {
                     Logger.w(tag, "Failed to download thumbnail $sourceUrl: ${e.message}")
                 } finally {
-                    runCatching { connection?.disconnect() }
                     runCatching { tmp.delete() }
                 }
 

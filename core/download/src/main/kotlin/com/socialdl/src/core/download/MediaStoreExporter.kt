@@ -1,5 +1,6 @@
 package com.socialdl.src.core.download
 
+import android.content.ContentResolver
 import android.content.ContentValues
 import android.net.Uri
 import android.os.Build
@@ -9,7 +10,11 @@ import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaContainer
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -206,4 +211,88 @@ class MediaStoreExporter @Inject constructor(
         runCatching { store.delete(uri, null, null) }
             .onFailure { e -> Logger.w(tag, "Failed to delete MediaStore row $uri", e) }
     }
+}
+
+/**
+ * The minimal MediaStore surface [MediaStoreExporter] needs: insert a row, open
+ * its output stream, update the row, delete the row.
+ *
+ * Extracted as a seam (Phase 5 / finding #5) so the cancellation, pre-publish
+ * abort and compensation paths can be unit-tested against a fake store instead
+ * of a real provider. Every delete the exporter performs then becomes observable
+ * in tests, which is what the plan's "compensation deletion is limited to the
+ * URI created by this export" rule needs.
+ */
+interface MediaStoreGateway {
+    fun insert(collection: Uri, values: ContentValues): Uri?
+
+    fun openOutputStream(uri: Uri): OutputStream?
+
+    fun update(
+        uri: Uri,
+        values: ContentValues,
+        selection: String?,
+        selectionArgs: Array<String>?,
+    ): Int
+
+    fun delete(uri: Uri, selection: String?, selectionArgs: Array<String>?): Int
+}
+
+/** Production [MediaStoreGateway] over the app's [ContentResolver]. */
+class ContentResolverMediaStoreGateway(
+    private val resolver: ContentResolver,
+) : MediaStoreGateway {
+
+    override fun insert(collection: Uri, values: ContentValues): Uri? =
+        resolver.insert(collection, values)
+
+    override fun openOutputStream(uri: Uri): OutputStream? = resolver.openOutputStream(uri)
+
+    override fun update(
+        uri: Uri,
+        values: ContentValues,
+        selection: String?,
+        selectionArgs: Array<String>?,
+    ): Int = resolver.update(uri, values, selection, selectionArgs)
+
+    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<String>?): Int =
+        resolver.delete(uri, selection, selectionArgs)
+}
+
+/** Chunk size for export copies: large enough to keep I/O cheap, small enough to stop promptly. */
+internal const val EXPORT_COPY_BUFFER_SIZE: Int = 64 * 1024
+
+/**
+ * Copies [input] to [output] in fixed-size chunks, cooperatively checking the
+ * caller's coroutine for cancellation before every chunk (Phase 5 / finding #5).
+ *
+ * `InputStream.copyTo` cannot be cancelled: a WorkManager stop request would be
+ * ignored until the whole file had been copied and published. With this loop a
+ * cancelled export stops at the next chunk boundary, and the caller can delete
+ * the MediaStore row it had already created.
+ *
+ * Cancellation is deliberately NOT translated into a result: [CancellationException]
+ * propagates so the worker observes a cancellation instead of an export failure.
+ * Stream failures propagate unchanged as well.
+ *
+ * @return the number of bytes copied.
+ */
+internal suspend fun copyStreamCancellable(
+    input: InputStream,
+    output: OutputStream,
+    bufferSize: Int = EXPORT_COPY_BUFFER_SIZE,
+): Long {
+    require(bufferSize > 0) { "bufferSize must be positive, was $bufferSize" }
+    val buffer = ByteArray(bufferSize)
+    var copied = 0L
+    while (true) {
+        // Cancellation point for the whole copy: checked before blocking on read,
+        // so at most one chunk is written after a cancel request lands.
+        currentCoroutineContext().ensureActive()
+        val read = input.read(buffer)
+        if (read == -1) break
+        output.write(buffer, 0, read)
+        copied += read
+    }
+    return copied
 }
