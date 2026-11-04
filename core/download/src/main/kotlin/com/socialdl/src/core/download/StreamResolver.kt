@@ -103,16 +103,11 @@ class StreamResolver @Inject constructor(
         var effectiveRequiresMuxing = job.requiresMuxing
         var effectiveVideoChunkSize = job.videoChunkSize
         var effectiveAudioChunkSize = job.audioChunkSize
-        var effectiveMuxStrategy = job.muxStrategy?.let { strategy ->
-            // Unparseable stored value must NOT silently fall through to a null
-            // strategy: MuxArgs.build(null) transcodes audio instead of copying.
-            // REMUX_COPY (c:v copy) is the closest-to-intent recovery.
-            runCatching { MuxStrategy.valueOf(strategy) }
-                .getOrElse {
-                    Logger.w(tag, "[$jobId] Unparseable stored muxStrategy '$strategy' — defaulting to REMUX_COPY")
-                    MuxStrategy.REMUX_COPY
-                }
-        }
+        // Only FORCE_H264 is meaningful now: stream copy vs re-encode is decided from the
+        // probed codecs at download time, so the stored value is read for that one case.
+        var effectiveMuxStrategy = job.muxStrategy
+            ?.let { runCatching { MuxStrategy.valueOf(it) }.getOrNull() }
+            ?.takeIf { it == MuxStrategy.FORCE_H264 }
         var effectiveContainer = job.container
         var effectiveFormatKind = requestedKind
         var effectiveFormatLabel = job.formatLabel
@@ -173,7 +168,6 @@ class StreamResolver @Inject constructor(
                     effectiveDirectUrl = resolvedFormat.directUrl
                     effectiveRequiresMuxing = resolvedFormat.requiresMuxing
                     effectiveVideoChunkSize = resolvedFormat.httpChunkSizeBytes ?: 0L
-                    effectiveMuxStrategy = resolvedFormat.muxStrategy
                     effectiveFormatKind = resolvedFormat.kind
                     effectiveFormatLabel = resolvedFormat.label
                     effectiveFormatId = resolvedFormat.id

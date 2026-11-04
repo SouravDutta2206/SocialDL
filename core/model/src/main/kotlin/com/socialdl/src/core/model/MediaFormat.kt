@@ -61,8 +61,9 @@ data class MediaFormat(
     val httpChunkSizeBytes: Long? = null,
 
     /**
-     * Mux strategy for YouTube downloads. Determined at extraction time (Phase 4),
-     * consumed at download time (Phase 9) to build the ffmpeg argument list.
+     * Legacy: extractors no longer decide the mux strategy. Copy vs re-encode is read
+     * from the probed streams at download time; only [MuxStrategy.FORCE_H264] is still
+     * carried, and that is applied by the settings check, not by this field.
      */
     val muxStrategy: MuxStrategy? = null,
 ) {
@@ -101,10 +102,13 @@ data class MediaFormat(
  */
 @Serializable
 enum class MuxStrategy {
-    /** Both streams are natively MP4-compatible. Fast, lossless copy. */
+    /**
+     * Legacy. No longer produced: stream copy vs re-encode is decided from the probed
+     * codecs at download time (see `ConvertArgs`). Kept so stored rows still parse.
+     */
     REMUX_COPY,
 
-    /** Video is copy-safe; audio needs AAC transcode (Opus-in-MP4 has poor support). */
+    /** Legacy. No longer produced; see [REMUX_COPY]. */
     TRANSCODE_AUDIO_ONLY,
 
     /** Full H.264 re-encode. Opt-in from Settings, disabled for HDR formats. */

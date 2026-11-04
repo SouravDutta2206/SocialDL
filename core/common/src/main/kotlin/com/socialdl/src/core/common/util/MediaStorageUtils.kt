@@ -5,36 +5,13 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import java.io.File
-import java.util.Locale
 
 /**
- * Shared utilities for MediaStore queries, file existence checks, and MIME type resolution.
+ * Shared utilities for MediaStore queries and file existence checks.
  */
 object MediaStorageUtils {
 
     private const val TAG = "MediaStorageUtils"
-
-    /**
-     * Resolves standard MIME type from media container extension and audio/video classification.
-     */
-    fun getMimeType(container: String, isAudio: Boolean = false): String {
-        return when (container.lowercase(Locale.ROOT)) {
-            "mp4" -> if (isAudio) "audio/mp4" else "video/mp4"
-            "mkv" -> "video/x-matroska"
-            "webm" -> if (isAudio) "audio/webm" else "video/webm"
-            "mp3" -> "audio/mpeg"
-            "m4a" -> "audio/mp4"
-            "opus" -> "audio/opus"
-            "flac" -> "audio/flac"
-            "wav" -> "audio/wav"
-            "ogg" -> "audio/ogg"
-            "aac" -> "audio/aac"
-            "jpg", "jpeg" -> "image/jpeg"
-            "png" -> "image/png"
-            "webp" -> "image/webp"
-            else -> if (isAudio) "audio/*" else "video/*"
-        }
-    }
 
     /**
      * Checks whether a media item pointed to by a content:// or file:// URI actually exists on disk.

@@ -1,10 +1,17 @@
 package com.socialdl.src.core.download
 
+import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MuxStrategy
 import java.io.File
-import java.util.Locale
 
-/** Builds the FFmpeg argument list for a video+audio mux. Pure: no Android or Room types. */
+/**
+ * Builds the FFmpeg argument list for a video+audio mux: two downloaded streams into
+ * one file.
+ *
+ * The per-stream codec decisions live in [ConvertArgs] (copy when the codec fits the
+ * target container, silent re-encode when it does not); this type only owns the
+ * two-input mapping. Pure: no Android or Room types.
+ */
 internal object MuxArgs {
 
     fun build(
@@ -12,42 +19,39 @@ internal object MuxArgs {
         audioFile: File,
         outputFile: File,
         container: String,
+        videoCodec: String? = null,
+        audioCodec: String? = null,
+        audioBitrateKbps: Int? = null,
         muxStrategy: MuxStrategy? = null,
+        title: String? = null,
+        author: String? = null,
     ): List<String> {
+        val target = MediaContainer.from(container) ?: MediaContainer.MP4
         // -nostdin prevents ffmpeg from consuming stdin. The explicit -map picks the first
-        // video of input 0 and the first audio of input 1, so an extra track cannot be muxed
-        // by accident.
-        val inputs = listOf(
-            "-y",
-            "-nostdin",
-            "-i", videoFile.absolutePath,
-            "-i", audioFile.absolutePath,
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-shortest"
-        )
-        val codecArgs = when (container.uppercase(Locale.ROOT)) {
-            "MP4", "MOV" -> when (muxStrategy) {
-                MuxStrategy.REMUX_COPY -> listOf("-c", "copy", "-movflags", "+faststart")
-                MuxStrategy.FORCE_H264 -> listOf(
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                    "-crf", "23",
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-movflags", "+faststart"
+        // video of input 0 and the first audio of input 1, so an extra track cannot be
+        // muxed by accident.
+        return buildList {
+            addAll(
+                listOf(
+                    "-y", "-nostdin",
+                    "-i", videoFile.absolutePath,
+                    "-i", audioFile.absolutePath,
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-shortest",
                 )
-                MuxStrategy.TRANSCODE_AUDIO_ONLY, null -> listOf(
-                    "-c:v", "copy",
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-movflags", "+faststart"
+            )
+            addAll(
+                ConvertArgs.videoArgs(
+                    target = target,
+                    sourceCodec = videoCodec,
+                    forceEncode = muxStrategy == MuxStrategy.FORCE_H264,
                 )
-            }
-            "WEBM" -> listOf("-c:v", "copy", "-c:a", "libopus", "-b:a", "160k")
-            // MKV (and the defensive fallback) copies any codec pair losslessly.
-            else -> listOf("-c", "copy")
+            )
+            addAll(ConvertArgs.audioArgs(target, audioCodec, audioBitrateKbps))
+            addAll(ConvertArgs.containerFlags(target, hasAuthor = !author.isNullOrBlank()))
+            addAll(ConvertArgs.metadataArgs(title, author))
+            add(outputFile.absolutePath)
         }
-        return inputs + codecArgs + outputFile.absolutePath
     }
 }

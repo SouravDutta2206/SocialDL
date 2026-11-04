@@ -57,12 +57,12 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.socialdl.src.core.common.util.Logger
-import com.socialdl.src.core.common.util.MediaStorageUtils
 import com.socialdl.src.core.common.util.toHumanReadableSize
 import com.socialdl.src.core.database.entity.DownloadHistoryEntity
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadStatus
 import com.socialdl.src.core.model.FormatKind
+import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.ui.component.SocialDLToastHost
 import com.socialdl.src.core.ui.component.ToastMessage
 import com.socialdl.src.core.ui.component.ToastType
@@ -363,10 +363,8 @@ private fun ActiveDownloadCard(
  * to container mapping with the typed media kind instead of assuming video.
  */
 private fun DownloadHistoryEntity.resolvedMimeType(): String = mimeType.ifBlank {
-    MediaStorageUtils.getMimeType(
-        container = container,
-        isAudio = FormatKind.fromOrNull(formatKind) == FormatKind.AUDIO
-    )
+    // Legacy rows predate the stored value; the container table is the single source.
+    MediaContainer.mimeTypeFor(container, FormatKind.fromOrNull(formatKind) ?: FormatKind.VIDEO)
 }
 
 @Composable

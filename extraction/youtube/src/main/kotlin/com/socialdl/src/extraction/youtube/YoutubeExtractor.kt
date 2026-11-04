@@ -7,7 +7,6 @@ import com.socialdl.src.core.cookies.CookieStore
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
-import com.socialdl.src.core.model.MuxStrategy
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.node.NodeBinaryProvider
 import com.socialdl.src.core.python.PythonEngine
@@ -398,7 +397,6 @@ class YoutubeExtractor @Inject constructor(
         }
 
         val isHdr = isHdrFormat(dto.dynamic_range)
-        val muxStrategy = determineMuxStrategy(dto.vcodec, bestAudio?.codec, isHdr)
 
         return MediaFormat(
             id = dto.format_id,
@@ -414,7 +412,6 @@ class YoutubeExtractor @Inject constructor(
             directUrl = dto.url,
             requiresMuxing = true,
             pairedAudioFormatId = bestAudio?.id,
-            muxStrategy = muxStrategy,
             httpChunkSizeBytes = extractChunkSize(dto)
         )
     }
@@ -433,20 +430,6 @@ class YoutubeExtractor @Inject constructor(
     private fun isHdrFormat(dynamicRange: String?): Boolean {
         if (dynamicRange == null) return false
         return !dynamicRange.equals("SDR", ignoreCase = true)
-    }
-
-    private fun determineMuxStrategy(vcodec: String?, acodec: String?, isHdr: Boolean): MuxStrategy {
-        val vc = vcodec?.lowercase() ?: ""
-        val ac = acodec?.lowercase() ?: ""
-
-        val isH264 = vc.startsWith("avc1") || vc.startsWith("h264")
-        val isAac = ac.contains("mp4a") || ac.contains("aac") || ac.contains("m4a")
-
-        return if (isH264 && isAac) {
-            MuxStrategy.REMUX_COPY
-        } else {
-            MuxStrategy.TRANSCODE_AUDIO_ONLY
-        }
     }
 
     private fun calculateApproxSize(dto: YtDlpFormatDto, durationSeconds: Int): Pair<Long?, Boolean> {

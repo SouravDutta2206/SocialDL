@@ -9,7 +9,10 @@ import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.ffmpeg.FFmpegEvent
 import com.socialdl.src.core.ffmpeg.FFmpegProcessExecutor
+import com.socialdl.src.core.ffmpeg.MediaProbe
 import com.socialdl.src.core.model.DownloadStatus
+import com.socialdl.src.core.model.FormatKind
+import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MuxStrategy
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
@@ -60,6 +63,7 @@ class DownloadWorker @AssistedInject constructor(
     private val notificationManager: DownloadNotificationManager,
     private val streamResolver: StreamResolver,
     private val outputExporter: OutputExporter,
+    private val coverArt: CoverArt,
 ) : CoroutineWorker(appContext, workerParams) {
 
     private val tag = "DownloadWorker"
@@ -74,6 +78,12 @@ class DownloadWorker @AssistedInject constructor(
     companion object {
         /** The ONLY work input: everything else lives in the Room job row. */
         const val KEY_JOB_ID = "job_id"
+
+        /**
+         * Linux rejects a single argv element above ~128 KB, so a base64 picture block
+         * larger than this is dropped instead of failing the whole conversion.
+         */
+        private const val MAX_PICTURE_BLOCK_CHARS = 100_000
     }
 
     override suspend fun getForegroundInfo(): ForegroundInfo {
@@ -133,7 +143,8 @@ class DownloadWorker @AssistedInject constructor(
                     status = job.status,
                     progress = job.progress,
                     downloadedBytes = job.downloadedBytes,
-                    totalBytes = job.totalBytes
+                    totalBytes = job.totalBytes,
+                    formatKind = FormatKind.fromOrNull(job.formatKind)
                 )
             )
         } catch (e: Exception) {
@@ -226,16 +237,25 @@ class DownloadWorker @AssistedInject constructor(
                 platform = job.platform
             )
 
+            // The probe tells the mux which streams can be copied into the chosen
+            // container and which must be re-encoded to fit it.
+            val videoProbe = ffmpegProcessExecutor.probe(videoTemp)
+            val audioProbe = ffmpegProcessExecutor.probe(audioTemp)
+
             mux(
                 jobId = job.id,
                 scratchDir = scratchDir,
                 container = resolved.container,
                 muxStrategy = resolved.muxStrategy,
+                videoCodec = videoProbe?.videoCodec,
+                audioCodec = audioProbe?.audioCodec,
+                audioBitrateKbps = audioProbe?.bitrateKbps,
+                title = job.title,
+                author = job.author,
                 videoTemp = videoTemp,
                 audioTemp = audioTemp
             ) ?: return false // failure already written
         } else {
-            val ext = resolved.container.lowercase(Locale.ROOT)
             val mediaTemp = File(scratchDir, "media.tmp")
 
             downloadSingle(
@@ -252,8 +272,16 @@ class DownloadWorker @AssistedInject constructor(
                 return false
             }
 
-            val convertedFile = File(scratchDir, "output.$ext")
-            if (mediaTemp.renameTo(convertedFile)) convertedFile else mediaTemp
+            if (resolved.formatKind == FormatKind.IMAGE) {
+                // Images have no conversion path: the bytes are already the target.
+                val ext = resolved.container.lowercase(Locale.ROOT)
+                val convertedFile = File(scratchDir, "output.$ext")
+                if (mediaTemp.renameTo(convertedFile)) convertedFile else mediaTemp
+            } else {
+                // Audio and progressive video are re-containerised on demand; the
+                // conversion step decides copy vs encode from the probed codecs.
+                convert(job, mediaTemp, resolved, scratchDir) ?: return false
+            }
         }
 
         return outputExporter.exportAndPersist(job, finalFile, resolved)
@@ -350,6 +378,11 @@ class DownloadWorker @AssistedInject constructor(
         scratchDir: File,
         container: String,
         muxStrategy: MuxStrategy?,
+        videoCodec: String?,
+        audioCodec: String?,
+        audioBitrateKbps: Int?,
+        title: String?,
+        author: String?,
         videoTemp: File,
         audioTemp: File
     ): File? {
@@ -380,7 +413,12 @@ class DownloadWorker @AssistedInject constructor(
             audioFile = audioTemp,
             outputFile = muxedFile,
             container = container,
-            muxStrategy = muxStrategy
+            videoCodec = videoCodec,
+            audioCodec = audioCodec,
+            audioBitrateKbps = audioBitrateKbps,
+            muxStrategy = muxStrategy,
+            title = title,
+            author = author
         )
 
         var muxSuccess = false
@@ -403,6 +441,163 @@ class DownloadWorker @AssistedInject constructor(
         }
 
         return muxedFile
+    }
+
+    /**
+     * Converts one downloaded stream into the job's chosen output container.
+     *
+     * A container whose codec matches the source codec is a stream copy; anything
+     * else is encoded at the measured source bitrate. Title, artist, and cover art are
+     * embedded when the container supports them. Persists the MUXING state, marks
+     * FAILED with a typed error and returns null on failure.
+     */
+    private suspend fun convert(
+        job: DownloadJobEntity,
+        sourceTemp: File,
+        resolved: ResolvedStreams,
+        scratchDir: File
+    ): File? {
+        if (!ffmpegProcessExecutor.isAvailable()) {
+            Logger.e(tag, "[${job.id}] FFmpeg binary is unavailable; cannot convert")
+            markFailed(job.id, DownloadError.ConversionFailed)
+            return null
+        }
+
+        val probe = ffmpegProcessExecutor.probe(sourceTemp)
+        if (probe == null) {
+            Logger.e(tag, "[${job.id}] Could not read the downloaded file's codec and bitrate")
+            markFailed(job.id, DownloadError.ConversionFailed)
+            return null
+        }
+
+        val target = MediaContainer.from(resolved.container)
+        if (target == null) {
+            Logger.e(tag, "[${job.id}] Unsupported output container '${resolved.container}'")
+            markFailed(job.id, DownloadError.UnsupportedFormat)
+            return null
+        }
+
+        val converting = jobRepository.registerProgress(
+            id = job.id,
+            status = DownloadStatus.MUXING,
+            progress = 0.95f,
+            downloadedBytes = sourceTemp.length(),
+            totalBytes = sourceTemp.length()
+        )
+        if (!converting) {
+            Logger.i(tag, "[${job.id}] Job became terminal before conversion; aborting")
+            return null
+        }
+
+        val output = File(scratchDir, "output.${target.extension}")
+        val args = if (resolved.formatKind == FormatKind.AUDIO) {
+            buildAudioArgs(job, sourceTemp, output, target, probe, scratchDir)
+        } else {
+            buildVideoArgs(job, sourceTemp, output, target, probe)
+        }
+        if (args == null) {
+            markFailed(job.id, DownloadError.ConversionFailed)
+            return null
+        }
+
+        var success = false
+        var conversionError = ""
+        ffmpegProcessExecutor.run(args).collect { event ->
+            when (event) {
+                is FFmpegEvent.Completed -> success = true
+                is FFmpegEvent.Failed -> conversionError = event.errorLog ?: "Exit code ${event.exitCode}"
+            }
+        }
+
+        if (!success || !output.exists() || output.length() == 0L) {
+            Logger.e(tag, "[${job.id}] Conversion to ${target.extension} failed: $conversionError")
+            markFailed(job.id, DownloadError.ConversionFailed)
+            return null
+        }
+
+        // The converted file replaces the downloaded source.
+        sourceTemp.delete()
+        return output
+    }
+
+    /** Audio argv, or null when the download has no audio stream to convert. */
+    private suspend fun buildAudioArgs(
+        job: DownloadJobEntity,
+        source: File,
+        output: File,
+        target: MediaContainer,
+        probe: MediaProbe,
+        scratchDir: File,
+    ): List<String>? {
+        val audioCodec = probe.audioCodec ?: run {
+            Logger.e(tag, "[${job.id}] Downloaded file has no audio stream to convert")
+            return null
+        }
+        val cover = if (MediaContainer.supportsCoverArt(target)) {
+            coverArt.prepare(job.thumbnailUrl, scratchDir)
+        } else {
+            null
+        }
+        val pictureBlock = if (target == MediaContainer.OPUS) pictureBlockFor(job, cover) else null
+        Logger.i(
+            tag,
+            "[${job.id}] Converting $audioCodec (${probe.bitrateKbps}kbps) to " +
+                "${target.extension} (cover=${cover != null})"
+        )
+        return ConvertArgs.build(
+            source = source,
+            output = output,
+            target = target,
+            sourceCodec = audioCodec,
+            bitrateKbps = probe.bitrateKbps,
+            title = job.title,
+            artist = job.author,
+            cover = cover,
+            pictureBlock = pictureBlock,
+        )
+    }
+
+    /** Video argv, or null when the download has no video stream to convert. */
+    private fun buildVideoArgs(
+        job: DownloadJobEntity,
+        source: File,
+        output: File,
+        target: MediaContainer,
+        probe: MediaProbe,
+    ): List<String>? {
+        val videoCodec = probe.videoCodec ?: run {
+            Logger.e(tag, "[${job.id}] Downloaded file has no video stream to convert")
+            return null
+        }
+        Logger.i(
+            tag,
+            "[${job.id}] Converting video=$videoCodec audio=${probe.audioCodec} to ${target.extension}"
+        )
+        return ConvertArgs.buildVideo(
+            source = source,
+            output = output,
+            target = target,
+            videoCodec = videoCodec,
+            audioCodec = probe.audioCodec,
+            audioBitrateKbps = probe.bitrateKbps,
+            title = job.title,
+            artist = job.author,
+        )
+    }
+
+    /**
+     * The Ogg container carries art as a Base64 comment. The block travels as one argv
+     * element, so an oversized image is dropped rather than failing the process spawn
+     * ("Argument list too long").
+     */
+    private fun pictureBlockFor(job: DownloadJobEntity, cover: File?): String? {
+        val block = cover?.let { runCatching { ConvertArgs.pictureBlock(it.readBytes()) }.getOrNull() }
+            ?: return null
+        if (block.length > MAX_PICTURE_BLOCK_CHARS) {
+            Logger.w(tag, "[${job.id}] Cover art too large for the Ogg metadata block; exporting without it")
+            return null
+        }
+        return block
     }
 
     private suspend fun markFailed(jobId: String, error: DownloadError) {

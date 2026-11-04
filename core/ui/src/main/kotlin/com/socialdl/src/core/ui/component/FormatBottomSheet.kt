@@ -109,16 +109,21 @@ fun FormatBottomSheet(
         mutableStateOf(availableFormats.firstOrNull() ?: item.imageFormats.firstOrNull())
     }
 
-    // Only containers that can actually be produced for the selected stream. This
-    // prevents saving WebM/Opus bytes under an .mp4/.mp3 extension: a single
-    // stream is never transcoded, and a mux target is chosen from the codec.
+    // Containers that can be produced for the selected stream. Audio streams offer the
+    // conversion targets; muxed video keeps the codec-derived list so a WebM/Opus pair
+    // is never relabelled as MP4.
     val containerOptions = remember(selectedFormat?.id) {
         selectedFormat?.let { format ->
             MediaContainer.optionsFor(format).map { it.extension.uppercase() }
         } ?: listOf("Default")
     }
     var selectedContainer by remember(selectedFormat?.id) {
-        mutableStateOf(containerOptions.first())
+        // Default to the native container (codec-matched, so a lossless copy) rather
+        // than whatever happens to be first in the list.
+        mutableStateOf(
+            selectedFormat?.let { MediaContainer.recommendedFor(it).extension.uppercase() }
+                ?: containerOptions.first()
+        )
     }
 
     var customTitle by remember(item) { mutableStateOf(item.title) }

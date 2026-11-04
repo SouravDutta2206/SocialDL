@@ -14,6 +14,7 @@ import androidx.work.ForegroundInfo
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.toHumanReadableSize
 import com.socialdl.src.core.model.DownloadStatus
+import com.socialdl.src.core.model.FormatKind
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -98,10 +99,13 @@ class DownloadNotificationManager @Inject constructor(
         status: DownloadStatus,
         progress: Float,
         downloadedBytes: Long,
-        totalBytes: Long?
+        totalBytes: Long?,
+        /** Distinguishes a video+audio mux from a single-stream conversion in the text. */
+        formatKind: FormatKind? = null
     ): ForegroundInfo {
         ensureChannel()
-        val notification = buildNotification(jobId, title, status, progress, downloadedBytes, totalBytes)
+        val notification =
+            buildNotification(jobId, title, status, progress, downloadedBytes, totalBytes, formatKind)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ForegroundInfo(
                 jobIdNotificationId(jobId),
@@ -119,14 +123,16 @@ class DownloadNotificationManager @Inject constructor(
         status: DownloadStatus,
         progress: Float,
         downloadedBytes: Long,
-        totalBytes: Long?
+        totalBytes: Long?,
+        formatKind: FormatKind?
     ): Notification {
         val percent = (progress.coerceIn(0f, 1f) * 100).toInt()
         val statusText = when (status) {
             DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING ->
                 "${downloadedBytes.toHumanReadableSize()} of " +
                     (totalBytes?.toHumanReadableSize() ?: "unknown") + " ($percent%)"
-            DownloadStatus.MUXING -> "Merging video and audio..."
+            DownloadStatus.MUXING ->
+                if (formatKind == FormatKind.AUDIO) "Converting audio..." else "Merging video and audio..."
             DownloadStatus.EXPORTING -> "Saving to media storage..."
             else -> status.name.lowercase()
         }

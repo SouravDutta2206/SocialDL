@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
+import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -29,13 +30,21 @@ class FFmpegProcessExecutor @Inject constructor(
     private companion object {
         /** Large muxes can legitimately take a while; this bounds a hung process. */
         const val DEFAULT_TIMEOUT_MS = 15 * 60 * 1000L
+
+        /** `ffmpeg -i` on a local file returns in milliseconds; this is only a hang guard. */
+        const val PROBE_TIMEOUT_MS = 5_000L
         const val MAX_CAPTURED_CHARS = 16 * 1024
         const val MAX_ERROR_TAIL_CHARS = 4 * 1024
     }
 
     suspend fun run(
         args: List<String>,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+        /**
+         * Suppresses the error-level log for a failed process. Probes exit non-zero
+         * by design (`ffmpeg -i` has no output), so they must not look like errors.
+         */
+        quiet: Boolean = false
     ): Flow<FFmpegEvent> = callbackFlow {
         val binaryPath = binaryProvider.path()
         val command = listOf(binaryPath) + args
@@ -123,7 +132,9 @@ class FFmpegProcessExecutor @Inject constructor(
             } else {
                 // errorBuffer already holds the bounded tail of stderr.
                 val errorTail = errorBuffer.toString().takeLast(MAX_ERROR_TAIL_CHARS)
-                Logger.e(tag, "ffmpeg process failed with code $exitCode: $errorTail")
+                if (!quiet) {
+                    Logger.e(tag, "ffmpeg process failed with code $exitCode: $errorTail")
+                }
                 send(FFmpegEvent.Failed(if (timedOut) -2 else exitCode, errorTail))
             }
             close()
@@ -141,6 +152,66 @@ class FFmpegProcessExecutor @Inject constructor(
         }
     }
 
+    /**
+     * Reads the ffmpeg banner for [file]: the stream codecs, the source bitrate, and
+     * the duration.
+     *
+     * `ffmpeg -i <file>` exits 1 by design (no output file), so this reuses [run]
+     * with [quiet] logging and parses the captured stderr instead of treating the
+     * exit code as a failure. Returns null when the banner has neither an audio nor a
+     * video stream.
+     */
+    suspend fun probe(file: File): MediaProbe? {
+        var banner: String? = null
+        run(
+            args = listOf("-v", "info", "-i", file.absolutePath),
+            timeoutMs = PROBE_TIMEOUT_MS,
+            quiet = true
+        ).collect { event ->
+            if (event is FFmpegEvent.Failed) banner = event.errorLog
+        }
+        return banner?.let(::parseProbeBanner)
+    }
+}
+
+/** Codecs, source bitrate, and duration read from ffmpeg's `-i` banner. */
+data class MediaProbe(
+    val audioCodec: String?,
+    val videoCodec: String?,
+    val bitrateKbps: Int?,
+    val durationMs: Long?,
+)
+
+private val AUDIO_CODEC_REGEX = Regex("""Audio:\s*([A-Za-z0-9_]+)""")
+private val VIDEO_CODEC_REGEX = Regex("""Video:\s*([A-Za-z0-9_]+)""")
+private val STREAM_BITRATE_REGEX = Regex("""Audio:[^\n]*?,\s*(\d+)\s*kb/s""")
+private val CONTAINER_BITRATE_REGEX = Regex("""bitrate:\s*(\d+)\s*kb/s""")
+private val DURATION_REGEX = Regex("""Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)""")
+
+/**
+ * Parses one ffmpeg `-i` banner. Both stream kinds are optional so the same probe
+ * serves an audio-only download, a muxed video-only temp, and a progressive file
+ * that already contains both. Prefers the stream-level audio bitrate (present for
+ * MP4/M4A) over the container bitrate.
+ */
+internal fun parseProbeBanner(banner: String): MediaProbe? {
+    val audioCodec = AUDIO_CODEC_REGEX.find(banner)?.groupValues?.get(1)
+    val videoCodec = VIDEO_CODEC_REGEX.find(banner)?.groupValues?.get(1)
+    if (audioCodec == null && videoCodec == null) return null
+    val streamKbps = STREAM_BITRATE_REGEX.find(banner)?.groupValues?.get(1)?.toIntOrNull()
+    val containerKbps = CONTAINER_BITRATE_REGEX.find(banner)?.groupValues?.get(1)?.toIntOrNull()
+    val durationMs = DURATION_REGEX.find(banner)?.let { match ->
+        val hours = match.groupValues[1].toLong()
+        val minutes = match.groupValues[2].toLong()
+        val seconds = match.groupValues[3].toDouble()
+        (hours * 3600 + minutes * 60) * 1000 + (seconds * 1000).toLong()
+    }
+    return MediaProbe(
+        audioCodec = audioCodec,
+        videoCodec = videoCodec,
+        bitrateKbps = streamKbps ?: containerKbps,
+        durationMs = durationMs
+    )
 }
 
 /**

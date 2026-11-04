@@ -23,6 +23,9 @@ internal class HttpStatusException(
     message: String,
 ) : IOException(message)
 
+/** The container/MIME pair can never be inserted into MediaStore (e.g. audio/webm). */
+internal class UnsupportedMediaTypeException(message: String) : IllegalArgumentException(message)
+
 /** True for ENOSPC or "No space left on device". Waiting does not fix it. */
 internal fun Throwable.isStorageFull(): Boolean =
     this is IOException && message.orEmpty().let {
@@ -109,6 +112,12 @@ sealed class DownloadError(val userMessage: String) {
     /** MediaStore export failure (disk-full, permission, no provider). */
     data object ExportFailed : DownloadError("Failed to save file to system media storage")
 
+    /** The requested container cannot be written to the media library at all. */
+    data object UnsupportedFormat : DownloadError("This format can't be saved to your media library")
+
+    /** FFmpeg single-stream conversion failed (copy or encode; log kept in Logger only). */
+    data object ConversionFailed : DownloadError("Couldn't convert the file to the selected format")
+
     /** Reconciled as failed after process death / system stop. */
     data object Interrupted : DownloadError("Download was interrupted")
 
@@ -134,6 +143,8 @@ sealed class DownloadError(val userMessage: String) {
                 is RangeInvalidException,
                 is RangeNotSatisfiableException,
                 is RangeNotSupportedException -> ServerError
+
+                is UnsupportedMediaTypeException -> UnsupportedFormat
 
                 is SecurityException -> StoragePermission
 

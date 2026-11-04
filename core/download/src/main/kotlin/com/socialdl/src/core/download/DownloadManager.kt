@@ -110,9 +110,10 @@ class DownloadManager @Inject constructor(
         val jobId = UUID.randomUUID().toString()
 
         // Output container policy:
-        // - placeholder jobs store "" so the worker adopts the JIT-resolved format;
-        // - explicit user choices are accepted only when actually producible for
-        //   the selected stream (never relabel WebM/Opus bytes as MP4/MP3);
+        // - an explicit user choice always wins (every video container, and every audio
+        //   conversion target, is producible by the worker);
+        // - a placeholder without a choice stores "" so the worker adopts the
+        //   JIT-resolved native container;
         // - otherwise use the codec-derived recommended container.
         val requestedContainer = container
             ?.takeIf { it.isNotBlank() && !it.equals("Default", ignoreCase = true) }
@@ -122,10 +123,10 @@ class DownloadManager @Inject constructor(
             selectedFormat.requiresMuxing &&
             !selectedFormat.isHdr
         val finalContainer = when {
-            selectedFormat.isPlaceholder -> ""
             forceH264 -> MediaContainer.MP4.extension.uppercase()
             requestedContainer != null && MediaContainer.isCompatible(selectedFormat, requestedContainer) ->
                 MediaContainer.extensionOf(requestedContainer).uppercase()
+            selectedFormat.isPlaceholder -> ""
             else -> MediaContainer.recommendedFor(selectedFormat).extension.uppercase()
         }
 
@@ -165,11 +166,9 @@ class DownloadManager @Inject constructor(
             directUrl = selectedFormat.directUrl?.takeIf { it.isNotBlank() },
             requiresMuxing = selectedFormat.requiresMuxing,
             audioDirectUrl = pairedAudio?.directUrl?.takeIf { it.isNotBlank() },
-            muxStrategy = if (forceH264) {
-                MuxStrategy.FORCE_H264.name
-            } else {
-                selectedFormat.muxStrategy?.name
-            },
+            // Only the opt-in H.264 re-encode is persisted now; copy vs encode is decided
+            // from the probed codecs at download time.
+            muxStrategy = if (forceH264) MuxStrategy.FORCE_H264.name else null,
             videoChunkSize = selectedFormat.httpChunkSizeBytes ?: 0L,
             audioChunkSize = pairedAudio?.httpChunkSizeBytes ?: 0L,
             isPlaceholder = selectedFormat.isPlaceholder,

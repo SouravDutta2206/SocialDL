@@ -90,6 +90,16 @@ class MediaStoreExporter @Inject constructor(
 
         val mimeType = MediaContainer.mimeTypeFor(container, kind)
 
+        // MediaProvider rejects some (extension, MIME) pairs outright — notably
+        // audio/webm in the audio collection. Fail as a typed error before building a
+        // row instead of letting the provider's IllegalArgumentException escape as
+        // "Unknown" from the worker's catch-all.
+        if (!MediaContainer.isExportableMimeType(container, kind)) {
+            throw UnsupportedMediaTypeException(
+                "Cannot export .$ext as $mimeType into the $kind collection"
+            )
+        }
+
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
@@ -130,7 +140,18 @@ class MediaStoreExporter @Inject constructor(
             }
         }
 
-        val itemUri = store.insert(collection, contentValues) ?: return null
+        Logger.d(tag, "Exporting $fileName as $mimeType into $collection")
+
+        val itemUri = try {
+            store.insert(collection, contentValues) ?: return null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Provider-side rejection (MIME validation, permission, missing volume).
+            // Never leave the worker to classify it as an unknown failure.
+            Logger.e(tag, "MediaStore rejected the export row ($fileName, $mimeType)", e)
+            return null
+        }
         val pending = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
         if (pending) {
