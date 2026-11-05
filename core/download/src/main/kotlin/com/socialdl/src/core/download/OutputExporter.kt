@@ -74,6 +74,9 @@ class OutputExporter @Inject constructor(
             author = resolvedJob.author,
             container = resolved.container,
             kind = resolved.formatKind,
+            // Carousel siblings share this title; the slot keeps their export rows
+            // (and therefore their files) distinct instead of overwriting one another.
+            carouselIndex = resolvedJob.carouselIndex.takeIf { it > 0 },
             onPendingRowCreated = { pendingUri ->
                 // P1-3: record the pending MediaStore row durably, and re-check the
                 // cancellation guard right after row creation so cancels mid-copy

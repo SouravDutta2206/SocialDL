@@ -60,6 +60,9 @@ class MediaStoreExporter @Inject constructor(
     private val tag = "MediaStoreExporter"
 
     /**
+     * @param carouselIndex 1-based slot of the item inside a carousel post, or null
+     *   for a single item. Slides share one title, so the slot is folded into the
+     *   DISPLAY_NAME to keep their MediaStore rows distinct.
      * @param onPendingRowCreated called with the created IS_PENDING row (Q+ only);
      *   return false to abort the copy (e.g. the job row was deleted by a cancel —
      *   the pending row is deleted before returning).
@@ -75,6 +78,7 @@ class MediaStoreExporter @Inject constructor(
         author: String?,
         container: String,
         kind: FormatKind,
+        carouselIndex: Int? = null,
         onPendingRowCreated: suspend (Uri) -> Boolean,
         onBeforePublish: suspend () -> Boolean,
     ): Uri? {
@@ -86,7 +90,15 @@ class MediaStoreExporter @Inject constructor(
             .take(50)
             .trim('_')
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val fileName = "${sanitizedTitle}_$timestamp.$ext"
+        // Carousel slides all carry the post caption as their title and finish
+        // exporting within the same second. A title+timestamp name therefore made
+        // every slide insert the SAME DISPLAY_NAME + RELATIVE_PATH; MediaProvider
+        // maps those concurrent inserts onto one row ("Identical paths … not
+        // moving"), so each copy silently overwrote the previous slide and
+        // "Download all" published fewer files than items. The slot index in the
+        // name gives every slide its own row.
+        val itemSuffix = carouselIndex?.takeIf { it > 0 }?.let { "_$it" }.orEmpty()
+        val fileName = "${sanitizedTitle}${itemSuffix}_$timestamp.$ext"
 
         val mimeType = MediaContainer.mimeTypeFor(container, kind)
 
