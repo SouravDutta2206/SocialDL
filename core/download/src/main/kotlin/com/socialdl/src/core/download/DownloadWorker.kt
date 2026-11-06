@@ -216,15 +216,96 @@ class DownloadWorker @AssistedInject constructor(
     /** Returns true when the job exported + persisted successfully; false otherwise (FAILED already written when applicable). */
     private suspend fun runPipeline(job: DownloadJobEntity, scratchDir: File): Boolean {
         promoteToForeground(job)
-        val resolved = when (val outcome = streamResolver.resolve(job)) {
-            is ResolveOutcome.Ready -> outcome.streams
-            is ResolveOutcome.Failed -> {
-                jobRepository.markFailed(job.id, outcome.error)
-                return false
-            }
-            ResolveOutcome.Inactive -> return false
-        }
 
+        // A media CDN 401/403 ("server refused access") is not necessarily final:
+        // the signed URL can be refused while the same post downloads fine from a
+        // freshly minted one (observed on YouTube playlist batches, where one item
+        // fails and the identical video succeeds on the next attempt). yt-dlp
+        // re-extracts in that situation; do the same, preferring a different stream
+        // for a placeholder. Platforms that can resolve public content anonymously
+        // get one extra attempt without the saved session, because a refused URL is
+        // usually bound to that session.
+        val anonymousRetry = streamResolver.supportsAnonymousRetry(job.sourceUrl)
+        val maxAttempts = if (anonymousRetry) 3 else 2
+        var attempt = 0
+        var rejectedFormatId: String? = null
+        var rejectedUrl: String? = null
+
+        while (true) {
+            // 0 = normal, 1 = anonymous (when available), 2 = session-bound refresh.
+            val useSavedSession = !(anonymousRetry && attempt == 1)
+            val resolved = when (
+                val outcome = streamResolver.resolve(
+                    job = job,
+                    forceRefresh = attempt > 0,
+                    useSavedSession = useSavedSession,
+                    rejectedFormatId = rejectedFormatId,
+                    rejectedUrl = rejectedUrl,
+                )
+            ) {
+                is ResolveOutcome.Ready -> outcome.streams
+                is ResolveOutcome.Failed -> {
+                    // An anonymous re-resolution can legitimately fail for gated
+                    // content (member-only, age-restricted) even though the
+                    // session-bound one works. Fall back to the remaining attempt
+                    // instead of failing the job here.
+                    if (!useSavedSession && attempt + 1 < maxAttempts) {
+                        Logger.w(
+                            tag,
+                            "[${job.id}] Anonymous re-resolution failed " +
+                                "(${outcome.error}); falling back to the saved session"
+                        )
+                        attempt++
+                        continue
+                    }
+                    jobRepository.markFailed(job.id, outcome.error)
+                    return false
+                }
+                ResolveOutcome.Inactive -> return false
+            }
+
+            try {
+                return downloadResolved(job, resolved, scratchDir)
+            } catch (e: Exception) {
+                if (e.isRefreshableRejection() && attempt + 1 < maxAttempts) {
+                    Logger.w(
+                        tag,
+                        "[${job.id}] CDN refused the signed stream URL " +
+                            "(host=${hostOf(resolved.directUrl)}, format=${resolved.formatId}, " +
+                            "container=${resolved.container}, ${e.message}); " +
+                            "refreshing (attempt ${attempt + 1}/$maxAttempts, " +
+                            "savedSession=${!anonymousRetry || attempt + 1 != 1})"
+                    )
+                    rejectedFormatId = resolved.formatId
+                    rejectedUrl = resolved.directUrl
+                    attempt++
+                    // A fresh attempt must not append to the refused attempt's bytes.
+                    scratchDir.listFiles()?.forEach { it.deleteRecursively() }
+                    continue
+                }
+                throw e
+            }
+        }
+    }
+
+    /**
+     * True for the one failure a fresh URL can plausibly fix: the CDN answered
+     * 401/403 to a stream URL. Every other transfer error keeps its existing
+     * terminal semantics (retrying a 404 or a corrupt range is pointless).
+     */
+    private fun Exception.isRefreshableRejection(): Boolean =
+        this is HttpStatusException && (code == 401 || code == 403)
+
+    /** Host only — a signed CDN URL must never be written to logcat. */
+    private fun hostOf(url: String): String =
+        runCatching { java.net.URI(url).host }.getOrNull() ?: "<unknown>"
+
+    /** Downloads, muxes/converts and exports the resolved streams. */
+    private suspend fun downloadResolved(
+        job: DownloadJobEntity,
+        resolved: ResolvedStreams,
+        scratchDir: File
+    ): Boolean {
         val finalFile = if (resolved.requiresMuxing) {
             val videoTemp = File(scratchDir, "video.tmp")
             val audioTemp = File(scratchDir, "audio.tmp")

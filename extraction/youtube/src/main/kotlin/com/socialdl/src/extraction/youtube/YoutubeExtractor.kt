@@ -124,10 +124,23 @@ class YoutubeExtractor @Inject constructor(
         supportsLoginGatedContent = true,
         needsWebView = false,
         typicalLatencyMs = 1500L,
-        showsFormatPicker = true
+        showsFormatPicker = true,
+        // Public videos resolve without a session; the download path retries that
+        // way when a cookie-bound stream URL is refused by the CDN.
+        supportsAnonymousRetry = true
     )
 
-    override suspend fun extract(url: String): ExtractionResult {
+    override suspend fun extract(url: String): ExtractionResult = extractInternal(url, useSavedSession = true)
+
+    /**
+     * Public-content fallback for a refused session-bound URL: yt-dlp runs without
+     * the cookie jar. Member-only/private videos fail here with their normal typed
+     * error, and the caller falls back to the session-bound retry.
+     */
+    override suspend fun extractWithoutSavedSession(url: String): ExtractionResult =
+        extractInternal(url, useSavedSession = false)
+
+    private suspend fun extractInternal(url: String, useSavedSession: Boolean): ExtractionResult {
         val normalizedUrl = url.trim().ensureHttps()
         if (!supports(normalizedUrl)) {
             return ExtractionResult.Error(ExtractionError.UnsupportedUrl(url))
@@ -142,23 +155,32 @@ class YoutubeExtractor @Inject constructor(
         val nodeBinDir = runtimePaths?.binDir?.absolutePath
         Logger.d(
             tag,
-            "Extracting YouTube metadata for $normalizedUrl (nodeDir=$nodeDir, binDir=$nodeBinDir)"
+            "Extracting YouTube metadata for $normalizedUrl " +
+                "(savedSession=$useSavedSession, nodeDir=$nodeDir, binDir=$nodeBinDir)"
         )
 
         return try {
             // §2.6 bridge: decrypt the stored jar into a throwaway cacheDir file for
             // the duration of this one PythonEngine call, or pass null when the user
             // never signed in — missing cookies must not become a new failure mode.
-            val rawJson = cookieStore.withCookieFile(Platform.YOUTUBE) { cookieFilePath: String? ->
-                pythonEngine.run(
-                    module = "yt_dlp_bridge.extract",
-                    function = "extract",
-                    normalizedUrl,
-                    cookieFilePath,
-                    nodeDir,
-                    nodeBinDir,
-                    runtimePaths?.ldLibraryPath
-                ) { it }
+            val rawJson = if (useSavedSession) {
+                cookieStore.withCookieFile(Platform.YOUTUBE) { cookieFilePath: String? ->
+                    runBridge(
+                        normalizedUrl = normalizedUrl,
+                        cookieFilePath = cookieFilePath,
+                        nodeDir = nodeDir,
+                        nodeBinDir = nodeBinDir,
+                        ldLibraryPath = runtimePaths?.ldLibraryPath
+                    )
+                }
+            } else {
+                runBridge(
+                    normalizedUrl = normalizedUrl,
+                    cookieFilePath = null,
+                    nodeDir = nodeDir,
+                    nodeBinDir = nodeBinDir,
+                    ldLibraryPath = runtimePaths?.ldLibraryPath
+                )
             }
 
             parseYtDlpJson(rawJson, normalizedUrl)
@@ -178,6 +200,23 @@ class YoutubeExtractor @Inject constructor(
             ExtractionResult.Error(ExtractionError.ParsingFailed(e.message ?: "Unknown extraction error"))
         }
     }
+
+    /** One yt-dlp bridge invocation; [cookieFilePath] is null for an anonymous call. */
+    private suspend fun runBridge(
+        normalizedUrl: String,
+        cookieFilePath: String?,
+        nodeDir: String?,
+        nodeBinDir: String?,
+        ldLibraryPath: String?,
+    ): String = pythonEngine.run(
+        module = "yt_dlp_bridge.extract",
+        function = "extract",
+        normalizedUrl,
+        cookieFilePath,
+        nodeDir,
+        nodeBinDir,
+        ldLibraryPath
+    ) { it }
 
     internal suspend fun parseYtDlpJson(rawJson: String, sourceUrl: String): ExtractionResult {
         val parsed = try {

@@ -53,6 +53,10 @@ class StreamResolver @Inject constructor(
 ) {
     private val tag = "StreamResolver"
 
+    /** True when [sourceUrl]'s extractor can re-resolve public content without a session. */
+    fun supportsAnonymousRetry(sourceUrl: String): Boolean =
+        extractorRegistry.resolve(sourceUrl)?.capabilities?.supportsAnonymousRetry == true
+
     /**
      * Writes the initial DOWNLOADING(0f) progress row; returns [ResolveOutcome.Failed]
      * on any resolution failure, and [ResolveOutcome.Inactive] when the row is no
@@ -62,8 +66,24 @@ class StreamResolver @Inject constructor(
      * [FormatKind]; an unparseable stored kind fails as
      * [DownloadError.InvalidFormatKind], and a missing resolved kind fails as
      * [DownloadError.FormatUnavailable] instead of substituting another kind.
+     *
+     * @param forceRefresh re-extract even when the row already carries a signed URL.
+     *   Used for the one retry after the media CDN refused that URL (401/403): the
+     *   stored URL is dead at that point even though it is not blank.
+     * @param useSavedSession false re-resolves without the stored cookies. Public
+     *   content is reachable anonymously, so a URL the CDN refuses for the
+     *   signed-in session can still be obtained this way.
+     * @param rejectedFormatId / @param rejectedUrl the stream the CDN refused, so the
+     *   retry picks another candidate when one exists instead of repeating the same
+     *   rejected request.
      */
-    internal suspend fun resolve(job: DownloadJobEntity): ResolveOutcome {
+    internal suspend fun resolve(
+        job: DownloadJobEntity,
+        forceRefresh: Boolean = false,
+        useSavedSession: Boolean = true,
+        rejectedFormatId: String? = null,
+        rejectedUrl: String? = null,
+    ): ResolveOutcome {
         val jobId = job.id
         Logger.i(
             tag,
@@ -116,10 +136,19 @@ class StreamResolver @Inject constructor(
         val forceH264 = runCatching { settingsRepository.forceH264Transcode.first() }
             .getOrDefault(false)
 
-        // Resolve when the job is a placeholder, its signed URL expired, or a
-        // legacy row has no container to derive an extension/MIME from.
-        if (job.isPlaceholder || effectiveDirectUrl.isNullOrBlank() || effectiveContainer.isBlank()) {
-            Logger.i(tag, "[$jobId] JIT resolving stream formats for: ${job.sourceUrl}")
+        // Resolve when the job is a placeholder, its signed URL expired or was
+        // refused, or a legacy row has no container to derive an extension/MIME from.
+        if (forceRefresh ||
+            job.isPlaceholder ||
+            effectiveDirectUrl.isNullOrBlank() ||
+            effectiveContainer.isBlank()
+        ) {
+            Logger.i(
+                tag,
+                "[$jobId] JIT resolving stream formats for: ${job.sourceUrl} " +
+                    "(forceRefresh=$forceRefresh, savedSession=$useSavedSession, " +
+                    "rejectedFormatId=$rejectedFormatId)"
+            )
 
             val extractor = extractorRegistry.resolve(job.sourceUrl)
             if (extractor == null) {
@@ -127,7 +156,15 @@ class StreamResolver @Inject constructor(
                 return ResolveOutcome.Failed(DownloadError.NoExtractor)
             }
 
-            when (val result = extractor.extract(job.sourceUrl)) {
+            // The anonymous mode is optional: a platform without it simply reruns
+            // the normal extraction rather than failing the job.
+            val extraction = if (!useSavedSession) {
+                extractor.extractWithoutSavedSession(job.sourceUrl) ?: extractor.extract(job.sourceUrl)
+            } else {
+                extractor.extract(job.sourceUrl)
+            }
+
+            when (val result = extraction) {
                 is ExtractionResult.Success -> {
                     val resolvedItem = result.items.firstOrNull()
                     if (resolvedItem == null) {
@@ -145,6 +182,8 @@ class StreamResolver @Inject constructor(
                         requestedKind = requestedKind,
                         exactFormatId = job.formatId,
                         allowExact = !job.isPlaceholder,
+                        rejectedFormatId = rejectedFormatId,
+                        rejectedUrl = rejectedUrl,
                     )
 
                     // Defensive invariant: selection must stay in the requested kind
@@ -267,6 +306,11 @@ class StreamResolver @Inject constructor(
  *    originally selected).
  * 2. Otherwise the first format of [requestedKind] is returned.
  * 3. If there is no format of [requestedKind], `null` is returned.
+ *
+ * After a CDN refusal ([rejectedFormatId] / [rejectedUrl]), rule 2 prefers a
+ * different stream: a candidate whose id and URL are both different, then any
+ * candidate whose URL is different, and only then the rejected stream again (a
+ * re-extraction hands back the same format under a fresh signature).
  */
 internal object FormatSelector {
 
@@ -275,12 +319,24 @@ internal object FormatSelector {
         requestedKind: FormatKind,
         exactFormatId: String?,
         allowExact: Boolean,
+        rejectedFormatId: String? = null,
+        rejectedUrl: String? = null,
     ): MediaFormat? {
         val candidates = formatsOf(item, requestedKind)
         if (allowExact && !exactFormatId.isNullOrBlank()) {
+            // An explicit pick keeps its exact format; a re-resolution after a CDN
+            // rejection only refreshes that format's signed URL.
             candidates.firstOrNull { it.id == exactFormatId }?.let { return it }
         }
-        return candidates.firstOrNull()
+        if (rejectedFormatId == null && rejectedUrl == null) return candidates.firstOrNull()
+
+        // A placeholder's first choice was refused by the CDN. Prefer a different
+        // stream (another codec at the same quality) whose URL has not been rejected,
+        // then any URL-but-the-rejected-one, and only repeat the rejected stream when
+        // the item exposes nothing else.
+        return candidates.firstOrNull { it.id != rejectedFormatId && it.directUrl != rejectedUrl }
+            ?: candidates.firstOrNull { it.directUrl != rejectedUrl }
+            ?: candidates.firstOrNull()
     }
 
     /**

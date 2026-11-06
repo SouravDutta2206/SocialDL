@@ -73,6 +73,8 @@ class ChunkedDownloader @Inject constructor(
             "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
         const val DEFAULT_CHUNK_SIZE = 10L * 1024L * 1024L // 10 MB default for YouTube/googlevideo
         private const val MAX_RETRIES_PER_CHUNK = 5
+        /** Bounded body peek for a non-2xx response — diagnostics only. */
+        private const val ERROR_BODY_PEEK_BYTES = 512L
     }
 
     /**
@@ -427,11 +429,32 @@ class ChunkedDownloader @Inject constructor(
             ?.toLongOrNull()
             ?.coerceIn(0L, 60L)
             ?.times(1000L)
+        // Never log the signed URL: the media host, the `c` player-client parameter
+        // yt-dlp embedded, and the first bytes of the refusal body are what separate
+        // "this signature is no longer accepted" from "this stream is gated".
+        Logger.w(
+            tag,
+            "HTTP ${response.code} for ${response.request.url.host} " +
+                "(client=${response.request.url.queryParameter("c") ?: "?"}, " +
+                "contentType=${response.header("Content-Type") ?: "?"}) " +
+                "body=${errorBodySnippet(response)}"
+        )
         return HttpStatusException(
             code = response.code,
             retryAfterMs = retryAfterMs,
             message = "HTTP error ${response.code}: ${response.message}"
         )
     }
+
+    /** First bytes of a refusal body, collapsed to one line; never the request URL. */
+    private fun errorBodySnippet(response: Response): String =
+        runCatching {
+            response.peekBody(ERROR_BODY_PEEK_BYTES)
+                .string()
+                .replace(Regex("\\s+"), " ")
+                .trim()
+                .take(180)
+                .ifEmpty { "<empty>" }
+        }.getOrDefault("<unreadable>")
 
 }

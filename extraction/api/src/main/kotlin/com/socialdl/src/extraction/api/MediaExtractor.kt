@@ -29,6 +29,17 @@ interface MediaExtractor {
      * or [ExtractionResult.Error] with typed cause.
      */
     suspend fun extract(url: String): ExtractionResult
+
+    /**
+     * Re-resolves [url] ignoring any saved session (cookies).
+     *
+     * Used for the one retry after the media CDN refuses a URL minted for the
+     * signed-in session: public content is reachable anonymously, so a session-
+     * bound URL that keeps returning 401/403 can still be downloaded this way.
+     * Returns `null` when this extractor has no anonymous mode (the default), so
+     * callers skip the attempt instead of repeating the identical request.
+     */
+    suspend fun extractWithoutSavedSession(url: String): ExtractionResult? = null
 }
 
 /**

@@ -21,4 +21,11 @@ data class PlatformCapabilities(
      * YouTube is true (many streams); Instagram/Twitter/Threads are false (direct single format).
      */
     val showsFormatPicker: Boolean = false,
+
+    /**
+     * True when [com.socialdl.src.extraction.api.MediaExtractor.extractWithoutSavedSession]
+     * has a distinct implementation, i.e. the platform can re-resolve public content
+     * anonymously after a media CDN refuses a session-bound URL.
+     */
+    val supportsAnonymousRetry: Boolean = false,
 )
