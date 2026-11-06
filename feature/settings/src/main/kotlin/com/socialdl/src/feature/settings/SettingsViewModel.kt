@@ -250,4 +250,51 @@ class SettingsViewModel @Inject constructor(
             setActionMessage(instagramActionMessage, importMessage(outcome, "Instagram"))
         }
     }
+
+    // ---- X (Twitter) cookies (Phase 6, gallery-dl) ----
+
+    data class TwitterCookiesUiState(
+        val present: Boolean = false,
+        val lastRefreshedAt: Long? = null,
+        /** Copy for import/clear outcomes; self-clears after a few seconds. */
+        val actionMessage: String? = null,
+    )
+
+    private val twitterActionMessage = MutableStateFlow<String?>(null)
+
+    val twitterCookiesUiState: StateFlow<TwitterCookiesUiState> = combine(
+        cookieStore.lastRefreshedAt(Platform.TWITTER),
+        twitterActionMessage
+    ) { lastRefreshed, actionMessage ->
+        // hasCookies() re-evaluated on every emission so a capture round-trip
+        // (which bumps LAST_REFRESHED in save()) is reflected without a refresh.
+        TwitterCookiesUiState(
+            present = cookieStore.hasCookies(Platform.TWITTER),
+            lastRefreshedAt = lastRefreshed,
+            actionMessage = actionMessage,
+        )
+    }
+        // hasCookies() stats the encrypted blob — never on the main thread.
+        .flowOn(Dispatchers.IO)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = TwitterCookiesUiState()
+        )
+
+    /** Destructive — UI confirms before calling. */
+    fun clearTwitterCookies() {
+        viewModelScope.launch {
+            cookieStore.clear(Platform.TWITTER)
+            setActionMessage(twitterActionMessage, "X cookies cleared.")
+        }
+    }
+
+    /** Manual cookies.txt fallback for gallery-dl (§2.6 escape hatch). */
+    fun importTwitterCookies(uri: Uri) {
+        viewModelScope.launch {
+            val outcome = cookieStore.importNetscapeFile(Platform.TWITTER, uri)
+            setActionMessage(twitterActionMessage, importMessage(outcome, "X"))
+        }
+    }
 }

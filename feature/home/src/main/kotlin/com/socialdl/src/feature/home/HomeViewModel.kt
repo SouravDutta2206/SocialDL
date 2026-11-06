@@ -259,15 +259,17 @@ class HomeViewModel @Inject constructor(
                     is ExtractionResult.Error -> {
                         val errMsg = result.cause.message
                         Logger.w(tag, "Extraction failed for $url: $errMsg")
-                        // §2.6 recapture flow: both YouTube and Instagram have a
+                        // §2.6 recapture flow: YouTube, Instagram and X have a
                         // WebView capture route with auto-retry on success. Other
-                        // platforms (Twitter/Threads) have no capture flow, so they
-                        // keep the generic error only.
+                        // platforms (Threads) have no capture flow, so they keep
+                        // the generic error only.
                         val authWallPlatform =
                             (result.cause as? ExtractionError.AuthWallDetected)
                                 ?.platform
                                 ?.takeIf {
-                                    it == Platform.YOUTUBE || it == Platform.INSTAGRAM
+                                    it == Platform.YOUTUBE ||
+                                        it == Platform.INSTAGRAM ||
+                                        it == Platform.TWITTER
                                 }
                         _uiState.update {
                             it.copy(

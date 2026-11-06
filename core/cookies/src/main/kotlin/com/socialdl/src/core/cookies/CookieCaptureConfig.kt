@@ -43,6 +43,23 @@ data class CookieCaptureConfig(
      * capture must use the same string.
      */
     val userAgentOverride: String? = null,
+
+    /**
+     * Leave the WebView's own User-Agent untouched (no `wv` stripping).
+     *
+     * Why this matters: Android WebView only emits User-Agent *client hints*
+     * (`Sec-CH-UA` request headers, `navigator.userAgentData`) when the app sends
+     * the default UA string. Any override — including our cleaned device UA —
+     * suppresses them, producing a fingerprint no real Chrome ever shows (a
+     * Chrome-like UA with zero client hints). Platforms that risk-control logins
+     * fingerprint exactly that mismatch.
+     *
+     * Since Chromium's 2024 UA reduction, the default WebView UA is already
+     * Chrome-shaped (`Android 10; K`, `Chrome/X.0.0.0`) and differs only by the
+     * `wv` token and `Version/4.0` prefix, so keeping it costs little and buys
+     * self-consistent fingerprint data.
+     */
+    val presentDefaultUserAgent: Boolean = false,
 )
 
 /** YouTube's capture configuration. */
@@ -160,5 +177,82 @@ object InstagramCookieCapture {
         title = "Sign in with Instagram",
         subtitle = "Log in normally (2FA included). SocialDL never sees your password; only cookies are stored encrypted.",
         userAgentOverride = USER_AGENT,
+    )
+}
+
+/**
+ * Twitter/X capture configuration (Phase 6).
+ *
+ * X issues `auth_token` only to signed-in sessions; `ct0` is its CSRF token and
+ * is served to signed-out visitors too. [CookieCaptureConfig.markerCookies] is
+ * matched ANY-of, so pairing them would accept an anonymous jar — the marker is
+ * `auth_token` alone.
+ *
+ * No User-Agent override (confirmed on-device, Nov 2026): X risk-controls its web
+ * login by browser fingerprint, and the configurations that report a *fabricated*
+ * UA are refused with "We've temporarily limited your login" while Chrome on the
+ * same device logs in fine. Android WebView only emits User-Agent client hints
+ * (`Sec-CH-UA`, `navigator.userAgentData`) when the app does not override the UA,
+ * so any override produces "Chrome-like UA, zero client hints" — a combination no
+ * real browser produces. Leaving [CookieCaptureConfig.userAgentOverride] null and
+ * [CookieCaptureConfig.presentDefaultUserAgent] true keeps the engine's own
+ * (already Chrome-shaped) UA and its client hints consistent, which X accepts.
+ * YouTube strips `wv`/`Version/4.0` because Google only reads the UA string;
+ * Instagram pins a desktop UA because its session is UA-bound. X needs neither.
+ *
+ * X sessions are not UA-bound, so the extraction bridge does not pin a UA either.
+ */
+object TwitterCookieCapture {
+
+    const val LOGIN_URL = "https://x.com/i/flow/login"
+    const val SUCCESS_ORIGIN = "https://x.com"
+
+    /** `auth_token` is the only signed-in-only cookie; see the class note. */
+    val MARKER_COOKIES = listOf("auth_token")
+
+    val HARVESTS = listOf(
+        NetscapeCookieJarWriter.Harvest(
+            url = "https://x.com",
+            cookieDomain = ".x.com"
+        ),
+        // Sessions created before the twitter.com -> x.com rename may still live
+        // under the legacy domain; an empty harvest is a cheap no-op.
+        NetscapeCookieJarWriter.Harvest(
+            url = "https://twitter.com",
+            cookieDomain = ".twitter.com"
+        ),
+    )
+
+    fun config(): CookieCaptureConfig = CookieCaptureConfig(
+        platform = Platform.TWITTER,
+        loginUrl = LOGIN_URL,
+        successOrigin = SUCCESS_ORIGIN,
+        markerCookies = MARKER_COOKIES,
+        harvests = HARVESTS,
+        userAgent = null,
+        allowedHosts = listOf(
+            "x.com",
+            "twitter.com",
+            // Login-page static assets + embedded link hops.
+            "twimg.com",
+            "t.co",
+            // SSO hops flow through the embedded WebView: Apple's redirect is
+            // WebView-friendly; Google follows the YouTube recipe (wv-stripped
+            // UA + allowlisted account hosts). "Continue with Google" is also a
+            // reported workaround for X's temporary login limits.
+            "apple.com",
+            "icloud.com",
+            "google.com",
+            "accounts.google.com",
+            "gstatic.com",
+            "googleapis.com",
+        ),
+        title = "Sign in with X",
+        subtitle = "Log in normally (2FA included). SocialDL never sees your password; only cookies are stored encrypted.",
+        // Keep WebView's own (already Chrome-shaped, reduced) UA so client hints stay
+        // populated and self-consistent. Overriding it — even to look more like
+        // Chrome — silently drops Sec-CH-UA/navigator.userAgentData, which is the
+        // anomaly X's login risk control reacts to.
+        presentDefaultUserAgent = true,
     )
 }

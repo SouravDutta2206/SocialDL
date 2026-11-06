@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tag
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -60,13 +61,14 @@ import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 
 /** Which SettingsRow section is currently expanded (null = none). */
-private enum class SettingsSection { GENERAL, FOLDERS, COOKIES, INSTAGRAM, LOGS, ABOUT }
+private enum class SettingsSection { GENERAL, FOLDERS, COOKIES, INSTAGRAM, TWITTER, LOGS, ABOUT }
 
 @Composable
 fun SettingsScreen(
     onNavigateBack: () -> Unit,
     onNavigateToCookieCapture: () -> Unit = {},
     onNavigateToInstagramCookieCapture: () -> Unit = {},
+    onNavigateToTwitterCookieCapture: () -> Unit = {},
     appVersion: String = "",
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel()
@@ -74,11 +76,13 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val cookiesUiState by viewModel.cookiesUiState.collectAsStateWithLifecycle()
     val instagramCookiesUiState by viewModel.instagramCookiesUiState.collectAsStateWithLifecycle()
+    val twitterCookiesUiState by viewModel.twitterCookiesUiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     var expandedSection by remember { mutableStateOf<SettingsSection?>(null) }
     var showClearCookiesDialog by remember { mutableStateOf(false) }
     var showClearInstagramCookiesDialog by remember { mutableStateOf(false) }
+    var showClearTwitterCookiesDialog by remember { mutableStateOf(false) }
 
     // No manual cookie refresh needed: a capture round-trip bumps the
     // LAST_REFRESHED DataStore key, which re-evaluates cookiesUiState
@@ -96,6 +100,13 @@ fun SettingsScreen(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let(viewModel::importInstagramCookies)
+    }
+
+    // Manual cookies.txt import fallback for the X/Twitter gallery-dl engine.
+    val twitterCookiesFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let(viewModel::importTwitterCookies)
     }
 
     // Back collapses the expanded panel first.
@@ -279,6 +290,33 @@ fun SettingsScreen(
 
                 item {
                     SettingsRow(
+                        icon = Icons.Default.Tag,
+                        title = "X (Twitter) cookies",
+                        subtitle = "Sign in with WebView, Protected posts, Import cookies.txt",
+                        expanded = expandedSection == SettingsSection.TWITTER,
+                        onClick = {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            expandedSection =
+                                if (expandedSection == SettingsSection.TWITTER) null
+                                else SettingsSection.TWITTER
+                        }
+                    )
+                }
+                if (expandedSection == SettingsSection.TWITTER) {
+                    item {
+                        TwitterCookiesSettingsPanel(
+                            present = twitterCookiesUiState.present,
+                            lastRefreshedAt = twitterCookiesUiState.lastRefreshedAt,
+                            actionMessage = twitterCookiesUiState.actionMessage,
+                            onSignIn = onNavigateToTwitterCookieCapture,
+                            onImport = { twitterCookiesFilePicker.launch(arrayOf("*/*")) },
+                            onClear = { showClearTwitterCookiesDialog = true }
+                        )
+                    }
+                }
+
+                item {
+                    SettingsRow(
                         icon = Icons.Default.Description,
                         title = "Logs",
                         subtitle = "Application logs, yt-dlp terminal output, Debug info",
@@ -341,6 +379,18 @@ fun SettingsScreen(
             onConfirm = {
                 showClearInstagramCookiesDialog = false
                 viewModel.clearInstagramCookies()
+            }
+        )
+    }
+
+    if (showClearTwitterCookiesDialog) {
+        ClearCookiesConfirmDialog(
+            title = "Clear X cookies?",
+            text = "Protected and follow-gated content will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
+            onDismiss = { showClearTwitterCookiesDialog = false },
+            onConfirm = {
+                showClearTwitterCookiesDialog = false
+                viewModel.clearTwitterCookies()
             }
         )
     }
@@ -639,6 +689,99 @@ private fun InstagramCookiesSettingsPanel(
             )
         ) {
             Text(if (present) "Sign in again" else "Sign in with Instagram")
+        }
+
+        OutlinedButton(
+            onClick = onImport,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text("Import cookies.txt")
+        }
+
+        if (present) {
+            TextButton(
+                onClick = onClear,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Clear cookies",
+                    color = SocialDLAccent
+                )
+            }
+        }
+
+        actionMessage?.let {
+            Text(
+                text = it,
+                style = MaterialTheme.typography.bodySmall,
+                color = SocialDLOnSurfaceVariant
+            )
+        }
+    }
+}
+
+/** Phase 6: X cookies are a Netscape jar consumed by the gallery-dl twitter engine. */
+@Composable
+private fun TwitterCookiesSettingsPanel(
+    present: Boolean,
+    lastRefreshedAt: Long?,
+    actionMessage: String?,
+    onSignIn: () -> Unit,
+    onImport: () -> Unit,
+    onClear: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(SocialDLBg)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = when {
+                present && lastRefreshedAt != null ->
+                    "Signed in · refreshed ${relativeCookieAge(lastRefreshedAt)}"
+                present -> "Signed in"
+                else -> "Not signed in"
+            },
+            style = MaterialTheme.typography.titleSmall,
+            color = SocialDLOnSurface
+        )
+        Text(
+            text = if (present) {
+                "These cookies keep gallery-dl signed in for protected or follow-gated media. The jar is encrypted at rest."
+            } else {
+                "Sign in once with the WebView, or import a browser-exported cookies.txt. Encrypted at rest."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = SocialDLOnSurfaceVariant
+        )
+
+        if (!present) {
+            // X occasionally rate-limits logins ("temporarily limited your login").
+            // The import path is the escape hatch, so mention it instead of letting
+            // users retry a wall.
+            Text(
+                text = "If sign-in is ever refused with \"temporarily limited your login\", " +
+                    "wait a few minutes and retry, or log in at x.com in a browser, export " +
+                    "cookies.txt, and import it below.",
+                style = MaterialTheme.typography.bodySmall,
+                color = SocialDLOnSurfaceVariant
+            )
+        }
+
+        Button(
+            onClick = onSignIn,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = SocialDLAccent,
+                contentColor = SocialDLOnSurface
+            )
+        ) {
+            Text(if (present) "Sign in again" else "Sign in with X")
         }
 
         OutlinedButton(

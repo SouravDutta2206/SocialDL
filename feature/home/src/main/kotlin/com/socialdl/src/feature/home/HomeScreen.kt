@@ -71,6 +71,7 @@ fun HomeScreen(
     onNavigateToSettings: () -> Unit,
     onSignInWithYouTube: () -> Unit = {},
     onSignInWithInstagram: () -> Unit = {},
+    onSignInWithTwitter: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
@@ -168,10 +169,10 @@ fun HomeScreen(
             uiState.authWallPlatform?.let { platform ->
                 AuthWallSignInCard(
                     platform = platform,
-                    onSignIn = if (platform == Platform.INSTAGRAM) {
-                        onSignInWithInstagram
-                    } else {
-                        onSignInWithYouTube
+                    onSignIn = when (platform) {
+                        Platform.INSTAGRAM -> onSignInWithInstagram
+                        Platform.TWITTER -> onSignInWithTwitter
+                        else -> onSignInWithYouTube
                     }
                 )
             }
@@ -378,7 +379,24 @@ private fun AuthWallSignInCard(
     platform: Platform,
     onSignIn: () -> Unit,
 ) {
-    val isInstagram = platform == Platform.INSTAGRAM
+    val title = when (platform) {
+        Platform.INSTAGRAM -> "Instagram needs you signed in"
+        Platform.TWITTER -> "X needs you signed in"
+        else -> "YouTube needs you signed in"
+    }
+    val explanation = when (platform) {
+        Platform.INSTAGRAM ->
+            "Private posts and reels need a signed-in session. Sign in once with Instagram, then this post is retried automatically."
+        Platform.TWITTER ->
+            "Protected or follow-gated posts need a signed-in session. Sign in once with X, then this post is retried automatically."
+        else ->
+            "Age-restricted and bot-checked videos need a signed-in session. Sign in once with YouTube, then this video is retried automatically."
+    }
+    val action = when (platform) {
+        Platform.INSTAGRAM -> "Sign in with Instagram"
+        Platform.TWITTER -> "Sign in with X"
+        else -> "Sign in with YouTube"
+    }
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = SocialDLBg,
@@ -390,20 +408,12 @@ private fun AuthWallSignInCard(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = if (isInstagram) {
-                    "Instagram needs you signed in"
-                } else {
-                    "YouTube needs you signed in"
-                },
+                text = title,
                 style = MaterialTheme.typography.titleSmall,
                 color = SocialDLOnSurface
             )
             Text(
-                text = if (isInstagram) {
-                    "Private posts and reels need a signed-in session. Sign in once with Instagram, then this post is retried automatically."
-                } else {
-                    "Age-restricted and bot-checked videos need a signed-in session. Sign in once with YouTube, then this video is retried automatically."
-                },
+                text = explanation,
                 style = MaterialTheme.typography.bodySmall,
                 color = SocialDLOnSurfaceVariant
             )
@@ -415,7 +425,7 @@ private fun AuthWallSignInCard(
                     contentColor = Color.White
                 )
             ) {
-                Text(if (isInstagram) "Sign in with Instagram" else "Sign in with YouTube")
+                Text(action)
             }
         }
     }

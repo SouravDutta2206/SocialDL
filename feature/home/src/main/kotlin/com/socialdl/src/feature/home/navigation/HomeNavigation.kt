@@ -14,11 +14,12 @@ fun NavGraphBuilder.homeScreen(
     onNavigateToSettings: () -> Unit,
     onNavigateToSignInYouTube: () -> Unit = {},
     onNavigateToSignInInstagram: () -> Unit = {},
+    onNavigateToSignInTwitter: () -> Unit = {},
 ) {
     composable(route = HOME_ROUTE) { backStackEntry ->
         val viewModel: HomeViewModel = hiltViewModel()
 
-        // §2.6 recapture flow: when either cookie-capture screen (launched from
+        // §2.6 recapture flow: when any cookie-capture screen (launched from
         // the auth-wall card) pops itself off, it leaves its result on this entry's
         // SavedStateHandle. A success here auto-retries the URL that hit the wall.
         LaunchedEffect(backStackEntry.id) {
@@ -31,6 +32,7 @@ fun NavGraphBuilder.homeScreen(
             onNavigateToSettings = onNavigateToSettings,
             onSignInWithYouTube = onNavigateToSignInYouTube,
             onSignInWithInstagram = onNavigateToSignInInstagram,
+            onSignInWithTwitter = onNavigateToSignInTwitter,
             viewModel = viewModel
         )
     }

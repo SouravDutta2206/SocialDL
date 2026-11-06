@@ -9,6 +9,7 @@ import com.socialdl.src.core.model.Platform
 
 const val COOKIE_CAPTURE_ROUTE = "cookie_capture_route"
 const val INSTAGRAM_COOKIE_CAPTURE_ROUTE = "instagram_cookie_capture_route"
+const val TWITTER_COOKIE_CAPTURE_ROUTE = "twitter_cookie_capture_route"
 
 /**
  * SavedStateHandle key the capture screen uses to hand `success: Boolean` back to
@@ -22,6 +23,10 @@ fun NavController.navigateToCookieCapture(navOptions: NavOptions? = null) {
 
 fun NavController.navigateToInstagramCookieCapture(navOptions: NavOptions? = null) {
     navigate(INSTAGRAM_COOKIE_CAPTURE_ROUTE, navOptions)
+}
+
+fun NavController.navigateToTwitterCookieCapture(navOptions: NavOptions? = null) {
+    navigate(TWITTER_COOKIE_CAPTURE_ROUTE, navOptions)
 }
 
 /**
@@ -43,6 +48,16 @@ fun NavGraphBuilder.instagramCookieCaptureScreen(navController: NavController) {
     composable(route = INSTAGRAM_COOKIE_CAPTURE_ROUTE) {
         CookieCaptureScreen(
             platform = Platform.INSTAGRAM,
+            onResult = { success -> publishResult(navController, success) }
+        )
+    }
+}
+
+/** X's capture route — same screen, gallery-dl cookie format (Phase 6). */
+fun NavGraphBuilder.twitterCookieCaptureScreen(navController: NavController) {
+    composable(route = TWITTER_COOKIE_CAPTURE_ROUTE) {
+        CookieCaptureScreen(
+            platform = Platform.TWITTER,
             onResult = { success -> publishResult(navController, success) }
         )
     }

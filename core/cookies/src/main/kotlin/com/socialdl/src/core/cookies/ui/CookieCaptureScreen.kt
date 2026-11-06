@@ -211,13 +211,24 @@ private fun CaptureWebView(
                     // legacy "Version/4.0 " prefix give the WebView away. Strip both so
                     // the WebView is indistinguishable from the device's own Chrome —
                     // this keeps accounts.google.com reachable mid sign-in flow (§2.6).
+                    //
+                    // EXCEPTION (presentDefaultUserAgent): overriding the UA at all makes
+                    // WebView stop emitting User-Agent client hints (Sec-CH-UA /
+                    // navigator.userAgentData) — see CookieCaptureConfig. Platforms that
+                    // risk-control logins treat "Chrome-like UA with no client hints" as
+                    // anomalous, so those flows keep the untouched default UA instead.
                     val defaultUa = settings.userAgentString
                     val cleanDeviceUa = defaultUa
                         .replace("Version/4.0 ", "")
                         .replace("; wv)", ")")
-                    val captureUa = config.userAgentOverride
-                        ?: cleanDeviceUa.ifBlank { config.userAgent ?: defaultUa }
-                    settings.userAgentString = captureUa
+                    if (!config.presentDefaultUserAgent) {
+                        settings.userAgentString = config.userAgentOverride
+                            ?: cleanDeviceUa.ifBlank { config.userAgent ?: defaultUa }
+                    }
+                    Logger.i(
+                        TAG,
+                        "Capture UA (${config.platform.name}): ${settings.userAgentString}"
+                    )
                     val cookieManager = CookieManager.getInstance()
                     cookieManager.setAcceptCookie(true)
                     cookieManager.setAcceptThirdPartyCookies(this, true)

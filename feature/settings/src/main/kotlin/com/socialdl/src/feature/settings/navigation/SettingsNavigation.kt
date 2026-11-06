@@ -16,6 +16,7 @@ fun NavGraphBuilder.settingsScreen(
     onNavigateBack: () -> Unit,
     onNavigateToCookieCapture: () -> Unit = {},
     onNavigateToInstagramCookieCapture: () -> Unit = {},
+    onNavigateToTwitterCookieCapture: () -> Unit = {},
     appVersion: String = ""
 ) {
     composable(route = SETTINGS_ROUTE) {
@@ -23,6 +24,7 @@ fun NavGraphBuilder.settingsScreen(
             onNavigateBack = onNavigateBack,
             onNavigateToCookieCapture = onNavigateToCookieCapture,
             onNavigateToInstagramCookieCapture = onNavigateToInstagramCookieCapture,
+            onNavigateToTwitterCookieCapture = onNavigateToTwitterCookieCapture,
             appVersion = appVersion
         )
     }
