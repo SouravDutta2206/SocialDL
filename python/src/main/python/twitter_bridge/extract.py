@@ -24,6 +24,11 @@ Payload shape consumed by ``TwitterExtractor``::
 
 ``media_type`` is ``image`` | ``video`` | ``animated_gif``; ``variants`` is
 non-empty only for video / animated_gif and is sorted highest-quality-first.
+
+Under gallery-dl, videocard ``thumbnail_url`` comes from that entity's poster
+preview (emitted right after the media file when ``previews`` is on); the
+syndication engine fills it straight from ``media_url_https``. Without either,
+the field is ``None`` and no video URL is ever used as a stand-in thumbnail.
 """
 
 import re
@@ -226,6 +231,21 @@ def _via_gallery_dl(url, cookiefile, user_agent):
         if not media_url:
             continue
         media_type = _gdl_media_type(meta, media_url)
+
+        # gallery-dl (with previews on) emits each video/gif entity as the
+        # media file followed by its poster preview (``type == "preview"``).
+        # Pair the poster with the most recent video/gif card still missing
+        # one; a preview is never its own downloadable card. The break keeps
+        # an unpaired preview from leaking a poster across entity groups.
+        if meta.get("type") == "preview":
+            for existing in reversed(items):
+                if existing["media_type"] not in ("video", "animated_gif"):
+                    break
+                if existing["thumbnail_url"] is None:
+                    existing["thumbnail_url"] = media_url
+                    break
+            continue
+
         item = {
             "index": len(items) + 1,
             "media_type": media_type,
@@ -264,9 +284,13 @@ def _configure_gallery_dl(cookiefile, user_agent):
 
     # Pin the media selection explicitly (gallery-dl 1.32.19 defaults are the
     # same, but pinning keeps a future upgrade from silently changing payloads):
-    # video files on, poster previews off — the app downloads the media itself.
+    # video files on, AND poster previews on. Without ``previews`` gallery-dl
+    # emits no poster at all for video/gif entities (their per-file metadata
+    # never carries ``media_url_https``), which used to leave every videocard
+    # without a thumbnail. The app still downloads media-only: ``_via_gallery_dl``
+    # pairs each preview with the preceding video card instead of emitting it.
     gd_config.set(("extractor", "twitter"), "videos", True)
-    gd_config.set(("extractor", "twitter"), "previews", False)
+    gd_config.set(("extractor", "twitter"), "previews", True)
 
 
 def _gdl_media_type(meta, media_url):

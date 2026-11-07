@@ -20,7 +20,10 @@ import kotlin.math.roundToInt
  * - animated GIFs are mp4 loops: mapped as [FormatKind.VIDEO] labelled "GIF
  *   (MP4)" rather than a new format kind (spec Phase 6 — identical download
  *   mechanics);
- * - containers follow the CDN URL (jpg/webp/png/mp4) instead of hardcoding.
+ * - containers follow the CDN URL (jpg/webp/png/mp4) instead of hardcoding;
+ * - thumbnails only ever come from the bridge poster (or the CDN URL of an
+ *   image card) — a video card without a poster stays thumb-less instead of
+ *   showing an undecodable mp4 as a "thumbnail".
  */
 internal suspend fun mapTwitterItems(
     dto: TwitterResponseDto,
@@ -37,9 +40,13 @@ internal suspend fun mapTwitterItems(
         val mediaType = item.media_type.orEmpty().lowercase()
         val isGif = mediaType == "animated_gif"
         val isVideo = mediaType == "video"
+        // Video/GIF CDN URLs are mp4 payloads AsyncImage cannot decode — using
+        // one as a fallback renders a permanently black card. Only true image
+        // cards may fall back to their own CDN URL (it is a real image).
+        val isVideoKind = isVideo || isGif
         val thumbnailUrl = storeThumbnail(item.thumbnail_url)
             ?: item.thumbnail_url
-            ?: directUrl
+            ?: if (!isVideoKind) directUrl else null
         val carouselIndex = if (isCarousel) item.index.takeIf { it > 0 } else null
 
         if (isVideo || isGif) {
