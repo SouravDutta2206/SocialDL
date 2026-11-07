@@ -41,12 +41,148 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
+import androidx.navigation.NavController
+import androidx.navigation.NavGraphBuilder
+import androidx.navigation.NavOptions
+import androidx.navigation.NavType
+import androidx.navigation.compose.composable
+import androidx.navigation.navArgument
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.cookies.CaptureHostPolicy
 import com.socialdl.src.core.cookies.CaptureOutcome
 import com.socialdl.src.core.cookies.CookieCaptureConfig
+import com.socialdl.src.core.cookies.CookieCaptureController
+import com.socialdl.src.core.cookies.cookieCaptureConfig
 import com.socialdl.src.core.model.Platform
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+// ============================ ViewModel ============================
+
+
+/**
+ * Drives the full-screen WebView cookie capture (§2.6): resolves the probed-UA
+ * config once, auto-detects login completion from `onPageFinished`, and handles
+ * the manual "I'm signed in" + Cancel fallbacks.
+ */
+@HiltViewModel
+class CookieCaptureViewModel @Inject constructor(
+    private val controller: CookieCaptureController,
+) : ViewModel() {
+
+    data class CaptureUiState(
+        val config: CookieCaptureConfig? = null,
+        /** True from manual/auto harvest start until the outcome lands. */
+        val busy: Boolean = false,
+        /** One-shot success; the screen acknowledges it, then routes back. */
+        val result: CaptureOutcome? = null,
+        /**
+         * Non-terminal feedback shown above the WebView. Used when the harvest
+         * found no signed-in session or failed — the screen stays open so the
+         * user can finish the redirect / retry instead of being popped back
+         * silently to a "Not signed in" row.
+         */
+        val message: String? = null,
+        /** True when the user hit Cancel. */
+        val cancelled: Boolean = false,
+    )
+
+    private val _uiState = MutableStateFlow(CaptureUiState())
+    val uiState: StateFlow<CaptureUiState> = _uiState.asStateFlow()
+
+    private var lastPageUrl: String? = null
+
+    private var initializedFor: Platform? = null
+
+    /** Resolves the flow config once per platform (the route dictates the platform). */
+    fun initialize(platform: Platform) {
+        if (initializedFor == platform) return
+        initializedFor = platform
+        viewModelScope.launch {
+            runCatching { controller.config(platform) }
+                .onSuccess { config ->
+                    _uiState.update { it.copy(config = config) }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(
+                            message = error.message
+                                ?: "Cookie sign-in is not available for this platform"
+                        )
+                    }
+                }
+        }
+    }
+
+    /** Tracks the most recent URL for the manual fallback path. */
+    fun onPageFinished(url: String?) {
+        lastPageUrl = url
+        val config = _uiState.value.config ?: return
+        val current = _uiState.value
+        if (current.busy || current.result != null || current.cancelled) return
+
+        if (url != null && controller.isLoginComplete(config, url)) {
+            harvest()
+        }
+    }
+
+    fun onManualSignInClicked() {
+        if (_uiState.value.busy || _uiState.value.result != null) return
+        harvest(manual = true)
+    }
+
+    fun onCancelClicked() {
+        _uiState.update { it.copy(cancelled = true) }
+    }
+
+    fun acknowledgeResult() {
+        _uiState.update { it.copy(result = null) }
+    }
+
+    /** Clears the transient message once the user has seen it. */
+    fun dismissMessage() {
+        _uiState.update { it.copy(message = null) }
+    }
+
+    private fun harvest(manual: Boolean = false) {
+        val config = _uiState.value.config ?: return
+        viewModelScope.launch {
+            _uiState.update { it.copy(busy = true, message = null) }
+            val outcome = if (manual) {
+                val url = lastPageUrl
+                controller.manualCapture(config, url)
+            } else {
+                controller.harvestAndStore(config)
+            }
+            when (outcome) {
+                is CaptureOutcome.Success ->
+                    _uiState.update { it.copy(busy = false, result = outcome) }
+                CaptureOutcome.NotSignedIn ->
+                    _uiState.update {
+                        it.copy(
+                            busy = false,
+                            message = "Not signed in yet. Finish the sign-in above " +
+                                "(including any 2FA redirect back to the site), then tap ✓."
+                        )
+                    }
+                is CaptureOutcome.Failure ->
+                    _uiState.update { it.copy(busy = false, message = outcome.message) }
+            }
+        }
+    }
+}
+
+
+// ============================ Screen ============================
+
 
 private const val TAG = "CookieCapture"
 
@@ -206,25 +342,11 @@ private fun CaptureWebView(
                     )
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    // Google blocks embedded WebViews ("This browser or app may not be
-                    // secure") by fingerprinting the UA: the "; wv)" marker and the
-                    // legacy "Version/4.0 " prefix give the WebView away. Strip both so
-                    // the WebView is indistinguishable from the device's own Chrome —
-                    // this keeps accounts.google.com reachable mid sign-in flow (§2.6).
-                    //
-                    // EXCEPTION (presentDefaultUserAgent): overriding the UA at all makes
-                    // WebView stop emitting User-Agent client hints (Sec-CH-UA /
-                    // navigator.userAgentData) — see CookieCaptureConfig. Platforms that
-                    // risk-control logins treat "Chrome-like UA with no client hints" as
-                    // anomalous, so those flows keep the untouched default UA instead.
-                    val defaultUa = settings.userAgentString
-                    val cleanDeviceUa = defaultUa
-                        .replace("Version/4.0 ", "")
-                        .replace("; wv)", ")")
-                    if (!config.presentDefaultUserAgent) {
-                        settings.userAgentString = config.userAgentOverride
-                            ?: cleanDeviceUa.ifBlank { config.userAgent ?: defaultUa }
-                    }
+                    // The UA is deliberately never overridden (§2.6). Overriding makes
+                    // WebView suppress its User-Agent client hints, and "browser-like UA
+                    // with no Sec-CH-UA" is a fingerprint platforms risk-control (X
+                    // refused logins until the override was removed). Logged for
+                    // diagnostics — it is what identified the problem.
                     Logger.i(
                         TAG,
                         "Capture UA (${config.platform.name}): ${settings.userAgentString}"
@@ -410,3 +532,55 @@ private fun openPopupInPlace(
 }
 
 private val HTTP_SCHEMES = setOf("http", "https")
+
+
+// ============================ Navigation ============================
+
+/**
+ * One capture route for every platform (§2.6): the platform travels as a path
+ * argument, so adding a capturable platform needs no new route, navigation helper or
+ * graph registration — only a `CookieCaptureConfig`.
+ */
+const val COOKIE_CAPTURE_ROUTE = "cookie_capture_route/{platform}"
+
+private const val ARG_PLATFORM = "platform"
+
+/**
+ * SavedStateHandle key the capture screen uses to hand `success: Boolean` back to
+ * the destination it was launched from (§2.6 recapture flow; §2.7 settings screen).
+ */
+const val COOKIE_CAPTURE_RESULT_KEY = "cookie_capture_result"
+
+fun NavController.navigateToCookieCapture(
+    platform: Platform,
+    navOptions: NavOptions? = null,
+) {
+    navigate("cookie_capture_route/${platform.name}", navOptions)
+}
+
+/**
+ * Registers the full-screen capture route. On completing/cancelling, the result is
+ * written to the previous back stack entry's SavedStateHandle and the capture screen
+ * pops itself off.
+ */
+fun NavGraphBuilder.cookieCaptureScreen(navController: NavController) {
+    composable(
+        route = COOKIE_CAPTURE_ROUTE,
+        arguments = listOf(navArgument(ARG_PLATFORM) { type = NavType.StringType })
+    ) { entry ->
+        val platform = runCatching {
+            Platform.valueOf(entry.arguments?.getString(ARG_PLATFORM).orEmpty())
+        }.getOrDefault(Platform.UNKNOWN)
+        CookieCaptureScreen(
+            platform = platform,
+            onResult = { success -> publishResult(navController, success) }
+        )
+    }
+}
+
+private fun publishResult(navController: NavController, success: Boolean) {
+    navController.previousBackStackEntry
+        ?.savedStateHandle
+        ?.set(COOKIE_CAPTURE_RESULT_KEY, success)
+    navController.popBackStack()
+}

@@ -1,10 +1,11 @@
 package com.socialdl.src.extraction.instagram
 
+import android.content.Context
+import android.webkit.WebSettings
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.ThumbnailCache
 import com.socialdl.src.core.common.util.ensureHttps
 import com.socialdl.src.core.cookies.CookieStore
-import com.socialdl.src.core.cookies.InstagramCookieCapture
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.python.PythonEngine
 import com.socialdl.src.core.python.PythonExecutionException
@@ -21,6 +22,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.decodeFromJsonElement
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -55,9 +57,15 @@ class InstagramExtractor @Inject constructor(
     private val pythonEngine: PythonEngine,
     private val cookieStore: CookieStore,
     private val thumbnailCache: ThumbnailCache,
+    @ApplicationContext private val context: Context,
 ) : MediaExtractor {
 
     private val tag = "InstagramExtractor"
+
+    /** Only used if the platform API returns nothing (engine hot-swap window). */
+    private val FALLBACK_USER_AGENT: String
+        get() = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -81,22 +89,28 @@ class InstagramExtractor @Inject constructor(
             return ExtractionResult.Error(ExtractionError.UnsupportedUrl(url))
         }
 
-        Logger.d(tag, "Extracting Instagram metadata for $normalizedUrl (cookies=${cookieStore.hasCookies(Platform.INSTAGRAM)})")
+        Logger.d(tag, "Extracting Instagram metadata for $normalizedUrl (cookies=${cookieStore.jarState(Platform.INSTAGRAM) != null})")
 
         return try {
             // Hybrid engine routing (Oct 2026):
             // - cookies captured → gallery-dl (works for public + private content)
             // - no cookies → anonymous Instaloader fallback; a failure surfaces the
             //   normal typed error (auth wall / rate limited / unavailable).
-            val hasCookies = cookieStore.hasCookies(Platform.INSTAGRAM)
+            val hasCookies = cookieStore.jarState(Platform.INSTAGRAM) != null
             val envelope = if (hasCookies) {
+                // gallery-dl must present the same UA the capture WebView used, or a
+                // UA-bound session looks logged out. Capture never overrides the UA
+                // (§2.6), so the engine default *is* what the capture screen sent.
+                val captureUserAgent = runCatching {
+                    WebSettings.getDefaultUserAgent(context)
+                }.getOrNull()?.takeIf { it.isNotBlank() } ?: FALLBACK_USER_AGENT
                 cookieStore.withCookieFile(Platform.INSTAGRAM) { cookiePath ->
                     val rawJson = pythonEngine.run(
                         module = "gallery_dl_bridge.extract",
                         function = "extract",
                         normalizedUrl,
                         cookiePath,
-                        InstagramCookieCapture.USER_AGENT
+                        captureUserAgent
                     ) { it }
                     decodeEnvelope(rawJson)
                 }

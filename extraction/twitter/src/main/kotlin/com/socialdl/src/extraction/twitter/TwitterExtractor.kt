@@ -105,7 +105,7 @@ class TwitterExtractor @Inject constructor(
         Logger.d(
             tag,
             "Extracting X metadata for $normalizedUrl " +
-                "(cookies=${cookieStore.hasCookies(Platform.TWITTER)})"
+                "(cookies=${cookieStore.jarState(Platform.TWITTER) != null})"
         )
 
         return try {

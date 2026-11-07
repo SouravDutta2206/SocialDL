@@ -69,9 +69,7 @@ import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 @Composable
 fun HomeScreen(
     onNavigateToSettings: () -> Unit,
-    onSignInWithYouTube: () -> Unit = {},
-    onSignInWithInstagram: () -> Unit = {},
-    onSignInWithTwitter: () -> Unit = {},
+    onSignIn: (Platform) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
@@ -169,11 +167,7 @@ fun HomeScreen(
             uiState.authWallPlatform?.let { platform ->
                 AuthWallSignInCard(
                     platform = platform,
-                    onSignIn = when (platform) {
-                        Platform.INSTAGRAM -> onSignInWithInstagram
-                        Platform.TWITTER -> onSignInWithTwitter
-                        else -> onSignInWithYouTube
-                    }
+                    onSignIn = { onSignIn(platform) }
                 )
             }
 

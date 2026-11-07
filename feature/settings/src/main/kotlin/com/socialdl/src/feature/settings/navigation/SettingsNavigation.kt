@@ -4,6 +4,7 @@ import androidx.navigation.NavController
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavOptions
 import androidx.navigation.compose.composable
+import com.socialdl.src.core.model.Platform
 import com.socialdl.src.feature.settings.SettingsScreen
 
 const val SETTINGS_ROUTE = "settings_route"
@@ -14,17 +15,13 @@ fun NavController.navigateToSettings(navOptions: NavOptions? = null) {
 
 fun NavGraphBuilder.settingsScreen(
     onNavigateBack: () -> Unit,
-    onNavigateToCookieCapture: () -> Unit = {},
-    onNavigateToInstagramCookieCapture: () -> Unit = {},
-    onNavigateToTwitterCookieCapture: () -> Unit = {},
+    onSignIn: (Platform) -> Unit,
     appVersion: String = ""
 ) {
     composable(route = SETTINGS_ROUTE) {
         SettingsScreen(
             onNavigateBack = onNavigateBack,
-            onNavigateToCookieCapture = onNavigateToCookieCapture,
-            onNavigateToInstagramCookieCapture = onNavigateToInstagramCookieCapture,
-            onNavigateToTwitterCookieCapture = onNavigateToTwitterCookieCapture,
+            onSignIn = onSignIn,
             appVersion = appVersion
         )
     }

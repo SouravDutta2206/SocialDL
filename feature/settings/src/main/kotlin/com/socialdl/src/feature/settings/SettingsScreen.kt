@@ -43,6 +43,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -55,63 +56,97 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.ui.theme.SocialDLAccent
 import com.socialdl.src.core.ui.theme.SocialDLBg
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 
 /** Which SettingsRow section is currently expanded (null = none). */
-private enum class SettingsSection { GENERAL, FOLDERS, COOKIES, INSTAGRAM, TWITTER, LOGS, ABOUT }
+private enum class SettingsSection { GENERAL, FOLDERS, LOGS, ABOUT }
+
+/** Display metadata for one platform's cookie section (panel + clear confirmation). */
+private data class CookieSection(
+    val platform: Platform,
+    val icon: ImageVector,
+    val title: String,
+    val subtitle: String,
+    /** Brand alone, for the "Sign in with …" button. */
+    val signInLabel: String,
+    val clearTitle: String,
+    val clearText: String,
+    /** Extra guidance shown while signed out; null when the platform needs none. */
+    val signedOutHint: String? = null,
+)
+
+private val COOKIE_SECTIONS = listOf(
+    CookieSection(
+        platform = Platform.YOUTUBE,
+        icon = Icons.Default.Cookie,
+        title = "YouTube cookies",
+        subtitle = "Sign in with WebView, Import cookies.txt, Member access",
+        signInLabel = "YouTube",
+        clearTitle = "Clear YouTube cookies?",
+        clearText = "Age-restricted and member-only downloads will stop working until you sign in again. Encrypted cookies are deleted from this device.",
+    ),
+    CookieSection(
+        platform = Platform.INSTAGRAM,
+        icon = Icons.Default.AccountCircle,
+        title = "Instagram cookies",
+        subtitle = "Sign in with WebView, Private posts and reels",
+        signInLabel = "Instagram",
+        clearTitle = "Clear Instagram cookies?",
+        clearText = "Private posts and reels will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
+    ),
+    CookieSection(
+        platform = Platform.TWITTER,
+        icon = Icons.Default.Tag,
+        title = "X (Twitter) cookies",
+        subtitle = "Sign in with WebView, Protected posts, Import cookies.txt",
+        signInLabel = "X",
+        clearTitle = "Clear X cookies?",
+        clearText = "Protected and follow-gated content will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
+        signedOutHint = "If sign-in is ever refused with \"temporarily limited your login\", " +
+            "wait a few minutes and retry, or log in at x.com in a browser, export " +
+            "cookies.txt, and import it below.",
+    ),
+)
 
 @Composable
 fun SettingsScreen(
     onNavigateBack: () -> Unit,
-    onNavigateToCookieCapture: () -> Unit = {},
-    onNavigateToInstagramCookieCapture: () -> Unit = {},
-    onNavigateToTwitterCookieCapture: () -> Unit = {},
+    onSignIn: (Platform) -> Unit = {},
     appVersion: String = "",
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val cookiesUiState by viewModel.cookiesUiState.collectAsStateWithLifecycle()
-    val instagramCookiesUiState by viewModel.instagramCookiesUiState.collectAsStateWithLifecycle()
-    val twitterCookiesUiState by viewModel.twitterCookiesUiState.collectAsStateWithLifecycle()
+    val cookieStates by viewModel.cookieStates.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     var expandedSection by remember { mutableStateOf<SettingsSection?>(null) }
-    var showClearCookiesDialog by remember { mutableStateOf(false) }
-    var showClearInstagramCookiesDialog by remember { mutableStateOf(false) }
-    var showClearTwitterCookiesDialog by remember { mutableStateOf(false) }
+    var expandedCookie by remember { mutableStateOf<Platform?>(null) }
+    var pendingClear by remember { mutableStateOf<Platform?>(null) }
+    var importTarget by remember { mutableStateOf<Platform?>(null) }
 
-    // No manual cookie refresh needed: a capture round-trip bumps the
-    // LAST_REFRESHED DataStore key, which re-evaluates cookiesUiState
-    // automatically on the IO dispatcher.
+    // Jar state is file-stamp based (no watcher), so the panels re-stat whenever the
+    // screen re-enters composition — including the pop-back from a capture round-trip.
+    LaunchedEffect(Unit) { viewModel.refreshCookieStates() }
 
-    // Manual cookies.txt import picker (§2.6 fallback)
+    // One cookies.txt picker for every platform (§2.6 fallback); the platform that
+    // launched it is remembered until the result arrives.
     val cookiesFilePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
-        uri?.let(viewModel::importCookies)
-    }
-
-    // Manual cookies.txt import fallback for gallery-dl.
-    val instagramCookiesFilePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let(viewModel::importInstagramCookies)
-    }
-
-    // Manual cookies.txt import fallback for the X/Twitter gallery-dl engine.
-    val twitterCookiesFilePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let(viewModel::importTwitterCookies)
+        val platform = importTarget
+        importTarget = null
+        if (uri != null && platform != null) viewModel.importCookies(platform, uri)
     }
 
     // Back collapses the expanded panel first.
-    BackHandler(enabled = expandedSection != null) {
+    BackHandler(enabled = expandedSection != null || expandedCookie != null) {
         expandedSection = null
+        expandedCookie = null
     }
 
     // SAF folder pickers; picked tree URIs are persisted in prefs (storage only —
@@ -234,84 +269,37 @@ fun SettingsScreen(
                     }
                 }
 
-                item {
-                    SettingsRow(
-                        icon = Icons.Default.Cookie,
-                        title = "YouTube cookies",
-                        subtitle = "Sign in with WebView, Import cookies.txt, Member access",
-                        expanded = expandedSection == SettingsSection.COOKIES,
-                        onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            expandedSection =
-                                if (expandedSection == SettingsSection.COOKIES) null
-                                else SettingsSection.COOKIES
-                        }
-                    )
-                }
-                if (expandedSection == SettingsSection.COOKIES) {
-                    item {
-                        CookiesSettingsPanel(
-                            present = cookiesUiState.present,
-                            lastRefreshedAt = cookiesUiState.lastRefreshedAt,
-                            actionMessage = cookiesUiState.actionMessage,
-                            onSignIn = onNavigateToCookieCapture,
-                            onImport = { cookiesFilePicker.launch(arrayOf("*/*")) },
-                            onClear = { showClearCookiesDialog = true }
+                // One row + panel per capturable platform (§2.6). Adding a platform is
+                // one entry in COOKIE_SECTIONS, not another copy of this block.
+                COOKIE_SECTIONS.forEach { section ->
+                    val state = cookieStates[section.platform] ?: SettingsViewModel.CookiesUiState()
+                    item(key = "cookie_${section.platform}") {
+                        SettingsRow(
+                            icon = section.icon,
+                            title = section.title,
+                            subtitle = section.subtitle,
+                            expanded = expandedCookie == section.platform,
+                            onClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                expandedSection = null
+                                expandedCookie =
+                                    if (expandedCookie == section.platform) null else section.platform
+                            }
                         )
                     }
-                }
-
-                item {
-                    SettingsRow(
-                        icon = Icons.Default.AccountCircle,
-                        title = "Instagram cookies",
-                        subtitle = "Sign in with WebView, Private posts and reels",
-                        expanded = expandedSection == SettingsSection.INSTAGRAM,
-                        onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            expandedSection =
-                                if (expandedSection == SettingsSection.INSTAGRAM) null
-                                else SettingsSection.INSTAGRAM
+                    if (expandedCookie == section.platform) {
+                        item(key = "cookie_panel_${section.platform}") {
+                            CookiesSettingsPanel(
+                                section = section,
+                                state = state,
+                                onSignIn = { onSignIn(section.platform) },
+                                onImport = {
+                                    importTarget = section.platform
+                                    cookiesFilePicker.launch(arrayOf("*/*"))
+                                },
+                                onClear = { pendingClear = section.platform }
+                            )
                         }
-                    )
-                }
-                if (expandedSection == SettingsSection.INSTAGRAM) {
-                    item {
-                        InstagramCookiesSettingsPanel(
-                            present = instagramCookiesUiState.present,
-                            lastRefreshedAt = instagramCookiesUiState.lastRefreshedAt,
-                            actionMessage = instagramCookiesUiState.actionMessage,
-                            onSignIn = onNavigateToInstagramCookieCapture,
-                            onImport = { instagramCookiesFilePicker.launch(arrayOf("*/*")) },
-                            onClear = { showClearInstagramCookiesDialog = true }
-                        )
-                    }
-                }
-
-                item {
-                    SettingsRow(
-                        icon = Icons.Default.Tag,
-                        title = "X (Twitter) cookies",
-                        subtitle = "Sign in with WebView, Protected posts, Import cookies.txt",
-                        expanded = expandedSection == SettingsSection.TWITTER,
-                        onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            expandedSection =
-                                if (expandedSection == SettingsSection.TWITTER) null
-                                else SettingsSection.TWITTER
-                        }
-                    )
-                }
-                if (expandedSection == SettingsSection.TWITTER) {
-                    item {
-                        TwitterCookiesSettingsPanel(
-                            present = twitterCookiesUiState.present,
-                            lastRefreshedAt = twitterCookiesUiState.lastRefreshedAt,
-                            actionMessage = twitterCookiesUiState.actionMessage,
-                            onSignIn = onNavigateToTwitterCookieCapture,
-                            onImport = { twitterCookiesFilePicker.launch(arrayOf("*/*")) },
-                            onClear = { showClearTwitterCookiesDialog = true }
-                        )
                     }
                 }
 
@@ -359,38 +347,15 @@ fun SettingsScreen(
     }
 
     // §2.6: Clear cookies is a destructive action — confirmation dialog first.
-    if (showClearCookiesDialog) {
+    pendingClear?.let { platform ->
+        val section = COOKIE_SECTIONS.first { it.platform == platform }
         ClearCookiesConfirmDialog(
-            title = "Clear YouTube cookies?",
-            text = "Age-restricted and member-only downloads will stop working until you sign in again. Encrypted cookies are deleted from this device.",
-            onDismiss = { showClearCookiesDialog = false },
+            title = section.clearTitle,
+            text = section.clearText,
+            onDismiss = { pendingClear = null },
             onConfirm = {
-                showClearCookiesDialog = false
-                viewModel.clearCookies()
-            }
-        )
-    }
-
-    if (showClearInstagramCookiesDialog) {
-        ClearCookiesConfirmDialog(
-            title = "Clear Instagram cookies?",
-            text = "Private posts and reels will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
-            onDismiss = { showClearInstagramCookiesDialog = false },
-            onConfirm = {
-                showClearInstagramCookiesDialog = false
-                viewModel.clearInstagramCookies()
-            }
-        )
-    }
-
-    if (showClearTwitterCookiesDialog) {
-        ClearCookiesConfirmDialog(
-            title = "Clear X cookies?",
-            text = "Protected and follow-gated content will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
-            onDismiss = { showClearTwitterCookiesDialog = false },
-            onConfirm = {
-                showClearTwitterCookiesDialog = false
-                viewModel.clearTwitterCookies()
+                pendingClear = null
+                viewModel.clearCookies(platform)
             }
         )
     }
@@ -561,96 +526,16 @@ private fun ComingSoonPanel(text: String) {
     }
 }
 
-/** §2.6 Settings UI: status, "Sign in with WebView" primary, import secondary, clear destructive. */
+/** §2.6 Settings panel for one platform: status, sign-in, import, destructive clear. */
 @Composable
 private fun CookiesSettingsPanel(
-    present: Boolean,
-    lastRefreshedAt: Long?,
-    actionMessage: String?,
+    section: CookieSection,
+    state: SettingsViewModel.CookiesUiState,
     onSignIn: () -> Unit,
     onImport: () -> Unit,
     onClear: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(SocialDLBg)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        // Status row
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = when {
-                    present && lastRefreshedAt != null ->
-                        "Signed in · refreshed ${relativeCookieAge(lastRefreshedAt)}"
-                    present -> "Signed in"
-                    else -> "Not signed in"
-                },
-                style = MaterialTheme.typography.titleSmall,
-                color = SocialDLOnSurface,
-                modifier = Modifier.weight(1f)
-            )
-        }
-        Text(
-            text = if (present) {
-                "Captured cookies keep yt-dlp signed in for age-restricted and member-only videos."
-            } else {
-                "Sign in once, or import a browser-exported cookies.txt. Encrypted at rest."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = SocialDLOnSurfaceVariant
-        )
-
-        Button(
-            onClick = onSignIn,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = SocialDLAccent,
-                contentColor = SocialDLOnSurface
-            )
-        ) {
-            Text("Sign in with YouTube")
-        }
-        OutlinedButton(
-            onClick = onImport,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Text("Import cookies.txt")
-        }
-        TextButton(
-            onClick = onClear,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = "Clear cookies",
-                color = SocialDLAccent
-            )
-        }
-
-        actionMessage?.let {
-            Text(
-                text = it,
-                style = MaterialTheme.typography.bodySmall,
-                color = SocialDLOnSurfaceVariant
-            )
-        }
-    }
-}
-
-/** Phase 5: Instagram cookies are a Netscape jar consumed by gallery-dl. */
-@Composable
-private fun InstagramCookiesSettingsPanel(
-    present: Boolean,
-    lastRefreshedAt: Long?,
-    actionMessage: String?,
-    onSignIn: () -> Unit,
-    onImport: () -> Unit,
-    onClear: () -> Unit
-) {
+    val present = state.present
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -661,8 +546,8 @@ private fun InstagramCookiesSettingsPanel(
     ) {
         Text(
             text = when {
-                present && lastRefreshedAt != null ->
-                    "Signed in · refreshed ${relativeCookieAge(lastRefreshedAt)}"
+                present && state.lastRefreshedAt != null ->
+                    "Signed in · refreshed ${relativeCookieAge(state.lastRefreshedAt)}"
                 present -> "Signed in"
                 else -> "Not signed in"
             },
@@ -671,87 +556,7 @@ private fun InstagramCookiesSettingsPanel(
         )
         Text(
             text = if (present) {
-                "Private posts and reels resolve with these cookies. The jar is encrypted at rest and consumed by gallery-dl."
-            } else {
-                "Sign in once with the WebView; two-factor accounts are supported. SocialDL never sees your password."
-            },
-            style = MaterialTheme.typography.bodySmall,
-            color = SocialDLOnSurfaceVariant
-        )
-
-        Button(
-            onClick = onSignIn,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = SocialDLAccent,
-                contentColor = SocialDLOnSurface
-            )
-        ) {
-            Text(if (present) "Sign in again" else "Sign in with Instagram")
-        }
-
-        OutlinedButton(
-            onClick = onImport,
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Text("Import cookies.txt")
-        }
-
-        if (present) {
-            TextButton(
-                onClick = onClear,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "Clear cookies",
-                    color = SocialDLAccent
-                )
-            }
-        }
-
-        actionMessage?.let {
-            Text(
-                text = it,
-                style = MaterialTheme.typography.bodySmall,
-                color = SocialDLOnSurfaceVariant
-            )
-        }
-    }
-}
-
-/** Phase 6: X cookies are a Netscape jar consumed by the gallery-dl twitter engine. */
-@Composable
-private fun TwitterCookiesSettingsPanel(
-    present: Boolean,
-    lastRefreshedAt: Long?,
-    actionMessage: String?,
-    onSignIn: () -> Unit,
-    onImport: () -> Unit,
-    onClear: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(SocialDLBg)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Text(
-            text = when {
-                present && lastRefreshedAt != null ->
-                    "Signed in · refreshed ${relativeCookieAge(lastRefreshedAt)}"
-                present -> "Signed in"
-                else -> "Not signed in"
-            },
-            style = MaterialTheme.typography.titleSmall,
-            color = SocialDLOnSurface
-        )
-        Text(
-            text = if (present) {
-                "These cookies keep gallery-dl signed in for protected or follow-gated media. The jar is encrypted at rest."
+                "These cookies keep the extractor signed in for protected or gated content. The jar is encrypted at rest."
             } else {
                 "Sign in once with the WebView, or import a browser-exported cookies.txt. Encrypted at rest."
             },
@@ -760,16 +565,9 @@ private fun TwitterCookiesSettingsPanel(
         )
 
         if (!present) {
-            // X occasionally rate-limits logins ("temporarily limited your login").
-            // The import path is the escape hatch, so mention it instead of letting
-            // users retry a wall.
-            Text(
-                text = "If sign-in is ever refused with \"temporarily limited your login\", " +
-                    "wait a few minutes and retry, or log in at x.com in a browser, export " +
-                    "cookies.txt, and import it below.",
-                style = MaterialTheme.typography.bodySmall,
-                color = SocialDLOnSurfaceVariant
-            )
+            section.signedOutHint?.let { hint ->
+                Text(hint, style = MaterialTheme.typography.bodySmall, color = SocialDLOnSurfaceVariant)
+            }
         }
 
         Button(
@@ -781,7 +579,7 @@ private fun TwitterCookiesSettingsPanel(
                 contentColor = SocialDLOnSurface
             )
         ) {
-            Text(if (present) "Sign in again" else "Sign in with X")
+            Text(if (present) "Sign in again" else "Sign in with ${section.signInLabel}")
         }
 
         OutlinedButton(
@@ -792,24 +590,19 @@ private fun TwitterCookiesSettingsPanel(
             Text("Import cookies.txt")
         }
 
+        // Clear is a destructive action on something that exists — with no stored
+        // jar there is nothing to clear, so the button only shows while signed in.
         if (present) {
             TextButton(
                 onClick = onClear,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    text = "Clear cookies",
-                    color = SocialDLAccent
-                )
+                Text(text = "Clear cookies", color = SocialDLAccent)
             }
         }
 
-        actionMessage?.let {
-            Text(
-                text = it,
-                style = MaterialTheme.typography.bodySmall,
-                color = SocialDLOnSurfaceVariant
-            )
+        state.actionMessage?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = SocialDLOnSurfaceVariant)
         }
     }
 }

@@ -5,12 +5,8 @@ import androidx.compose.ui.Modifier
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import com.socialdl.src.BuildConfig
-import com.socialdl.src.core.cookies.navigation.cookieCaptureScreen
-import com.socialdl.src.core.cookies.navigation.instagramCookieCaptureScreen
-import com.socialdl.src.core.cookies.navigation.navigateToCookieCapture
-import com.socialdl.src.core.cookies.navigation.navigateToInstagramCookieCapture
-import com.socialdl.src.core.cookies.navigation.navigateToTwitterCookieCapture
-import com.socialdl.src.core.cookies.navigation.twitterCookieCaptureScreen
+import com.socialdl.src.core.cookies.ui.cookieCaptureScreen
+import com.socialdl.src.core.cookies.ui.navigateToCookieCapture
 import com.socialdl.src.feature.downloads.navigation.downloadsScreen
 import com.socialdl.src.feature.home.navigation.HOME_ROUTE
 import com.socialdl.src.feature.home.navigation.homeScreen
@@ -23,6 +19,12 @@ fun SocialDLNavHost(
     modifier: Modifier = Modifier,
     startDestination: String = HOME_ROUTE
 ) {
+    // §2.6 — one capture destination for every platform; it is launched from both the
+    // Home auth-wall card and Settings → cookies, which pass the Platform they need.
+    val signIn: (com.socialdl.src.core.model.Platform) -> Unit = { platform ->
+        navController.navigateToCookieCapture(platform)
+    }
+
     NavHost(
         navController = navController,
         startDestination = startDestination,
@@ -30,9 +32,7 @@ fun SocialDLNavHost(
     ) {
         homeScreen(
             onNavigateToSettings = { navController.navigateToSettings() },
-            onNavigateToSignInYouTube = { navController.navigateToCookieCapture() },
-            onNavigateToSignInInstagram = { navController.navigateToInstagramCookieCapture() },
-            onNavigateToSignInTwitter = { navController.navigateToTwitterCookieCapture() }
+            onNavigateToSignIn = signIn
         )
 
         downloadsScreen(
@@ -41,20 +41,10 @@ fun SocialDLNavHost(
 
         settingsScreen(
             onNavigateBack = { navController.popBackStack() },
-            onNavigateToCookieCapture = { navController.navigateToCookieCapture() },
-            onNavigateToInstagramCookieCapture = { navController.navigateToInstagramCookieCapture() },
-            onNavigateToTwitterCookieCapture = { navController.navigateToTwitterCookieCapture() },
+            onSignIn = signIn,
             appVersion = BuildConfig.VERSION_NAME
         )
 
-        // §2.6 — full-screen WebView cookie capture; registered once per platform,
-        // launched from both the Home auth-wall card and Settings → Cookies.
         cookieCaptureScreen(navController)
-
-        // Phase 5 — Instagram cookies for gallery-dl.
-        instagramCookieCaptureScreen(navController)
-
-        // Phase 6 — X cookies for the gallery-dl twitter engine.
-        twitterCookieCaptureScreen(navController)
     }
 }

@@ -3,6 +3,7 @@ package com.socialdl.src.feature.settings
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.socialdl.src.core.cookies.CookieCaptureController
 import com.socialdl.src.core.cookies.CookieStore
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.settings.SettingsRepository
@@ -10,14 +11,15 @@ import com.socialdl.src.core.settings.model.AppTheme
 import com.socialdl.src.core.settings.model.SearchEngine
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -49,6 +51,7 @@ private data class DownloadPrefs(
 class SettingsViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val cookieStore: CookieStore,
+    private val cookieCaptureController: CookieCaptureController,
 ) : ViewModel() {
 
     private val downloadPrefs = combine(
@@ -137,164 +140,86 @@ class SettingsViewModel @Inject constructor(
 
     // ---- Cookies (§2.6) ----
 
+    /** One platform's cookie-panel state. */
     data class CookiesUiState(
         val present: Boolean = false,
         val lastRefreshedAt: Long? = null,
-        /** Copy for import/clear outcomes; self-clears after a few seconds. */
+        /** Copy for an import/clear outcome; self-clears after a few seconds. */
         val actionMessage: String? = null,
     )
 
-    private val cookiesActionMessage = MutableStateFlow<String?>(null)
+    /** Platforms with a capture route and a jar, in panel order. */
+    private val cookiePlatforms = listOf(Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TWITTER)
 
-    val cookiesUiState: StateFlow<CookiesUiState> = combine(
-        cookieStore.lastRefreshedAt(Platform.YOUTUBE),
-        cookiesActionMessage
-    ) { lastRefreshed, actionMessage ->
-        // hasCookies() re-evaluated on every emission, so a capture round-trip from
-        // the WebView route (which bumps LAST_REFRESHED in save()) is reflected
-        // without an explicit refresh call.
-        CookiesUiState(
-            present = cookieStore.hasCookies(Platform.YOUTUBE),
-            lastRefreshedAt = lastRefreshed,
-            actionMessage = actionMessage
-        )
+    private val cookieActionMessages = MutableStateFlow<Map<Platform, String?>>(emptyMap())
+
+    /** Bumps whenever the panels must re-stat the jars (capture returned, import, clear). */
+    private val cookieTick = MutableStateFlow(0)
+
+    /**
+     * Per-platform cookie state for the Settings panels, re-read on [refreshCookieStates].
+     */
+    val cookieStates: StateFlow<Map<Platform, CookiesUiState>> = combine(
+        cookieTick,
+        cookieActionMessages
+    ) { _, messages ->
+        @Suppress("NAME_SHADOWING")
+        withContext(Dispatchers.IO) {
+            cookiePlatforms.associateWith { platform ->
+                val jar = cookieStore.jarState(platform)
+                CookiesUiState(
+                    present = jar != null,
+                    lastRefreshedAt = jar?.lastRefreshedAt,
+                    actionMessage = messages[platform],
+                )
+            }
+        }
     }
-        // hasCookies() stats the encrypted jar file — never on the main thread.
-        .flowOn(Dispatchers.IO)
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5000),
-            initialValue = CookiesUiState()
+            initialValue = emptyMap()
         )
 
-    /** Sets [target]'s message and clears it after a display window. */
-    private suspend fun setActionMessage(
-        target: MutableStateFlow<String?>,
-        message: String,
-    ) {
-        target.value = message
+    /** Re-stats the jars; call when the Settings screen becomes visible again. */
+    fun refreshCookieStates() {
+        cookieTick.update { it + 1 }
+    }
+
+    /** Manual `cookies.txt` import fallback (§2.6) — validated before it is accepted. */
+    fun importCookies(platform: Platform, uri: Uri) {
+        viewModelScope.launch {
+            // null = stored; otherwise the store returns the finished, user-facing
+            // failure message.
+            val reason = cookieStore.importNetscapeFile(platform, uri)
+            setCookieMessage(
+                platform,
+                reason ?: "Cookies imported — you're signed in for ${cookiePlatformName(platform)} extraction."
+            )
+        }
+    }
+
+    /** Destructive — UI confirms before calling. Also resets the capture browser session. */
+    fun clearCookies(platform: Platform) {
+        viewModelScope.launch {
+            cookieStore.clear(platform)
+            cookieCaptureController.clearCaptureSession()
+            setCookieMessage(platform, "${cookiePlatformName(platform)} cookies cleared.")
+        }
+    }
+
+    /** Sets one platform's message and clears it after a display window. */
+    private suspend fun setCookieMessage(platform: Platform, message: String) {
+        fun publish(value: String?) = cookieActionMessages.update { it + (platform to value) }
+        publish(message)
         delay(4_000)
-        if (target.value == message) target.value = null
+        if (cookieActionMessages.value[platform] == message) publish(null)
     }
 
-    /** Shared copy for the manual `cookies.txt` import outcome. */
-    private fun importMessage(
-        outcome: CookieStore.ImportOutcome,
-        platformName: String,
-    ): String = when (outcome) {
-        is CookieStore.ImportOutcome.Success ->
-            "Cookies imported — you're signed in for $platformName extraction."
-        is CookieStore.ImportOutcome.Rejected ->
-            "Import rejected: ${outcome.reason}"
-        CookieStore.ImportOutcome.Unreadable ->
-            "Import failed: the selected file could not be read."
-    }
-
-    /** Manual `cookies.txt` import fallback (§2.6) — validates before accepting. */
-    fun importCookies(uri: Uri) {
-        viewModelScope.launch {
-            val outcome = cookieStore.importNetscapeFile(Platform.YOUTUBE, uri)
-            setActionMessage(cookiesActionMessage, importMessage(outcome, "YouTube"))
-        }
-    }
-
-    /** Destructive — UI confirms before calling. */
-    fun clearCookies() {
-        viewModelScope.launch {
-            cookieStore.clear(Platform.YOUTUBE)
-            setActionMessage(cookiesActionMessage, "YouTube cookies cleared.")
-        }
-    }
-
-    // ---- Instagram cookies (Phase 5, gallery-dl) ----
-
-    data class InstagramCookiesUiState(
-        val present: Boolean = false,
-        val lastRefreshedAt: Long? = null,
-        /** Copy for import/clear outcomes; self-clears after a few seconds. */
-        val actionMessage: String? = null,
-    )
-
-    private val instagramActionMessage = MutableStateFlow<String?>(null)
-
-    val instagramCookiesUiState: StateFlow<InstagramCookiesUiState> = combine(
-        cookieStore.lastRefreshedAt(Platform.INSTAGRAM),
-        instagramActionMessage
-    ) { lastRefreshed, actionMessage ->
-        InstagramCookiesUiState(
-            present = cookieStore.hasCookies(Platform.INSTAGRAM),
-            lastRefreshedAt = lastRefreshed,
-            actionMessage = actionMessage,
-        )
-    }
-        // hasCookies() stats the encrypted blob — never on the main thread.
-        .flowOn(Dispatchers.IO)
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = InstagramCookiesUiState()
-        )
-
-    /** Destructive — UI confirms before calling. */
-    fun clearInstagramCookies() {
-        viewModelScope.launch {
-            cookieStore.clear(Platform.INSTAGRAM)
-            setActionMessage(instagramActionMessage, "Instagram cookies cleared.")
-        }
-    }
-
-    /** Manual cookies.txt fallback for gallery-dl (§2.6 escape hatch). */
-    fun importInstagramCookies(uri: Uri) {
-        viewModelScope.launch {
-            val outcome = cookieStore.importNetscapeFile(Platform.INSTAGRAM, uri)
-            setActionMessage(instagramActionMessage, importMessage(outcome, "Instagram"))
-        }
-    }
-
-    // ---- X (Twitter) cookies (Phase 6, gallery-dl) ----
-
-    data class TwitterCookiesUiState(
-        val present: Boolean = false,
-        val lastRefreshedAt: Long? = null,
-        /** Copy for import/clear outcomes; self-clears after a few seconds. */
-        val actionMessage: String? = null,
-    )
-
-    private val twitterActionMessage = MutableStateFlow<String?>(null)
-
-    val twitterCookiesUiState: StateFlow<TwitterCookiesUiState> = combine(
-        cookieStore.lastRefreshedAt(Platform.TWITTER),
-        twitterActionMessage
-    ) { lastRefreshed, actionMessage ->
-        // hasCookies() re-evaluated on every emission so a capture round-trip
-        // (which bumps LAST_REFRESHED in save()) is reflected without a refresh.
-        TwitterCookiesUiState(
-            present = cookieStore.hasCookies(Platform.TWITTER),
-            lastRefreshedAt = lastRefreshed,
-            actionMessage = actionMessage,
-        )
-    }
-        // hasCookies() stats the encrypted blob — never on the main thread.
-        .flowOn(Dispatchers.IO)
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = TwitterCookiesUiState()
-        )
-
-    /** Destructive — UI confirms before calling. */
-    fun clearTwitterCookies() {
-        viewModelScope.launch {
-            cookieStore.clear(Platform.TWITTER)
-            setActionMessage(twitterActionMessage, "X cookies cleared.")
-        }
-    }
-
-    /** Manual cookies.txt fallback for gallery-dl (§2.6 escape hatch). */
-    fun importTwitterCookies(uri: Uri) {
-        viewModelScope.launch {
-            val outcome = cookieStore.importNetscapeFile(Platform.TWITTER, uri)
-            setActionMessage(twitterActionMessage, importMessage(outcome, "X"))
-        }
+    private fun cookiePlatformName(platform: Platform): String = when (platform) {
+        Platform.YOUTUBE -> "YouTube"
+        Platform.INSTAGRAM -> "Instagram"
+        Platform.TWITTER -> "X"
+        else -> platform.name
     }
 }

@@ -4,8 +4,12 @@ import android.webkit.CookieManager
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.model.Platform
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.resume
 
 sealed class CaptureOutcome {
     /** Marker cookies found, jar harvested, written and encrypted. */
@@ -27,21 +31,13 @@ sealed class CaptureOutcome {
 @Singleton
 class CookieCaptureController @Inject constructor(
     private val cookieStore: CookieStore,
-    private val userAgentProvider: UserAgentProvider,
 ) {
 
     private val tag = "CookieCapture"
 
-    /** Resolves the flow config for [platform], probing the runtime UA for YouTube. */
-    suspend fun config(platform: Platform): CookieCaptureConfig = when (platform) {
-        Platform.YOUTUBE -> YoutubeCookieCapture.config(userAgent = userAgentProvider.probe())
-        Platform.INSTAGRAM -> InstagramCookieCapture.config()
-        Platform.TWITTER -> TwitterCookieCapture.config()
-        // Exhaustive: never silently treat Threads/UNKNOWN as another platform and
-        // harvest the wrong session.
-        Platform.THREADS, Platform.UNKNOWN ->
-            throw IllegalArgumentException("Cookie capture is not supported for ${platform.name}")
-    }
+    /** Resolves the flow config for [platform]. */
+    suspend fun config(platform: Platform): CookieCaptureConfig =
+        cookieCaptureConfig(platform)
 
     /**
      * Auto-detect check, run from `onPageFinished`: the WebView has settled on
@@ -138,6 +134,38 @@ class CookieCaptureController @Inject constructor(
         if (header.isNullOrBlank()) return false
         val present = NetscapeCookieJarWriter.parseHeader(header).mapTo(HashSet()) { it.first }
         return config.markerCookies.any { marker -> marker in present }
+    }
+
+    /**
+     * Deletes the capture WebView's own cookie store, not just our encrypted jar.
+     *
+     * Without this, "Clear cookies" only removed the stored jar while x.com / Google /
+     * Instagram cookies kept living inside the capture browser. The next sign-in then
+     * started from a half-signed-in session the app reported as signed out — confusing
+     * for the user and, on platforms that risk-control logins (X), actively harmful:
+     * X answered a fresh login with "you are not allowed to login at this time" while
+     * presenting the exact User-Agent it had accepted an hour earlier.
+     *
+     * `CookieManager.removeAllCookies` is the only cross-platform-scoped removal WebView
+     * exposes, so this signs the capture browser out of every platform. Stored jars are
+     * untouched, so extraction keeps working; only the browser session is reset.
+     */
+    suspend fun clearCaptureSession() {
+        withContext(Dispatchers.Main.immediate) {
+            try {
+                val manager = CookieManager.getInstance()
+                manager.setAcceptCookie(true)
+                suspendCancellableCoroutine { continuation ->
+                    manager.removeAllCookies { continuation.resume(Unit) }
+                }
+                manager.flush()
+                Logger.i(tag, "Cleared the capture WebView cookie store")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Logger.w(tag, "Could not clear the capture WebView cookie store", e)
+            }
+        }
     }
 
     private fun countLines(jar: String): Int =
