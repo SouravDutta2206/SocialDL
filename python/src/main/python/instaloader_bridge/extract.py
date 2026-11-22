@@ -55,7 +55,14 @@ _SHORTCODE_RE = re.compile(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)")
 
 def extract(url):
     try:
-        loader = instaloader.Instaloader(quiet=True)
+        # Bounded transport: Instaloader's defaults (300s timeout x 3 connection
+        # attempts) can pin a PythonDispatcher thread for ~15 minutes on a stalled
+        # request. These caps keep one anonymous fetch short.
+        loader = instaloader.Instaloader(
+            quiet=True,
+            request_timeout=20.0,
+            max_connection_attempts=2,
+        )
         shortcode = _shortcode(url)
         if not shortcode:
             return fail(

@@ -1,6 +1,7 @@
 package com.socialdl.src.feature.settings
 
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.socialdl.src.core.cookies.CookieCaptureController
@@ -10,7 +11,9 @@ import com.socialdl.src.core.settings.SettingsRepository
 import com.socialdl.src.core.settings.model.AppTheme
 import com.socialdl.src.core.settings.model.SearchEngine
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -53,6 +56,8 @@ class SettingsViewModel @Inject constructor(
     private val cookieStore: CookieStore,
     private val cookieCaptureController: CookieCaptureController,
 ) : ViewModel() {
+
+    private val tag = "SettingsViewModel"
 
     private val downloadPrefs = combine(
         settingsRepository.maxConcurrentDownloads,
@@ -158,6 +163,9 @@ class SettingsViewModel @Inject constructor(
 
     private val cookieActionMessages = MutableStateFlow<Map<Platform, String?>>(emptyMap())
 
+    /** Per-platform auto-clear timers, cancelled when a newer message supersedes them. */
+    private val cookieMessageJobs = mutableMapOf<Platform, Job>()
+
     /** Bumps whenever the panels must re-stat the jars (capture returned, import, clear). */
     private val cookieTick = MutableStateFlow(0)
 
@@ -194,31 +202,68 @@ class SettingsViewModel @Inject constructor(
     /** Manual `cookies.txt` import fallback (§2.6) — validated before it is accepted. */
     fun importCookies(platform: Platform, uri: Uri) {
         viewModelScope.launch {
-            // null = stored; otherwise the store returns the finished, user-facing
-            // failure message.
-            val reason = cookieStore.importNetscapeFile(platform, uri)
-            setCookieMessage(
-                platform,
-                reason ?: "Cookies imported — you're signed in for ${cookiePlatformName(platform)} extraction."
-            )
+            try {
+                // null = stored; otherwise the store returns the finished, user-facing
+                // failure message.
+                val reason = cookieStore.importNetscapeFile(platform, uri)
+                setCookieMessage(
+                    platform,
+                    reason ?: "Cookies imported — you're signed in for ${cookiePlatformName(platform)} extraction."
+                )
+            } catch (e: CancellationException) {
+                // ViewModel cleared mid-import: not a user-facing failure.
+                throw e
+            } catch (e: Exception) {
+                // IO/crypto failures must surface as panel copy, never crash the app.
+                Log.e(tag, "Failed to import cookies for $platform", e)
+                setCookieMessage(
+                    platform,
+                    "Couldn't import cookies: ${e.message ?: "unknown error"}"
+                )
+            }
+            // Always re-stat (even for a repeated message string): the jar may have
+            // been replaced, so the presence/age row must follow the store.
+            refreshCookieStates()
         }
     }
 
     /** Destructive — UI confirms before calling. Also resets the capture browser session. */
     fun clearCookies(platform: Platform) {
         viewModelScope.launch {
-            cookieStore.clear(platform)
-            cookieCaptureController.clearCaptureSession()
-            setCookieMessage(platform, "${cookiePlatformName(platform)} cookies cleared.")
+            try {
+                cookieStore.clear(platform)
+                cookieCaptureController.clearCaptureSession()
+                setCookieMessage(platform, "${cookiePlatformName(platform)} cookies cleared.")
+            } catch (e: CancellationException) {
+                // ViewModel cleared mid-clear: not a user-facing failure.
+                throw e
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to clear cookies for $platform", e)
+                setCookieMessage(
+                    platform,
+                    "Couldn't clear cookies: ${e.message ?: "unknown error"}"
+                )
+            }
+            // Always re-stat so the panel reflects the actual jar state after a clear
+            // attempt, including when an error left the jar in place.
+            refreshCookieStates()
         }
     }
 
-    /** Sets one platform's message and clears it after a display window. */
-    private suspend fun setCookieMessage(platform: Platform, message: String) {
-        fun publish(value: String?) = cookieActionMessages.update { it + (platform to value) }
-        publish(message)
-        delay(4_000)
-        if (cookieActionMessages.value[platform] == message) publish(null)
+    /**
+     * Sets one platform's message and clears it after a display window. Each platform
+     * owns at most one timer: a newer message cancels the older timer so it cannot
+     * clear the new copy early.
+     */
+    private fun setCookieMessage(platform: Platform, message: String) {
+        cookieMessageJobs[platform]?.cancel()
+        cookieActionMessages.update { it + (platform to message) }
+        cookieMessageJobs[platform] = viewModelScope.launch {
+            delay(4_000)
+            cookieActionMessages.update { messages ->
+                if (messages[platform] == message) messages + (platform to null) else messages
+            }
+        }
     }
 
     private fun cookiePlatformName(platform: Platform): String = when (platform) {

@@ -83,6 +83,20 @@ class DownloadManager @Inject constructor(
     }
 
     /**
+     * Suspends until startup reconciliation has finished.
+     *
+     * [DownloadWorker] awaits this before its first Room read, so a worker that
+     * WorkManager starts during process creation cannot begin downloading before
+     * the startup snapshot has settled the fate of every non-terminal row. The
+     * eager injection in `SocialDLApplication` is what guarantees reconciliation
+     * starts during `Application.onCreate()` even when no UI has touched this
+     * singleton yet.
+     */
+    suspend fun awaitStartupReconciled() {
+        startupReconciled.await()
+    }
+
+    /**
      * Builds the durable job row, writes it to Room FIRST, then enqueues a
      * WorkRequest whose input contains only KEY_JOB_ID. The worker reads its
      * entire config from the row, so enqueue-before-insert must never happen.

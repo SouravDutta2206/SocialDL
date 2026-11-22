@@ -34,7 +34,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,8 +45,6 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.socialdl.src.core.common.util.readClipboardText
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.launch
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
@@ -76,7 +73,6 @@ fun HomeScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val resolvingItemId by viewModel.resolvingItemId.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
     var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
     // Permissions are requested once on first launch (RequestStartupPermissions);
     // here we only enforce the storage grant the export needs and say why.
@@ -92,9 +88,9 @@ fun HomeScreen(
     var sheetInitialTab by remember { mutableStateOf(FormatKind.VIDEO) }
     var showBatchSheet by remember { mutableStateOf(false) }
 
-    fun handleOpenSheet(item: MediaItem, initialTab: FormatKind) {
+    fun handleOpenSheet(item: MediaItem, itemKey: String, initialTab: FormatKind) {
         if (item.isPlaceholder) {
-            viewModel.resolveItemFormats(item) { resolvedItem ->
+            viewModel.resolveItemFormats(item, itemKey) { resolvedItem ->
                 sheetInitialTab = initialTab
                 selectedItemForSheet = resolvedItem
             }
@@ -208,26 +204,29 @@ fun HomeScreen(
                         items = uiState.mediaItems,
                         key = { index, item -> item.uiKey(fallbackIndex = index) }
                     ) { index, item ->
+                        // Shared identity formula (also used for LazyColumn keys and
+                        // batch selection) so resolution spinners map to exactly one card.
+                        val itemKey = item.uiKey(fallbackIndex = index)
                         // No inline progress/failed overlay here by design: download
                         // state (progress, failures, cancel) lives exclusively on the
                         // Downloads tab. Home stays a pure search/experience surface —
                         // a previously-failed URL re-searches and re-downloads freely.
                         MediaCard(
                             item = item,
-                            isResolving = resolvingItemId == item.sourceUrl,
+                            isResolving = resolvingItemId == itemKey,
                             onCardClick = {
                                 if (uiState.showsFormatPicker) {
-                                    handleOpenSheet(item, FormatKind.VIDEO)
+                                    handleOpenSheet(item, itemKey, FormatKind.VIDEO)
                                 } else {
                                     requestDownloadPermissions { viewModel.startDirectDownload(item) }
                                 }
                             },
                             onQuickAudioDownload = {
-                                handleOpenSheet(item, FormatKind.AUDIO)
+                                handleOpenSheet(item, itemKey, FormatKind.AUDIO)
                             },
                             onQuickVideoDownload = {
                                 if (uiState.showsFormatPicker) {
-                                    handleOpenSheet(item, FormatKind.VIDEO)
+                                    handleOpenSheet(item, itemKey, FormatKind.VIDEO)
                                 } else {
                                     // Covers both the Video pill and the Image pill —
                                     // single-format platforms never render a picker.
@@ -249,24 +248,9 @@ fun HomeScreen(
                 onConfirmDownload = { format, container, title, author ->
                     selectedItemForSheet = null
                     requestDownloadPermissions {
-                        scope.launch {
-                            // Report success only after the suspend enqueue actually completes;
-                            // an exception must surface as an error toast, not a false success.
-                            try {
-                                viewModel.startDownload(item, format, container, title, author)
-                                toastMessage = ToastMessage(
-                                    message = "Download queued: $title (${format.label})"
-                                )
-                            } catch (e: CancellationException) {
-                                // Leaving the screen cancels the enqueue; that is not a failure.
-                                throw e
-                            } catch (e: Exception) {
-                                toastMessage = ToastMessage(
-                                    message = "Couldn't queue download: ${e.message ?: "unknown error"}",
-                                    type = ToastType.ERROR
-                                )
-                            }
-                        }
+                        // Enqueue lives in the ViewModel scope so rotation/navigation
+                        // cannot cancel a queued download; outcomes arrive via messages.
+                        viewModel.enqueueSingleDownload(item, format, container, title, author)
                     }
                 }
             )
@@ -341,19 +325,9 @@ fun HomeScreen(
                 onConfirmDownload = { selectedPairs ->
                     showBatchSheet = false
                     requestDownloadPermissions {
-                        // Report the ACTUAL enqueued count — a mid-loop enqueue failure
-                        // should not overstate what landed in the queue.
-                        scope.launch {
-                            val taskIds = viewModel.startBatchDownload(selectedPairs)
-                            toastMessage = if (taskIds.isEmpty()) {
-                                ToastMessage(
-                                    message = "No downloads were queued",
-                                    type = ToastType.ERROR
-                                )
-                            } else {
-                                ToastMessage(message = "Queued ${taskIds.size} downloads to queue")
-                            }
-                        }
+                        // ViewModel-scoped so closing the sheet or rotating cannot
+                        // cancel the batch; it reports the ACTUAL enqueued count.
+                        viewModel.enqueueBatchDownload(selectedPairs)
                     }
                 }
             )

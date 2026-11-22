@@ -34,6 +34,18 @@ class SocialDLApplication : Application(), Configuration.Provider {
     @Inject
     lateinit var notificationManager: com.socialdl.src.core.download.DownloadNotificationManager
 
+    /**
+     * Eagerly constructed at Application creation (Bug #1): [DownloadManager]'s
+     * constructor launches startup reconciliation. Leaving this injection to the
+     * UI meant reconciliation only ran after a screen was opened — by then a
+     * WorkManager-started [com.socialdl.src.core.download.DownloadWorker] could
+     * already be downloading, and reconciliation killed that live job. Injected
+     * here so the barrier completes during `onCreate()` before any worker
+     * gets a chance to read its row.
+     */
+    @Inject
+    lateinit var downloadManager: com.socialdl.src.core.download.DownloadManager
+
     override val workManagerConfiguration: Configuration by lazy {
         Configuration.Builder()
             .setWorkerFactory(workerFactory)

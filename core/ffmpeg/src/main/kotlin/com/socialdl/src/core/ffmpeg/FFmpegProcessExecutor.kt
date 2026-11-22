@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -73,9 +74,10 @@ class FFmpegProcessExecutor @Inject constructor(
         val stdoutBuffer = StringBuilder()
 
         fun appendBounded(target: StringBuilder, line: String) {
-            target.appendLine(line)
-            val overflow = target.length - MAX_CAPTURED_CHARS
-            if (overflow > 0) target.delete(0, overflow)
+            // stdout/stderr are drained on two IO coroutines and the waiter reads
+            // errorBuffer from a third one: every access must be synchronized or
+            // the StringBuilder can be corrupted (lost/garbled failure text).
+            appendBoundedLine(target, line, MAX_CAPTURED_CHARS)
         }
 
         // Drain stdout so the child never blocks on a full pipe (which would hang waitFor() indefinitely).
@@ -101,10 +103,10 @@ class FFmpegProcessExecutor @Inject constructor(
             }
         }
 
-        var timedOut = false
+        val timedOut = AtomicBoolean(false)
         val timeoutJob = launch {
             delay(timeoutMs)
-            timedOut = true
+            timedOut.set(true)
             Logger.w(tag, "ffmpeg timed out after ${timeoutMs}ms; killing process")
             process.destroyForciblyCompat()
         }
@@ -123,19 +125,34 @@ class FFmpegProcessExecutor @Inject constructor(
                 -1
             }
             timeoutJob.cancel()
-            runCatching { stderrJob.join() }
-            runCatching { stdoutJob.join() }
+            // Never swallow cancellation: a cancelled collector must unwind with
+            // CancellationException instead of reporting a bogus Failed(-1).
+            try {
+                stderrJob.join()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Drain failure only loses diagnostics; the exit code stands.
+            }
+            try {
+                stdoutJob.join()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Drain failure only loses diagnostics; the exit code stands.
+            }
 
-            if (exitCode == 0 && !timedOut) {
+            val didTimeOut = timedOut.get()
+            if (exitCode == 0 && !didTimeOut) {
                 Logger.d(tag, "ffmpeg process completed successfully")
                 send(FFmpegEvent.Completed)
             } else {
                 // errorBuffer already holds the bounded tail of stderr.
-                val errorTail = errorBuffer.toString().takeLast(MAX_ERROR_TAIL_CHARS)
+                val errorTail = boundedTail(errorBuffer, MAX_ERROR_TAIL_CHARS)
                 if (!quiet) {
                     Logger.e(tag, "ffmpeg process failed with code $exitCode: $errorTail")
                 }
-                send(FFmpegEvent.Failed(if (timedOut) -2 else exitCode, errorTail))
+                send(FFmpegEvent.Failed(if (didTimeOut) -2 else exitCode, errorTail))
             }
             close()
         }
@@ -173,6 +190,24 @@ class FFmpegProcessExecutor @Inject constructor(
         return banner?.let(::parseProbeBanner)
     }
 }
+
+/**
+ * Appends [line] to [target] while keeping only the newest [maxChars] characters.
+ *
+ * ffmpeg's stdout and stderr are drained by two coroutines and the error tail is
+ * read by the waiter coroutine, so every access is synchronized on the buffer.
+ */
+internal fun appendBoundedLine(target: StringBuilder, line: String, maxChars: Int) {
+    synchronized(target) {
+        target.appendLine(line)
+        val overflow = target.length - maxChars
+        if (overflow > 0) target.delete(0, overflow)
+    }
+}
+
+/** Thread-safe snapshot of the last [maxChars] characters of [target]. */
+internal fun boundedTail(target: StringBuilder, maxChars: Int): String =
+    synchronized(target) { target.toString().takeLast(maxChars) }
 
 /** Codecs, source bitrate, and duration read from ffmpeg's `-i` banner. */
 data class MediaProbe(

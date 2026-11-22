@@ -2,6 +2,7 @@ package com.socialdl.src.core.ui.component
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -61,7 +63,8 @@ fun MediaCard(
             .fillMaxWidth()
             .height(200.dp)
             .clip(RoundedCornerShape(24.dp))
-            .clickable(onClick = onCardClick),
+            // While resolving, the card must not open a second sheet (double-tap).
+            .clickable(enabled = !isResolving, onClick = onCardClick),
         shape = RoundedCornerShape(24.dp),
         colors = CardDefaults.cardColors(containerColor = SocialDLCard),
         elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
@@ -159,7 +162,7 @@ fun MediaCard(
                     FloatingIconButton(
                         icon = Icons.Default.Audiotrack,
                         label = "Audio",
-                        onClick = onQuickAudioDownload,
+                        onClick = { if (!isResolving) onQuickAudioDownload() },
                         modifier = Modifier.padding(end = 8.dp)
                     )
                 }
@@ -168,13 +171,13 @@ fun MediaCard(
                     FloatingIconButton(
                         icon = Icons.Default.Videocam,
                         label = "Video",
-                        onClick = onQuickVideoDownload
+                        onClick = { if (!isResolving) onQuickVideoDownload() }
                     )
                 } else if (item.imageFormats.isNotEmpty()) {
                     FloatingIconButton(
                         icon = Icons.Default.FileDownload,
                         label = "Image",
-                        onClick = onQuickVideoDownload
+                        onClick = { if (!isResolving) onQuickVideoDownload() }
                     )
                 }
             }
@@ -184,7 +187,10 @@ fun MediaCard(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.65f)),
+                        .background(Color.Black.copy(alpha = 0.65f))
+                        // Swallow taps over the whole card so a second tap cannot
+                        // reach the card or quick-download buttons underneath.
+                        .pointerInput(Unit) { detectTapGestures { } },
                     contentAlignment = Alignment.Center
                 ) {
                     Column(

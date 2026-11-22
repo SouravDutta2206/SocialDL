@@ -46,6 +46,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -137,7 +138,9 @@ fun SettingsScreen(
     var expandedSection by remember { mutableStateOf<SettingsSection?>(null) }
     var expandedCookie by remember { mutableStateOf<Platform?>(null) }
     var pendingClear by remember { mutableStateOf<Platform?>(null) }
-    var importTarget by remember { mutableStateOf<Platform?>(null) }
+    // Stored as the platform NAME: DocumentsUI can destroy/recreate the activity, and
+    // a lost target would drop the picked cookies.txt without importing it.
+    var importTargetName by rememberSaveable { mutableStateOf<String?>(null) }
 
     // Jar state is file-stamp based (no watcher), so the panels re-stat whenever the
     // screen re-enters composition — including the pop-back from a capture round-trip.
@@ -148,8 +151,10 @@ fun SettingsScreen(
     val cookiesFilePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
-        val platform = importTarget
-        importTarget = null
+        val platform = importTargetName?.let { name ->
+            runCatching { Platform.valueOf(name) }.getOrNull()
+        }
+        importTargetName = null
         if (uri != null && platform != null) viewModel.importCookies(platform, uri)
     }
 
@@ -304,7 +309,7 @@ fun SettingsScreen(
                                 state = state,
                                 onSignIn = { onSignIn(section.platform) },
                                 onImport = {
-                                    importTarget = section.platform
+                                    importTargetName = section.platform.name
                                     cookiesFilePicker.launch(arrayOf("*/*"))
                                 },
                                 onClear = { pendingClear = section.platform }

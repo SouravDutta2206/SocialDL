@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.security.GeneralSecurityException
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -161,8 +162,19 @@ class CookieStoreImpl @Inject constructor(
                 val target = jarFile(platform)
                 target.parentFile?.mkdirs()
                 val temp = stagingFileFor(target)
-                createEncryptedFile(temp).openFileOutput().use { out ->
-                    out.write(jarContent.toByteArray())
+                try {
+                    createEncryptedFile(temp).openFileOutput().use { out ->
+                        out.write(jarContent.toByteArray())
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (!e.isCryptoOrCorruptionFailure()) throw e
+                    resetCorruptedKeyset(e)
+                    val retryTemp = stagingFileFor(target)
+                    createEncryptedFile(retryTemp).openFileOutput().use { out ->
+                        out.write(jarContent.toByteArray())
+                    }
                 }
                 if (!temp.renameTo(target)) {
                     target.delete()
@@ -236,8 +248,10 @@ class CookieStoreImpl @Inject constructor(
             validation.hasNoCookies ->
                 "No cookie data lines found — is this an exported cookies.txt?"
             else -> {
-                // Re-join with a canonical trailing newline; every line already validated.
-                save(platform, validation.validLines.joinToString("\n"))
+                // Manual imports must be re-emitted as a complete jar: the required
+                // Netscape header is prepended and every validated line gets a
+                // canonical trailing newline (yt-dlp/gallery-dl reject a headerless jar).
+                save(platform, NetscapeCookieJarWriter.buildJarFromValidatedLines(validation.validLines))
                 null
             }
         }
@@ -247,46 +261,90 @@ class CookieStoreImpl @Inject constructor(
         platform: Platform,
         block: suspend (String?) -> T
     ): T {
-        if (jarState(platform) == null) return block(null)
-
         val prefix = platform.name.lowercase(Locale.ROOT)
-        val tempFile = File(tempDir, "${prefix}_cookies_${System.nanoTime()}.txt")
+        var tempFile: File? = null
 
-        // Decrypt in its own try/catch: only a decryption failure may degrade to
-        // "no cookies". Exceptions from [block] (network, Python, cancellation)
-        // must propagate untouched and must never trigger a second invocation.
-        val decrypted = try {
-            mutex.withLock {
+        // ONE try/finally covers the decryption AND the block invocation: when a
+        // CancellationException lands during or right after decryption, the decrypted
+        // copy is still deleted before this function returns/throws.
+        return try {
+            // The state check, throwaway-dir (re)creation, decryption and corrupt-jar
+            // cleanup all run under the same lock as save()/clear(), so no TOCTOU race
+            // can delete a jar mid-read or interleave with a capture.
+            val decryptedPath = mutex.withLock {
                 withContext(Dispatchers.IO) {
-                    createEncryptedFile(platform).openFileInput().use { input ->
-                        tempFile.outputStream().use { input.copyTo(it) }
+                    if (jarState(platform) == null) {
+                        null
+                    } else {
+                        // `tempDir`'s `by lazy` mkdirs() only ran once; the OS or user
+                        // can clear cacheDir while the app is running, so re-create it
+                        // on every decryption. Without this, the plaintext temp file
+                        // would fail to be written and cookies would silently vanish.
+                        tempDir.mkdirs()
+                        val file = File(tempDir, "${prefix}_cookies_${System.nanoTime()}.txt")
+                        tempFile = file
+                        try {
+                            createEncryptedFile(platform).openFileInput().use { input ->
+                                file.outputStream().use { input.copyTo(it) }
+                            }
+                            file.absolutePath
+                        } catch (e: CancellationException) {
+                            // Cancellation is not corruption: rethrow untouched and
+                            // leave the encrypted jar in place.
+                            throw e
+                        } catch (e: Exception) {
+                            Logger.e(
+                                tag,
+                                "Failed to decrypt ${platform.name} cookie jar; extraction continues without cookies",
+                                e
+                            )
+                            // Only a crypto/corruption failure proves the jar is dead
+                            // weight (Keystore key lost on restore/clear-data, or invalid
+                            // ciphertext). A generic IOException — cache dir cleared,
+                            // ENOSPC, transient read error — must NEVER destroy the last
+                            // good jar: the next extraction may succeed.
+                            if (e.isCryptoOrCorruptionFailure()) {
+                                runCatching { jarFile(platform).delete() }
+                                    .onFailure {
+                                        Logger.w(tag, "Best-effort corrupt cookie jar delete failed", it)
+                                    }
+                            }
+                            null
+                        }
                     }
                 }
             }
-            true
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            Logger.e(tag, "Failed to decrypt ${platform.name} cookie jar; extraction continues without cookies", e)
-            // A jar that cannot be decrypted (corrupt file or restored without the
-            // Keystore key) is dead weight: delete it so the UI stops reporting
-            // "signed in" for a session that can never be used.
-            runCatching { jarFile(platform).delete() }
-            false
-        }
 
-        return try {
-            if (decrypted) {
-                Logger.d(tag, "Decrypted ${platform.name} cookie jar to throwaway ${tempFile.name}")
-                block(tempFile.absolutePath)
+            if (decryptedPath != null) {
+                Logger.d(tag, "Decrypted ${platform.name} cookie jar to throwaway ${tempFile?.name}")
+                block(decryptedPath)
             } else {
                 block(null)
             }
         } finally {
             // The decrypted copy must not outlive the call that needed it.
-            runCatching { tempFile.delete() }
-                .onFailure { Logger.w(tag, "Best-effort temp cookie delete failed", it) }
+            tempFile?.let { file ->
+                runCatching { file.delete() }
+                    .onFailure { Logger.w(tag, "Best-effort temp cookie delete failed", it) }
+            }
         }
+    }
+
+    /**
+     * True when [this] — or any cause in its chain — is a crypto/format failure,
+     * meaning the jar can never be decrypted on this device. Tink's corrupt-keyset
+     * exception is shaded, so it is matched on its simple name instead of importing
+     * a package path that varies between versions.
+     */
+    private fun Throwable.isCryptoOrCorruptionFailure(): Boolean {
+        val seen = HashSet<Throwable>()
+        var current: Throwable? = this
+        while (current != null && seen.add(current)) {
+            if (current is GeneralSecurityException) return true
+            if (current::class.java.simpleName.contains("InvalidProtocolBufferException")) return true
+            current = current.cause
+        }
+        return false
     }
 
     private fun createEncryptedFile(platform: Platform): EncryptedFile =
@@ -302,8 +360,28 @@ class CookieStoreImpl @Inject constructor(
         ).build()
     }
 
+    private fun resetCorruptedKeyset(cause: Throwable) {
+        Logger.w(
+            tag,
+            "Resetting corrupted EncryptedFile keyset; existing cookie jars will be cleared",
+            cause
+        )
+        runCatching { context.deleteSharedPreferences(ENCRYPTED_FILE_PREF_NAME) }
+            .onFailure { Logger.w(tag, "Failed to delete corrupted keyset prefs", it) }
+        val cookiesDir = File(context.filesDir, "cookies")
+        runCatching {
+            cookiesDir.listFiles()?.forEach { entry ->
+                if (entry.isFile && entry.name.endsWith(".enc")) {
+                    entry.delete()
+                }
+            }
+            stagingDir.listFiles()?.forEach { it.delete() }
+        }.onFailure { Logger.w(tag, "Failed to sweep undecryptable cookie jars", it) }
+    }
+
     private companion object {
         const val MAX_IMPORT_BYTES = 5 * 1024 * 1024
+        const val ENCRYPTED_FILE_PREF_NAME = "__androidx_security_crypto_encrypted_file_pref__"
     }
 }
 
@@ -371,6 +449,18 @@ object NetscapeCookieJarWriter {
             for (line in lines) {
                 append(line).append('\n')
             }
+        }
+    }
+
+    /**
+     * Re-emits manually validated data lines as a complete jar. The Netscape header
+     * is mandatory (yt-dlp/gallery-dl refuse a jar that does not start with it) and
+     * every line ends with a canonical trailing newline.
+     */
+    fun buildJarFromValidatedLines(validLines: List<String>): String = buildString {
+        append(NETSCAPE_HEADER).append('\n')
+        for (line in validLines) {
+            append(line).append('\n')
         }
     }
 
@@ -454,7 +544,9 @@ object NetscapeCookieJarWriter {
         val valid = ArrayList<String>()
         val invalid = ArrayList<Int>()
         content.lineSequence().forEachIndexed { index, rawLine ->
-            val line = rawLine.trimEnd('\r', '\n').trim()
+            // trimStart() only: a trailing `\t` is a legal empty 7th column (cookie
+            // value), and a blanket trim() would collapse the row to 6 columns.
+            val line = rawLine.trimEnd('\r', '\n').trimStart()
             if (line.isEmpty()) return@forEachIndexed
 
             // curl's httponly flag lives in a "#HttpOnly_" prefix on real data lines —

@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?><!--
    API 31+ backup and device-transfer rules. See backup_rules.xml for rationale:
    cookie jars cannot be decrypted on another device and the database contains
-   URLs that should not be copied off-device.
+   URLs that should not be copied off-device. The EncryptedFile Tink keyset
+   SharedPreferences file and WebView session storage are device-bound too.
 -->
 <data-extraction-rules>
     <cloud-backup>
@@ -10,6 +11,8 @@
         <exclude domain="database" path="socialdl.db-shm" />
         <exclude domain="database" path="socialdl.db-wal" />
         <exclude domain="file" path="datastore" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
+        <exclude domain="root" path="app_webview" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="cookies" />
@@ -17,5 +20,7 @@
         <exclude domain="database" path="socialdl.db-shm" />
         <exclude domain="database" path="socialdl.db-wal" />
         <exclude domain="file" path="datastore" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
+        <exclude domain="root" path="app_webview" />
     </device-transfer>
 </data-extraction-rules>

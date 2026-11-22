@@ -81,13 +81,17 @@ data class MediaContainer(
         fun videoCopyable(container: MediaContainer, codec: String?): Boolean {
             val c = codec.orEmpty().lowercase(Locale.ROOT)
             if (c.isEmpty()) return false
-            val h264 = c.startsWith("h264") || c.startsWith("avc")
-            val hevc = c.startsWith("hevc") || c.startsWith("h265") || c.startsWith("hvc")
-            val vp9 = c.startsWith("vp9")
-            val av1 = c.startsWith("av1")
+            // Accept both yt-dlp's short names and ISO-BMFF/Matroska codec strings
+            // ("avc1.640028", "hev1.1.6.L93.B0", "vp09.00.51.08", "AV01.0.08M.08").
+            val h264 = c.startsWith("h264") || c.startsWith("h.264") || c.startsWith("avc")
+            val hevc = c.startsWith("hevc") || c.startsWith("h265") || c.startsWith("h.265") ||
+                c.startsWith("hvc") || c.startsWith("hev1")
+            val vp8 = c.startsWith("vp8") || c.startsWith("vp08")
+            val vp9 = c.startsWith("vp9") || c.startsWith("vp09")
+            val av1 = c.startsWith("av1") || c.startsWith("av01")
             return when (container) {
-                MKV -> h264 || hevc || vp9 || av1
-                WEBM -> vp9 || av1
+                MKV -> h264 || hevc || vp8 || vp9 || av1
+                WEBM -> vp8 || vp9 || av1
                 MP4 -> h264 || hevc || vp9 || av1
                 MOV -> h264 || hevc
                 else -> false
@@ -98,7 +102,8 @@ data class MediaContainer(
         fun audioCopyable(container: MediaContainer, codec: String?): Boolean {
             val c = codec.orEmpty().lowercase(Locale.ROOT)
             if (c.isEmpty()) return false
-            val aac = c.startsWith("aac")
+            // "mp4a.40.2" is the ISO-BMFF spelling of AAC (see nativeAudioFor).
+            val aac = c.startsWith("aac") || c.startsWith("mp4a")
             val opus = c.startsWith("opus")
             val vorbis = c.startsWith("vorbis")
             val mp3 = c.startsWith("mp3")

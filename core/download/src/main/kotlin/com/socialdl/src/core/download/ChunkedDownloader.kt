@@ -38,6 +38,10 @@ import javax.inject.Singleton
  *   cannot be verified and relies on server correctness.
  * - When a total is known, the download only completes if the written byte
  *   count and the destination length equal that total.
+ * - A 200 response to the first ranged request means the server declined Range:
+ *   that body is the whole representation, so it is streamed once and the
+ *   download returns instead of re-entering the chunk loop (a chunked or
+ *   zero-length body never yields a total to loop against).
  *
  * Each chunk is appended as it is read. An oversized buffer is rejected before
  * it is written; a short body may already have appended a prefix when the
@@ -183,6 +187,9 @@ class ChunkedDownloader @Inject constructor(
                         if (response.code == 200 && chunkStart == 0L) {
                             Logger.w(tag, "Server returned 200 OK without Range support. Falling back to single stream.")
                             val body = response.body ?: throw IOException("Empty response body from $url")
+                            // Null when the server sends a chunked body (-1) or an
+                            // explicit zero length: only the bytes actually written
+                            // can prove completion in those cases.
                             val cl = body.contentLength().takeIf { it > 0 }
                             totalBytes = cl
                             body.byteStream().use { input ->
@@ -192,7 +199,22 @@ class ChunkedDownloader @Inject constructor(
                             }
                             chunkSuccess = true
                             downloadedBytes = destination.length()
-                            return@use
+                            // A declared length must match what was written before
+                            // this fallback may count as complete.
+                            if (cl != null && downloadedBytes != cl) {
+                                throw RangeInvalidException(
+                                    "Fallback body was $downloadedBytes bytes but Content-Length was $cl"
+                                )
+                            }
+                            // Bug #3: leave downloadChunked entirely. This body was
+                            // the WHOLE representation; re-entering the chunk loop
+                            // would either request from byte 0 again (infinite loop
+                            // for a zero Content-Length) or fail with
+                            // RangeNotSupported / "no resolvable total" even though
+                            // the transfer was valid. `return` is non-local out of
+                            // the inline `use`, so the response still closes and the
+                            // outer finally still unregisters the call.
+                            return
                         }
 
                         if (response.code == 200 && chunkStart > 0L) {

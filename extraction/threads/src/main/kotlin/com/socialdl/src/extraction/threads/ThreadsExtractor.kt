@@ -80,22 +80,24 @@ class ThreadsExtractor @Inject constructor(
         Logger.d(tag, "Extracting Threads metadata for $normalizedUrl (cookies=$hasCookies)")
 
         return try {
-            cookieStore.withCookieFile(Platform.THREADS) { jarPath ->
-                val cookies = jarPath?.let { path ->
+            // Parse the decrypted jar while its throwaway file is alive; the file
+            // is deleted as soon as this block returns, before the WebView starts.
+            val cookies = cookieStore.withCookieFile(Platform.THREADS) { jarPath ->
+                jarPath?.let { path ->
                     withContext(Dispatchers.IO) {
                         runCatching { parseNetscapeCookies(File(path).readLines()) }
                             .onFailure { Logger.w(tag, "Failed to parse Threads cookie jar", it) }
                             .getOrDefault(emptyList())
                     }
                 }.orEmpty()
+            }
 
-                withTimeout(EXTRACTION_TIMEOUT_MS) {
-                    gate.withLock {
-                        val rawJson = withContext(Dispatchers.Main) {
-                            runHeadlessExtraction(normalizedUrl, cookies)
-                        }
-                        decodeAndMap(rawJson, normalizedUrl)
+            withTimeout(EXTRACTION_TIMEOUT_MS) {
+                gate.withLock {
+                    val rawJson = withContext(Dispatchers.Main) {
+                        runHeadlessExtraction(normalizedUrl, cookies)
                     }
+                    decodeAndMap(rawJson, normalizedUrl)
                 }
             }
         } catch (e: TimeoutCancellationException) {
@@ -142,22 +144,45 @@ class ThreadsExtractor @Inject constructor(
     private suspend fun runHeadlessExtraction(
         postUrl: String,
         cookies: List<ParsedNetscapeCookie>,
-    ): String =
-        suspendCancellableCoroutine { continuation ->
-            val mainHandler = Handler(Looper.getMainLooper())
-            val finished = AtomicBoolean(false)
-            val pollingStarted = AtomicBoolean(false)
-            val preloaderSeenPolls = AtomicInteger(0)
-            var webView: WebView? = null
-
-            fun cleanup() {
-                mainHandler.removeCallbacksAndMessages(null)
-                val wv = webView ?: return
-                webView = null
-                runCatching { wv.removeJavascriptInterface(JS_BRIDGE_NAME) }
-                runCatching { wv.stopLoading() }
-                runCatching { wv.destroy() }
+    ): String {
+        val cm = CookieManager.getInstance()
+        cm.setAcceptCookie(true)
+        // Outer try/finally runs synchronously on Dispatchers.Main before
+        // runHeadlessExtraction returns (and before `gate` unlocks), so a
+        // late posted cleanup can never wipe a subsequent extraction's cookies.
+        return try {
+            // 1) Replay the decrypted Netscape jar into CookieManager so extraction
+            // never depends on a live capture WebView session. Signed out of Threads
+            // (no jar): explicitly expire any stale session left by a capture or a
+            // previous run so it cannot leak into this anonymous run.
+            // setCookie is asynchronous, so await every callback — a page load racing
+            // a pending write would run with the old (or no) session.
+            setCookiesAsync(
+                cm,
+                cookies.takeIf { it.isNotEmpty() }
+                    ?.map { cookie -> cookie.url to cookie.setCookieHeader }
+                    ?: SIGNED_OUT_EXPIRY_COOKIES,
+            )
+            // 2) Pre-seed consent cookies to avoid cookie banners blocking hydration.
+            CONSENT_COOKIES.forEach { cookie ->
+                cm.setCookie(THREADS_ORIGIN, "$cookie; Path=/; Secure")
             }
+
+            suspendCancellableCoroutine { continuation ->
+                val mainHandler = Handler(Looper.getMainLooper())
+                val finished = AtomicBoolean(false)
+                val pollingStarted = AtomicBoolean(false)
+                val preloaderSeenPolls = AtomicInteger(0)
+                var webView: WebView? = null
+
+                fun cleanup() {
+                    mainHandler.removeCallbacksAndMessages(null)
+                    val wv = webView ?: return
+                    webView = null
+                    runCatching { wv.removeJavascriptInterface(JS_BRIDGE_NAME) }
+                    runCatching { wv.stopLoading() }
+                    runCatching { wv.destroy() }
+                }
 
             fun finishWithResult(payload: String) {
                 if (!finished.compareAndSet(false, true)) return
@@ -192,21 +217,7 @@ class ThreadsExtractor @Inject constructor(
                     // Never override userAgentString (preserves Sec-CH-UA client hints).
                 }
 
-                val cm = CookieManager.getInstance()
-                cm.setAcceptCookie(true)
                 cm.setAcceptThirdPartyCookies(wv, true)
-                // 1) Replay the decrypted Netscape jar into CookieManager so extraction
-                // never depends on a live capture WebView session.
-                if (cookies.isNotEmpty()) {
-                    cookies.forEach { cookie ->
-                        cm.setCookie(cookie.url, cookie.setCookieHeader)
-                    }
-                    runCatching { cm.flush() }
-                }
-                // 2) Pre-seed consent cookies to avoid cookie banners blocking hydration.
-                CONSENT_COOKIES.forEach { cookie ->
-                    cm.setCookie(THREADS_ORIGIN, "$cookie; Path=/; Secure")
-                }
 
                 // Chromium requires non-zero dimensions even when detached from a window.
                 wv.measure(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
@@ -289,6 +300,47 @@ class ThreadsExtractor @Inject constructor(
                 finishWithError(e)
             }
         }
+        } finally {
+            // Expire every replayed cookie from the global CookieManager before
+            // returning and before the extraction Mutex releases.
+            clearReplayedCookies(cm, cookies)
+        }
+    }
+
+    /**
+     * Writes [entries] to [cm] one at a time, awaiting every asynchronous
+     * `setCookie` callback. `loadUrl` must not run while a write is pending, or
+     * the page can load with the previous session (or none at all).
+     */
+    private suspend fun setCookiesAsync(
+        cm: CookieManager,
+        entries: List<Pair<String, String>>,
+    ) {
+        if (entries.isEmpty()) return
+        withContext(Dispatchers.Main.immediate) {
+            for ((url, header) in entries) {
+                suspendCancellableCoroutine { continuation ->
+                    cm.setCookie(url, header) {
+                        if (continuation.isActive) continuation.resume(Unit)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Expires every cookie replayed from the decrypted jar in the
+     * process-global [CookieManager] (never written back to WebView's on-disk
+     * cookie DB: no `flush()`).
+     */
+    private fun clearReplayedCookies(
+        cm: CookieManager,
+        cookies: List<ParsedNetscapeCookie>,
+    ) {
+        cookies.forEach { cookie ->
+            runCatching { cm.setCookie(cookie.url, cookie.expiredSetCookieHeader, null) }
+        }
+    }
 
     private class ThreadsJsBridge(
         private val onResult: (String) -> Unit,
@@ -310,6 +362,18 @@ class ThreadsExtractor @Inject constructor(
         const val JS_BRIDGE_NAME = "AndroidMedia"
         const val THREADS_ORIGIN = "https://www.threads.com"
         val CONSENT_COOKIES = listOf("ps_n=1", "ps_l=1", "dpr=2")
+
+        /**
+         * Signed-out runs must not inherit a session from the capture WebView or
+         * a prior extraction, so both Threads cookie scopes are expired before
+         * the post page loads.
+         */
+        val SIGNED_OUT_EXPIRY_COOKIES = listOf(
+            "https://threads.com" to "sessionid=; Domain=.threads.com; Path=/; Max-Age=0; Secure",
+            "https://threads.com" to "ds_user_id=; Domain=.threads.com; Path=/; Max-Age=0; Secure",
+            "https://www.threads.com" to "sessionid=; Path=/; Max-Age=0; Secure",
+            "https://www.threads.com" to "ds_user_id=; Path=/; Max-Age=0; Secure",
+        )
 
         /**
          * Returns a plain scalar string:

@@ -48,16 +48,18 @@ internal fun normalizeThreadsUrl(url: String): String {
         host == "threads.com" -> "www.threads.com"
         else -> return withScheme
     }
+    // Rebuild from the raw components instead of the 7-arg URI constructor:
+    // that constructor treats `%XX` as literal text and re-encodes it (%25XX).
     return runCatching {
-        URI(
-            "https",
-            uri.rawUserInfo,
-            canonicalHost,
-            uri.port,
-            uri.rawPath,
-            uri.rawQuery,
-            uri.rawFragment
-        ).toASCIIString()
+        buildString {
+            append("https://")
+            if (!uri.rawUserInfo.isNullOrEmpty()) append(uri.rawUserInfo).append('@')
+            append(canonicalHost)
+            if (uri.port != -1) append(':').append(uri.port)
+            append(uri.rawPath.orEmpty())
+            if (uri.rawQuery != null) append('?').append(uri.rawQuery)
+            if (uri.rawFragment != null) append('#').append(uri.rawFragment)
+        }
     }.getOrElse { withScheme }
 }
 
@@ -67,7 +69,27 @@ internal fun extractAuthorFromUrl(url: String): String? =
 internal data class ParsedNetscapeCookie(
     val url: String,
     val setCookieHeader: String,
-)
+    val name: String = "",
+    val path: String = "/",
+    /** Host without the leading dot; non-null only for domain cookies. */
+    val domain: String? = null,
+    val secure: Boolean = false,
+    val httpOnly: Boolean = false,
+) {
+    /**
+     * `Set-Cookie` value that expires this cookie in the process-global
+     * `CookieManager`. `ThreadsExtractor` replays a decrypted jar into that
+     * shared store for the duration of one run and must scrub it afterwards.
+     */
+    val expiredSetCookieHeader: String
+        get() = buildString {
+            append(name).append("=; Path=").append(path)
+            if (domain != null) append("; Domain=.").append(domain)
+            append("; Max-Age=0")
+            if (secure) append("; Secure")
+            if (httpOnly) append("; HttpOnly")
+        }
+}
 
 /**
  * Parses Netscape `cookies.txt` lines into `(url, Set-Cookie)` pairs suitable
@@ -77,7 +99,9 @@ internal data class ParsedNetscapeCookie(
 internal fun parseNetscapeCookies(lines: List<String>): List<ParsedNetscapeCookie> {
     val result = ArrayList<ParsedNetscapeCookie>(lines.size)
     for (rawLine in lines) {
-        val trimmed = rawLine.trim()
+        // Only strip line endings and leading indentation: `trim()` would also
+        // drop the trailing tab of a valid 7-column row whose value is empty.
+        val trimmed = rawLine.trimEnd('\r', '\n').trimStart()
         if (trimmed.isEmpty()) continue
         val httpOnly = trimmed.startsWith("#HttpOnly_")
         if (!httpOnly && trimmed.startsWith("#")) continue
@@ -104,7 +128,15 @@ internal fun parseNetscapeCookies(lines: List<String>): List<ParsedNetscapeCooki
             if (secure) append("; Secure")
             if (httpOnly) append("; HttpOnly")
         }
-        result += ParsedNetscapeCookie(url = "$scheme://$host", setCookieHeader = header)
+        result += ParsedNetscapeCookie(
+            url = "$scheme://$host",
+            setCookieHeader = header,
+            name = name,
+            path = path,
+            domain = host.takeIf { includeSubdomains },
+            secure = secure,
+            httpOnly = httpOnly,
+        )
     }
     return result
 }

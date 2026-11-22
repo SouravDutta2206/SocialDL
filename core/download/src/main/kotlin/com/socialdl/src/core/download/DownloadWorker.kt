@@ -18,9 +18,15 @@ import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
+// CoroutineWorker declares its own deprecated `coroutineContext` (a dispatcher),
+// which shadows the stdlib property inside this class. Alias the intrinsic so the
+// cancellation bridge below really reads the coroutine Job.
+import kotlin.coroutines.coroutineContext as stdlibCoroutineContext
 
 /**
  * The download work unit (§9). Reads its ENTIRE config from the Room job row via
@@ -64,12 +70,10 @@ class DownloadWorker @AssistedInject constructor(
     private val streamResolver: StreamResolver,
     private val outputExporter: OutputExporter,
     private val coverArt: CoverArt,
+    private val downloadManager: DownloadManager,
 ) : CoroutineWorker(appContext, workerParams) {
 
     private val tag = "DownloadWorker"
-
-    /** Aborts in-flight OkHttp calls instantly on network loss (kill-on-fail §9). */
-    private val networkCanceller = DownloadCallCanceller()
 
     /** Foreground-service notification promotion state (P1-1). */
     private var isForeground = false
@@ -155,6 +159,12 @@ class DownloadWorker @AssistedInject constructor(
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val jobId = inputData.getString(KEY_JOB_ID) ?: return@withContext Result.failure()
 
+        // Bug #1: reconciliation may still be running when WorkManager starts this
+        // worker during process creation. It kills every non-terminal row, so a
+        // read here before the barrier would race it and lose a job that was mid
+        // download. Wait for the startup snapshot to settle first.
+        downloadManager.awaitStartupReconciled()
+
         val job = jobRepository.getJob(jobId)
         if (job == null) {
             // Row deleted before/at start => the user already cancelled; nothing to do.
@@ -182,23 +192,47 @@ class DownloadWorker @AssistedInject constructor(
         val scratchDir = File(appContext.cacheDir, "downloads/$jobId")
         scratchDir.mkdirs()
 
-        // Watch the network for the whole job: when the last usable network drops,
-        // abort every in-flight call instantly (retries without a network are
-        // pointless). During mux/export no call is registered — cancel is a no-op.
-        val watchdog = NetworkLossWatchdog(appContext) { networkCanceller.cancel() }
-        watchdog.register()
-
         try {
             val success = concurrencyGate.withDownloadPermit {
-                runPipeline(job, scratchDir)
+                // Bug #5/#6: the watchdog and its canceller belong to the RUNNING
+                // worker only. Registering before the permit let a network blip
+                // while queued permanently mark the canceller as cancelled, so
+                // every call of this worker aborted the moment it got a permit.
+                // The per-permit canceller also lets coroutine cancellation
+                // (user cancel / system stop) abort a blocking OkHttp read.
+                val callCanceller = DownloadCallCanceller()
+                val watchdog = NetworkLossWatchdog(appContext) { callCanceller.cancel() }
+                watchdog.register()
+                val cancelHandle = stdlibCoroutineContext[Job]?.invokeOnCompletion { cause ->
+                    if (cause != null) callCanceller.cancel()
+                }
+                try {
+                    runPipeline(job, scratchDir, callCanceller)
+                } finally {
+                    cancelHandle?.dispose()
+                    watchdog.unregister()
+                }
             }
             if (success) Result.success() else Result.failure()
         } catch (e: CancellationException) {
             Logger.i(tag, "[$jobId] Download task was cancelled")
+            if (isStopped) {
+                // Bug #4: a system stop (constraints lost, app killed, stopWork)
+                // cancels the coroutine and leaves the WorkSpec dead. Without this
+                // write the row stays DOWNLOADING forever — a zombie card the UI
+                // can never resolve. markFailed is conditional (`status != FAILED`);
+                // a user-cancelled row was already deleted, so this is a no-op then.
+                withContext(NonCancellable) {
+                    jobRepository.markFailed(jobId, DownloadError.Interrupted)
+                }
+            }
             throw e
         } catch (e: Exception) {
             if (isStopped) {
                 Logger.i(tag, "[$jobId] Download task was stopped")
+                withContext(NonCancellable) {
+                    jobRepository.markFailed(jobId, DownloadError.Interrupted)
+                }
                 Result.failure()
             } else {
                 val error = DownloadError.from(e)
@@ -207,14 +241,17 @@ class DownloadWorker @AssistedInject constructor(
                 Result.failure()
             }
         } finally {
-            watchdog.unregister()
             // Clean up task scratch directory (§9.1)
             scratchDir.deleteRecursively()
         }
     }
 
     /** Returns true when the job exported + persisted successfully; false otherwise (FAILED already written when applicable). */
-    private suspend fun runPipeline(job: DownloadJobEntity, scratchDir: File): Boolean {
+    private suspend fun runPipeline(
+        job: DownloadJobEntity,
+        scratchDir: File,
+        callCanceller: DownloadCallCanceller,
+    ): Boolean {
         promoteToForeground(job)
 
         // A media CDN 401/403 ("server refused access") is not necessarily final:
@@ -265,7 +302,7 @@ class DownloadWorker @AssistedInject constructor(
             }
 
             try {
-                return downloadResolved(job, resolved, scratchDir)
+                return downloadResolved(job, resolved, scratchDir, callCanceller)
             } catch (e: Exception) {
                 if (e.isRefreshableRejection() && attempt + 1 < maxAttempts) {
                     Logger.w(
@@ -304,7 +341,8 @@ class DownloadWorker @AssistedInject constructor(
     private suspend fun downloadResolved(
         job: DownloadJobEntity,
         resolved: ResolvedStreams,
-        scratchDir: File
+        scratchDir: File,
+        callCanceller: DownloadCallCanceller,
     ): Boolean {
         val finalFile = if (resolved.requiresMuxing) {
             val videoTemp = File(scratchDir, "video.tmp")
@@ -315,7 +353,8 @@ class DownloadWorker @AssistedInject constructor(
                 resolved = resolved,
                 videoTemp = videoTemp,
                 audioTemp = audioTemp,
-                platform = job.platform
+                platform = job.platform,
+                canceller = callCanceller,
             )
 
             // The probe tells the mux which streams can be copied into the chosen
@@ -344,7 +383,8 @@ class DownloadWorker @AssistedInject constructor(
                 url = resolved.directUrl,
                 destination = mediaTemp,
                 chunkSizeBytes = resolved.videoChunkSize,
-                platform = job.platform
+                platform = job.platform,
+                canceller = callCanceller,
             )
 
             if (mediaTemp.length() == 0L) {
@@ -365,7 +405,11 @@ class DownloadWorker @AssistedInject constructor(
             }
         }
 
-        return outputExporter.exportAndPersist(job, finalFile, resolved)
+        return outputExporter.exportAndPersist(job, finalFile, resolved) {
+            // Bug #7: the foreground notification must move to EXPORTING here —
+            // the exporter writes Room directly, so no progress tick follows.
+            maybeRefreshForeground(job.id)
+        }
     }
 
     /**
@@ -378,7 +422,8 @@ class DownloadWorker @AssistedInject constructor(
         resolved: ResolvedStreams,
         videoTemp: File,
         audioTemp: File,
-        platform: String
+        platform: String,
+        canceller: DownloadCallCanceller,
     ) {
         Logger.d(tag, "[$jobId] Downloading video stream (chunkSize=${resolved.videoChunkSize})...")
         chunkedDownloader.download(
@@ -387,7 +432,7 @@ class DownloadWorker @AssistedInject constructor(
             chunkSizeBytes = resolved.videoChunkSize,
             platform = platform,
             isStopped = { isStopped },
-            canceller = networkCanceller
+            canceller = canceller
         ) { bytesWritten, totalBytes ->
             val progress = if (totalBytes != null && totalBytes > 0) {
                 (bytesWritten.toFloat() / totalBytes) * 0.8f // Video accounts for 80% of download progress
@@ -404,7 +449,7 @@ class DownloadWorker @AssistedInject constructor(
             chunkSizeBytes = resolved.audioChunkSize,
             platform = platform,
             isStopped = { isStopped },
-            canceller = networkCanceller
+            canceller = canceller
         ) { bytesWritten, totalBytes ->
             val progress = if (totalBytes != null && totalBytes > 0) {
                 0.8f + (bytesWritten.toFloat() / totalBytes) * 0.15f // Audio accounts for 15%
@@ -430,7 +475,8 @@ class DownloadWorker @AssistedInject constructor(
         url: String,
         destination: File,
         chunkSizeBytes: Long,
-        platform: String
+        platform: String,
+        canceller: DownloadCallCanceller,
     ) {
         Logger.d(tag, "[$jobId] Downloading single media stream (chunkSize=$chunkSizeBytes)...")
         chunkedDownloader.download(
@@ -439,7 +485,7 @@ class DownloadWorker @AssistedInject constructor(
             chunkSizeBytes = chunkSizeBytes,
             platform = platform,
             isStopped = { isStopped },
-            canceller = networkCanceller
+            canceller = canceller
         ) { bytesWritten, totalBytes ->
             val progress = if (totalBytes != null && totalBytes > 0) {
                 bytesWritten.toFloat() / totalBytes
@@ -485,6 +531,9 @@ class DownloadWorker @AssistedInject constructor(
             Logger.i(tag, "[$jobId] Job became terminal before muxing; aborting")
             return null
         }
+        // Bug #7: MUXING is a foreground phase transition; the notification must
+        // not keep showing DOWNLOADING with the last transfer percent.
+        maybeRefreshForeground(jobId)
 
         val ext = container.lowercase(Locale.ROOT)
         val muxedFile = File(scratchDir, "muxed.$ext")
@@ -569,6 +618,8 @@ class DownloadWorker @AssistedInject constructor(
             Logger.i(tag, "[${job.id}] Job became terminal before conversion; aborting")
             return null
         }
+        // Bug #7: conversion is the MUXING phase for single-stream jobs.
+        maybeRefreshForeground(job.id)
 
         val output = File(scratchDir, "output.${target.extension}")
         val args = if (resolved.formatKind == FormatKind.AUDIO) {

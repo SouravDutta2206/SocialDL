@@ -10,6 +10,7 @@ import com.socialdl.src.core.download.DownloadManager
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
+import com.socialdl.src.core.model.uiKey
 import com.socialdl.src.extraction.api.ExtractionError
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.ExtractorRegistry
@@ -20,6 +21,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -81,36 +83,53 @@ class HomeViewModel @Inject constructor(
 
     private var extractionJob: Job? = null
 
-    fun resolveItemFormats(item: MediaItem, onResolved: (MediaItem) -> Unit) {
+    /**
+     * In-flight on-demand placeholder resolution. Only one may run at a time: a new
+     * tap or search cancels the previous one so a slow response cannot reopen a
+     * stale bottom sheet or overwrite the card that is currently resolving.
+     */
+    private var resolveJob: Job? = null
+
+    fun resolveItemFormats(item: MediaItem, itemKey: String, onResolved: (MediaItem) -> Unit) {
+        // Another card (or the same one, double-tapped) supersedes this resolution.
+        resolveJob?.cancel()
+
         if (!item.isPlaceholder) {
             onResolved(item)
             return
         }
 
-        viewModelScope.launch {
-            _resolvingItemId.value = item.sourceUrl
+        // Publish the spinner before extraction starts so the card reacts immediately.
+        _resolvingItemId.value = itemKey
+        resolveJob = viewModelScope.launch {
             try {
                 val extractor = extractorRegistry.resolve(item.sourceUrl)
                 if (extractor == null) {
+                    if (!isActive) return@launch
                     onResolved(item)
                     return@launch
                 }
                 when (val result = extractor.extract(item.sourceUrl)) {
                     is ExtractionResult.Success -> {
+                        // Extraction is cancellable and may have been superseded while
+                        // suspended; never publish results for a stale request.
+                        if (!isActive) return@launch
                         val resolvedItem = result.items.firstOrNull()?.copy(
                             carouselIndex = item.carouselIndex
                         ) ?: item
                         _uiState.update { state ->
-                            val updatedList = state.mediaItems.map {
-                                // Match the exact carousel slot; matching only by sourceUrl would collapse
+                            val updatedList = state.mediaItems.mapIndexed { idx, it ->
+                                // Match the exact card key; matching only by sourceUrl would collapse
                                 // N carousel cards into one and crash LazyColumn (duplicate keys).
-                                if (it.sourceUrl == item.sourceUrl && it.carouselIndex == item.carouselIndex) resolvedItem else it
+                                if (it.uiKey(fallbackIndex = idx) == itemKey) resolvedItem else it
                             }
                             state.copy(mediaItems = updatedList)
                         }
+                        if (!isActive) return@launch
                         onResolved(resolvedItem)
                     }
                     is ExtractionResult.Error -> {
+                        if (!isActive) return@launch
                         messageBus.post(
                             stringRes(R.string.home_error_presets_failed, result.cause.message),
                             isError = true
@@ -121,13 +140,16 @@ class HomeViewModel @Inject constructor(
                 throw e
             } catch (e: Exception) {
                 Logger.e(tag, "Failed to resolve formats for '${item.title}'", e)
-                messageBus.post(
-                    stringRes(R.string.home_error_presets_failed, e.message ?: "unknown error"),
-                    isError = true
-                )
+                if (isActive) {
+                    messageBus.post(
+                        stringRes(R.string.home_error_presets_failed, e.message ?: "unknown error"),
+                        isError = true
+                    )
+                }
             } finally {
                 // Never leave the card spinner stuck, even if extraction throws.
-                _resolvingItemId.value = null
+                // Only clear our own key: a newer resolution may already own the spinner.
+                if (_resolvingItemId.value == itemKey) _resolvingItemId.value = null
             }
         }
     }
@@ -158,7 +180,10 @@ class HomeViewModel @Inject constructor(
                 enqueued += downloadManager.enqueueDownload(
                     mediaItem = item,
                     selectedFormat = format,
-                    container = format.container,
+                    // Playlist placeholders carry a synthetic "MP4" container; passing
+                    // it would lock the worker to MP4 before yt-dlp resolves the real
+                    // format. Let the worker adopt the JIT-resolved native container.
+                    container = format.container.takeUnless { format.isPlaceholder },
                     customTitle = item.title,
                     customAuthor = item.author,
                 )
@@ -171,6 +196,63 @@ class HomeViewModel @Inject constructor(
             }
         }
         return enqueued
+    }
+
+    /**
+     * ViewModel-scoped enqueue for the format sheet. Running the suspend enqueue here
+     * (instead of a composable's coroutine scope) lets the download survive rotation
+     * or navigation away from Home, and reports outcomes through [messageBus].
+     */
+    fun enqueueSingleDownload(
+        mediaItem: MediaItem,
+        selectedFormat: MediaFormat,
+        container: String? = null,
+        customTitle: String? = null,
+        customAuthor: String? = null,
+    ) {
+        viewModelScope.launch {
+            try {
+                startDownload(mediaItem, selectedFormat, container, customTitle, customAuthor)
+                messageBus.post(
+                    "Download queued: ${customTitle ?: mediaItem.title} (${selectedFormat.label})"
+                )
+            } catch (e: CancellationException) {
+                // ViewModel cleared mid-enqueue: not a user-facing failure.
+                throw e
+            } catch (e: Exception) {
+                Logger.e(tag, "Failed to enqueue download for '${mediaItem.title}'", e)
+                messageBus.post(
+                    "Couldn't queue download: ${e.message ?: "unknown error"}",
+                    isError = true
+                )
+            }
+        }
+    }
+
+    /**
+     * ViewModel-scoped batch enqueue. Reports the ACTUAL enqueued count: a mid-loop
+     * failure must not overstate what landed in the queue.
+     */
+    fun enqueueBatchDownload(items: List<Pair<MediaItem, MediaFormat>>) {
+        viewModelScope.launch {
+            try {
+                val taskIds = startBatchDownload(items)
+                if (taskIds.isEmpty()) {
+                    messageBus.post("No downloads were queued", isError = true)
+                } else {
+                    messageBus.post("Queued ${taskIds.size} downloads")
+                }
+            } catch (e: CancellationException) {
+                // ViewModel cleared mid-batch: not a user-facing failure.
+                throw e
+            } catch (e: Exception) {
+                Logger.e(tag, "Failed to enqueue batch download", e)
+                messageBus.post(
+                    "Couldn't queue downloads: ${e.message ?: "unknown error"}",
+                    isError = true
+                )
+            }
+        }
     }
 
     /**
@@ -225,6 +307,9 @@ class HomeViewModel @Inject constructor(
     }
 
     private fun extractMedia(extractor: MediaExtractor, url: String) {
+        // A new search invalidates any placeholder resolution from the old result list.
+        resolveJob?.cancel()
+        _resolvingItemId.value = null
         extractionJob?.cancel()
         extractionJob = viewModelScope.launch {
             _uiState.update {

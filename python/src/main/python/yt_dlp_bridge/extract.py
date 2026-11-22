@@ -3,7 +3,7 @@ import shutil
 import subprocess
 import yt_dlp
 
-from common.envelope import EXCEPTION, classify, fail, succeed
+from common.envelope import EXCEPTION, UNAVAILABLE, classify, fail, succeed
 
 
 class _DebugLogCollector:
@@ -92,6 +92,26 @@ def _ensure_native_env(ld_library_path):
             merged.append(part)
     os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(merged)
     os.environ["OPENSSL_CONF"] = "/dev/null"
+
+
+def _is_channel_url(url: str) -> bool:
+    """True for YouTube channel/feed/user surfaces, which yt-dlp would expand
+    into an unbounded scrape (every video on the channel). Only single videos
+    and playlists are supported."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not (host == "youtube.com" or host.endswith(".youtube.com")):
+        return False
+    path = parsed.path or ""
+    return (
+        path.startswith("/@")
+        or path.startswith("/channel/")
+        or path.startswith("/c/")
+        or path.startswith("/user/")
+        or path.startswith("/feed/")
+    )
 
 
 def _is_playlist_url(url: str) -> bool:
@@ -211,6 +231,13 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
     `native_bin_dir` / `native_ld_library_path` come from the Kotlin side's
     [ResolvedNativeComponent] so the native runtime contract has a single owner.
     """
+    # Reject channels/feeds before yt-dlp paginates the entire channel.
+    if _is_channel_url(url):
+        return fail(
+            UNAVAILABLE,
+            "Channel URLs are not supported — paste a video or playlist link",
+        )
+
     is_playlist = _is_playlist_url(url)
     ydl_opts = {
         "quiet": True,
@@ -226,6 +253,10 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         "extractor_retries": 2,
         "fragment_retries": 2,
     }
+    if is_playlist:
+        # A playlist is user-bounded in the UI; cap huge/unbounded lists so one
+        # paste can't expand into thousands of metadata requests.
+        ydl_opts["playlistend"] = 200
 
     node_bin = _resolve_node_runtime(node_dir, native_bin_dir)
     if node_bin:
@@ -248,6 +279,22 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
             return succeed(_maybe_attach_js_diagnostics(_normalize(info), js_diag, debug_logger))
 
     except yt_dlp.utils.DownloadError as e:
+        # Anonymous fetches on mobile/carrier IPs often hit YouTube's web bot-check
+        # ("Sign in to confirm you're not a bot") on the default clients. Retry once
+        # with Android clients that do not rely on web cookies before surfacing
+        # an auth wall to the user.
+        if not cookiefile and "sign in to confirm you're not a bot" in str(e).lower():
+            fallback_opts = {
+                **ydl_opts,
+                "extractor_args": {"youtube": {"player_client": ["android_vr", "android"]}},
+            }
+            try:
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info:
+                        return succeed(_maybe_attach_js_diagnostics(_normalize(info), js_diag, debug_logger))
+            except Exception:
+                pass
         return fail(
             classify(e, _AUTH_WALL_MARKERS),
             e,

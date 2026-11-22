@@ -47,13 +47,15 @@ from common.envelope import (
 
 try:
     import gallery_dl  # noqa: F401  — import proves Chaquopy packaging at boot
-    from gallery_dl import config as gd_config
-    from gallery_dl.extractor import find as gd_find
-    from gallery_dl.extractor.message import Message as GdMessage
+    from gallery_dl import exception as gd_exc
+
+    from common import gallery_dl_util
 
     _GDL_AVAILABLE = True
+    _GDL_NO_EXTRACTOR_ERRORS = (gd_exc.NoExtractorError,)
 except Exception:
     _GDL_AVAILABLE = False
+    _GDL_NO_EXTRACTOR_ERRORS = ()
 
 # ── Constants & patterns (reference twitter_x.py :133–172) ───────────────────
 
@@ -205,16 +207,20 @@ def _via_gallery_dl(url, cookiefile, user_agent):
     if not _GDL_AVAILABLE:
         raise RuntimeError("gallery-dl is not installed")
 
-    _configure_gallery_dl(cookiefile, user_agent)
-
-    tweet = {}
-    files = []
-    for message in gd_find(url):
-        kind = message[0]
-        if kind == GdMessage.Directory:
-            tweet.update(message[2] or {})
-        elif kind == GdMessage.Url:
-            files.append((message[1], message[2] or {}))
+    # Pin the media selection explicitly (gallery-dl 1.32.19 defaults are the
+    # same, but pinning keeps a future upgrade from silently changing payloads):
+    # video files on, AND poster previews on. Without ``previews`` gallery-dl
+    # emits no poster at all for video/gif entities (their per-file metadata
+    # never carries ``media_url_https``), which used to leave every videocard
+    # without a thumbnail. The app still downloads media-only: ``_via_gallery_dl``
+    # pairs each preview with the preceding video card instead of emitting it.
+    tweet, files = gallery_dl_util.extract_messages(
+        url,
+        cookiefile=cookiefile,
+        user_agent=user_agent,
+        extractor_section="twitter",
+        extractor_options={"videos": True, "previews": True},
+    )
 
     if not files:
         raise _Failure(UNAVAILABLE, "This tweet contains no downloadable media")
@@ -272,25 +278,6 @@ def _via_gallery_dl(url, cookiefile, user_agent):
         "owner": owner,
         "items": items,
     }
-
-
-def _configure_gallery_dl(cookiefile, user_agent):
-    # Deterministic behavior: ignore gallery-dl's user config files.
-    gd_config.clear()
-    if cookiefile:
-        gd_config.setg("cookies", cookiefile)
-    if user_agent:
-        gd_config.setg("user-agent", user_agent)
-
-    # Pin the media selection explicitly (gallery-dl 1.32.19 defaults are the
-    # same, but pinning keeps a future upgrade from silently changing payloads):
-    # video files on, AND poster previews on. Without ``previews`` gallery-dl
-    # emits no poster at all for video/gif entities (their per-file metadata
-    # never carries ``media_url_https``), which used to leave every videocard
-    # without a thumbnail. The app still downloads media-only: ``_via_gallery_dl``
-    # pairs each preview with the preceding video card instead of emitting it.
-    gd_config.set(("extractor", "twitter"), "videos", True)
-    gd_config.set(("extractor", "twitter"), "previews", True)
 
 
 def _gdl_media_type(meta, media_url):
@@ -601,6 +588,14 @@ def _int_or_zero(value):
 
 def _failure_envelope(error, cookiefile):
     """Maps unexpected exceptions, keeping raw text in debug_log only."""
+    if isinstance(error, _GDL_NO_EXTRACTOR_ERRORS):
+        return fail(
+            UNAVAILABLE,
+            "Unsupported Twitter/X URL — paste a link to a post "
+            "(https://x.com/USER/status/1234567890)",
+            tail=[str(error)],
+        )
+
     text = str(error)
     kind = classify(text, _AUTH_MARKERS)
 

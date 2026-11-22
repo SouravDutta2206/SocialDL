@@ -33,12 +33,15 @@ class OutputExporter @Inject constructor(
      * Room history row (§10). [resolved] carries the container actually downloaded
      * (JIT-resolved placeholders may differ from the stale
      * [DownloadJobEntity.container]).
+     * [onExporting] runs once the EXPORTING transition was persisted, so the
+     * worker can refresh its foreground notification for the phase change.
      * Returns true on success; false (FAILED written) on export failure.
      */
     internal suspend fun exportAndPersist(
         job: DownloadJobEntity,
         finalFile: File,
-        resolved: ResolvedStreams
+        resolved: ResolvedStreams,
+        onExporting: (suspend () -> Unit)? = null,
     ): Boolean {
         val jobId = job.id
 
@@ -60,6 +63,8 @@ class OutputExporter @Inject constructor(
             Logger.i(tag, "[$jobId] Job became terminal before export; aborting")
             return false
         }
+        // Bug #7: the MUXING/DOWNLOADING notification must switch to EXPORTING.
+        onExporting?.invoke()
 
         val resolvedJob = job.copy(
             container = resolved.container,

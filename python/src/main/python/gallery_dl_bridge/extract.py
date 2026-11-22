@@ -10,11 +10,12 @@ same format yt-dlp consumes): ``sessionid`` + ``ds_user_id`` mark a signed-in
 Instagram session.
 """
 
-import gallery_dl  # noqa: F401 — import proves Chaquopy packaging at boot
-from gallery_dl import config, exception as gd_exc
-from gallery_dl.extractor import find
-from gallery_dl.extractor.message import Message
+import re
 
+import gallery_dl  # noqa: F401 — import proves Chaquopy packaging at boot
+from gallery_dl import exception as gd_exc
+
+from common import gallery_dl_util
 from common.envelope import (
     AUTH_WALL,
     NETWORK,
@@ -25,6 +26,27 @@ from common.envelope import (
     succeed,
 )
 
+# Only single-post surfaces are extractable. Anything else (profiles, explore,
+# hashtags) makes gallery-dl page through an unbounded feed, which is both a
+# privacy/bandwidth hazard and a way to pin a dispatcher thread for minutes.
+_POST_URL_RE = re.compile(
+    r"/(?:p|reel|reels|tv|stories)/[A-Za-z0-9_.\-]+", re.IGNORECASE
+)
+
+_UNSUPPORTED_URL = (
+    "Unsupported Instagram URL — only posts, reels, stories, and IGTV links are supported"
+)
+
+# Keep a small delay between requests: removing pacing entirely (0) makes rapid
+# successive carousel/manual fetches much more likely to hit HTTP 429.
+_INSTAGRAM_OPTIONS = {
+    # Plain CDN URLs instead of ytdl: manifest URLs (Kotlin downloads bytes and
+    # muxing is not needed for these already-merged Instagram streams).
+    "videos": "merged",
+    "audio": False,
+    "sleep-request": 1,
+}
+
 
 def extract(url, cookiefile=None, user_agent=None):
     """Returns the flat success payload consumed by InstagramExtractor.
@@ -33,25 +55,20 @@ def extract(url, cookiefile=None, user_agent=None):
         {"index", "media_type", "url", "thumbnail_url", "duration"}
     ]}``
     """
-    _configure(cookiefile, user_agent)
+    # Reject profile/explore/feed URLs before gallery-dl starts paginating them.
+    if not _POST_URL_RE.search(url or ""):
+        return fail(UNAVAILABLE, _UNSUPPORTED_URL)
 
     try:
-        extractor = find(url)
-    except gd_exc.NoExtractorError:
-        return fail(
-            UNAVAILABLE,
-            "Unsupported Instagram URL — only posts, reels, and IGTV links are supported",
+        post, files = gallery_dl_util.extract_messages(
+            url,
+            cookiefile=cookiefile,
+            user_agent=user_agent,
+            extractor_section="instagram",
+            extractor_options=_INSTAGRAM_OPTIONS,
         )
-
-    try:
-        post = {}
-        files = []
-        for message in extractor:
-            kind = message[0]
-            if kind == Message.Directory:
-                post.update(message[2] or {})
-            elif kind == Message.Url:
-                files.append((message[1], message[2] or {}))
+    except gd_exc.NoExtractorError:
+        return fail(UNAVAILABLE, _UNSUPPORTED_URL)
     except Exception as error:
         return _failure_envelope(error, cookiefile)
 
@@ -90,29 +107,12 @@ def _is_video(media_url, meta):
     return path.endswith(_VIDEO_EXTENSIONS)
 
 
-def _configure(cookiefile, user_agent):
-    # Deterministic behavior: ignore gallery-dl's user config files.
-    config.clear()
-    if cookiefile:
-        config.setg("cookies", cookiefile)
-    if user_agent:
-        config.setg("user-agent", user_agent)
-
-    # Plain CDN URLs instead of ytdl: manifest URLs (Kotlin downloads bytes and
-    # muxing is not needed for these already-merged Instagram streams).
-    config.set(("extractor", "instagram"), "videos", "merged")
-    config.set(("extractor", "instagram"), "audio", False)
-    # Keep a small delay between requests: removing pacing entirely (0) makes
-    # rapid successive carousel/manual fetches much more likely to hit HTTP 429.
-    config.set(("extractor", "instagram"), "sleep-request", 1)
-
-
 def _failure_envelope(error, cookiefile):
     """Maps gallery-dl exceptions, keeping raw text in debug_log (never the toast)."""
     text = str(error).lower()
 
     if isinstance(error, gd_exc.NoExtractorError):
-        return fail(UNAVAILABLE, "Unsupported Instagram URL")
+        return fail(UNAVAILABLE, _UNSUPPORTED_URL)
 
     if isinstance(error, (gd_exc.AuthenticationError, gd_exc.AuthorizationError)):
         return fail(

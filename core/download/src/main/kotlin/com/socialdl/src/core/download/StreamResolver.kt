@@ -166,7 +166,17 @@ class StreamResolver @Inject constructor(
 
             when (val result = extraction) {
                 is ExtractionResult.Success -> {
-                    val resolvedItem = result.items.firstOrNull()
+                    // Bug #2: a refreshed carousel job must re-resolve ITS slide,
+                    // not slide 1. Extraction returns one MediaItem per slide with
+                    // a 1-based carouselIndex; older extractors may leave it null,
+                    // in which case the list position is the best available match.
+                    val resolvedItem = if (job.carouselIndex > 0 && result.items.size > 1) {
+                        result.items.firstOrNull { it.carouselIndex == job.carouselIndex }
+                            ?: result.items.getOrNull(job.carouselIndex - 1)
+                            ?: result.items.firstOrNull()
+                    } else {
+                        result.items.firstOrNull()
+                    }
                     if (resolvedItem == null) {
                         Logger.e(tag, "[$jobId] No media item returned for ${job.sourceUrl}")
                         return ResolveOutcome.Failed(DownloadError.ExtractionFailed)

@@ -3,6 +3,8 @@
    the device: the encrypted cookie jars are undecryptable after a restore
    (Android Keystore keys are not backed up), and the Room DB contains source and
    signed CDN URLs. DataStore holds cookie metadata, so it is excluded too.
+   The EncryptedFile Tink keyset SharedPreferences file and WebView session
+   storage (cookies/login state) are machine-bound as well and are excluded.
 -->
 <full-backup-content>
     <exclude domain="file" path="cookies" />
@@ -10,4 +12,6 @@
     <exclude domain="database" path="socialdl.db-shm" />
     <exclude domain="database" path="socialdl.db-wal" />
     <exclude domain="file" path="datastore" />
+    <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_file_pref__.xml" />
+    <exclude domain="root" path="app_webview" />
 </full-backup-content>
