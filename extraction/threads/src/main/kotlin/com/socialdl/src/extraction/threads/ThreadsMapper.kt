@@ -17,6 +17,7 @@ internal data class ThreadsExtractionDto(
     val shortcode: String? = null,
     val author: String? = null,
     val caption: String? = null,
+    val loginWall: Boolean = false,
     val items: List<ThreadsItemDto> = emptyList(),
 )
 
@@ -62,6 +63,51 @@ internal fun normalizeThreadsUrl(url: String): String {
 
 internal fun extractAuthorFromUrl(url: String): String? =
     THREADS_AUTHOR_REGEX.find(url)?.groupValues?.getOrNull(1)?.let { "@$it" }
+
+internal data class ParsedNetscapeCookie(
+    val url: String,
+    val setCookieHeader: String,
+)
+
+/**
+ * Parses Netscape `cookies.txt` lines into `(url, Set-Cookie)` pairs suitable
+ * for `CookieManager.setCookie(url, value)`, preserving `Domain`, `Path`,
+ * `Secure`, and `HttpOnly` attributes.
+ */
+internal fun parseNetscapeCookies(lines: List<String>): List<ParsedNetscapeCookie> {
+    val result = ArrayList<ParsedNetscapeCookie>(lines.size)
+    for (rawLine in lines) {
+        val trimmed = rawLine.trim()
+        if (trimmed.isEmpty()) continue
+        val httpOnly = trimmed.startsWith("#HttpOnly_")
+        if (!httpOnly && trimmed.startsWith("#")) continue
+
+        val dataLine = if (httpOnly) trimmed.removePrefix("#HttpOnly_") else trimmed
+        val cols = dataLine.split('\t')
+        if (cols.size != 7) continue
+
+        val rawDomain = cols[0].trim()
+        val host = rawDomain.removePrefix(".")
+        val name = cols[5].trim()
+        val value = cols[6]
+        if (host.isEmpty() || name.isEmpty()) continue
+
+        val includeSubdomains = cols[1].equals("TRUE", ignoreCase = true) || rawDomain.startsWith(".")
+        val path = cols[2].trim().ifEmpty { "/" }
+        val secure = cols[3].equals("TRUE", ignoreCase = true)
+        val scheme = if (secure) "https" else "http"
+
+        val header = buildString {
+            append(name).append('=').append(value)
+            append("; Path=").append(path)
+            if (includeSubdomains) append("; Domain=.").append(host)
+            if (secure) append("; Secure")
+            if (httpOnly) append("; HttpOnly")
+        }
+        result += ParsedNetscapeCookie(url = "$scheme://$host", setCookieHeader = header)
+    }
+    return result
+}
 
 /**
  * Pure DTO → model mapping (no Android/WebView dependencies), so JVM unit tests

@@ -161,11 +161,42 @@ private val CAPTURE_CONFIGS = listOf(
         title = "Sign in with X",
         subtitle = "Log in normally (2FA included). SocialDL never sees your password; only cookies are stored encrypted.",
     ),
+    CookieCaptureConfig(
+        platform = Platform.THREADS,
+        // Use /login/ directly: the plain threads.com home page shows an "open in
+        // Threads app" interstitial that blocks web sign-in in the embedded WebView.
+        loginUrl = "https://www.threads.com/login/",
+        successOrigin = "https://www.threads.com",
+        // Same session-only markers as Instagram: Threads runs on the IG auth stack.
+        markerCookies = listOf("sessionid", "ds_user_id"),
+        harvests = listOf(
+            NetscapeCookieJarWriter.Harvest(
+                url = "https://www.threads.com",
+                cookieDomain = ".threads.com"
+            ),
+            NetscapeCookieJarWriter.Harvest(
+                url = "https://www.instagram.com",
+                cookieDomain = ".instagram.com"
+            ),
+        ),
+        allowedHosts = listOf(
+            "threads.com",
+            "threads.net",
+            "instagram.com",
+            "facebook.com",
+            "meta.com",
+            "cdninstagram.com",
+            "fbcdn.net",
+            "facebook.net",
+        ),
+        title = "Sign in with Threads",
+        subtitle = "Log in normally (Instagram, Facebook or 2FA). SocialDL never sees your password; only cookies are stored encrypted.",
+    ),
 ).associateBy { it.platform }
 
 /**
  * Resolves the capture flow for [platform]. Fail-closed: platforms without a
- * capture route (Threads/UNKNOWN) must never harvest a session.
+ * capture route (UNKNOWN) must never harvest a session.
  */
 fun cookieCaptureConfig(platform: Platform): CookieCaptureConfig =
     CAPTURE_CONFIGS[platform]

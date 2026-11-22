@@ -376,6 +376,7 @@ private fun AuthWallSignInCard(
     val title = when (platform) {
         Platform.INSTAGRAM -> "Instagram needs you signed in"
         Platform.TWITTER -> "X needs you signed in"
+        Platform.THREADS -> "Threads needs you signed in"
         else -> "YouTube needs you signed in"
     }
     val explanation = when (platform) {
@@ -383,12 +384,15 @@ private fun AuthWallSignInCard(
             "Private posts and reels need a signed-in session. Sign in once with Instagram, then this post is retried automatically."
         Platform.TWITTER ->
             "Protected or follow-gated posts need a signed-in session. Sign in once with X, then this post is retried automatically."
+        Platform.THREADS ->
+            "Private or login-gated posts need a signed-in session. Sign in once with Threads, then this post is retried automatically."
         else ->
             "Age-restricted and bot-checked videos need a signed-in session. Sign in once with YouTube, then this video is retried automatically."
     }
     val action = when (platform) {
         Platform.INSTAGRAM -> "Sign in with Instagram"
         Platform.TWITTER -> "Sign in with X"
+        Platform.THREADS -> "Sign in with Threads"
         else -> "Sign in with YouTube"
     }
     Surface(

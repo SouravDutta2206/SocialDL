@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Cookie
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
@@ -109,6 +110,15 @@ private val COOKIE_SECTIONS = listOf(
         signedOutHint = "If sign-in is ever refused with \"temporarily limited your login\", " +
             "wait a few minutes and retry, or log in at x.com in a browser, export " +
             "cookies.txt, and import it below.",
+    ),
+    CookieSection(
+        platform = Platform.THREADS,
+        icon = Icons.Default.AlternateEmail,
+        title = "Threads cookies",
+        subtitle = "Sign in with WebView, Private or login-gated posts, Import cookies.txt",
+        signInLabel = "Threads",
+        clearTitle = "Clear Threads cookies?",
+        clearText = "Private and login-gated Threads posts will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
     ),
 )
 

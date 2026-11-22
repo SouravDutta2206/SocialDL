@@ -149,7 +149,12 @@ class SettingsViewModel @Inject constructor(
     )
 
     /** Platforms with a capture route and a jar, in panel order. */
-    private val cookiePlatforms = listOf(Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TWITTER)
+    private val cookiePlatforms = listOf(
+        Platform.YOUTUBE,
+        Platform.INSTAGRAM,
+        Platform.TWITTER,
+        Platform.THREADS,
+    )
 
     private val cookieActionMessages = MutableStateFlow<Map<Platform, String?>>(emptyMap())
 
@@ -220,6 +225,7 @@ class SettingsViewModel @Inject constructor(
         Platform.YOUTUBE -> "YouTube"
         Platform.INSTAGRAM -> "Instagram"
         Platform.TWITTER -> "X"
+        Platform.THREADS -> "Threads"
         else -> platform.name
     }
 }

@@ -14,6 +14,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.ThumbnailCache
+import com.socialdl.src.core.cookies.CookieStore
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.extraction.api.ExtractionError
 import com.socialdl.src.extraction.api.ExtractionResult
@@ -29,6 +30,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
@@ -37,12 +39,13 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * Public-post Threads extractor backed by an off-screen Android [WebView]
- * DOM/Relay-preloader pipeline (Phase 7, public-only v1).
+ * Threads extractor backed by an off-screen Android [WebView] DOM/Relay-preloader
+ * pipeline with encrypted per-run cookie jar replay via [CookieStore].
  */
 @Singleton
 class ThreadsExtractor @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val cookieStore: CookieStore,
     private val thumbnailCache: ThumbnailCache,
 ) : MediaExtractor {
 
@@ -61,7 +64,7 @@ class ThreadsExtractor @Inject constructor(
 
     override val capabilities: PlatformCapabilities = PlatformCapabilities(
         supportsCarousels = true,
-        supportsLoginGatedContent = false,
+        supportsLoginGatedContent = true,
         needsWebView = true,
         typicalLatencyMs = 6000L,
         showsFormatPicker = false,
@@ -73,15 +76,26 @@ class ThreadsExtractor @Inject constructor(
             return ExtractionResult.Error(ExtractionError.UnsupportedUrl(url))
         }
 
-        Logger.d(tag, "Extracting public Threads metadata for $normalizedUrl")
+        val hasCookies = cookieStore.jarState(Platform.THREADS) != null
+        Logger.d(tag, "Extracting Threads metadata for $normalizedUrl (cookies=$hasCookies)")
 
         return try {
-            withTimeout(EXTRACTION_TIMEOUT_MS) {
-                gate.withLock {
-                    val rawJson = withContext(Dispatchers.Main) {
-                        runHeadlessExtraction(normalizedUrl)
+            cookieStore.withCookieFile(Platform.THREADS) { jarPath ->
+                val cookies = jarPath?.let { path ->
+                    withContext(Dispatchers.IO) {
+                        runCatching { parseNetscapeCookies(File(path).readLines()) }
+                            .onFailure { Logger.w(tag, "Failed to parse Threads cookie jar", it) }
+                            .getOrDefault(emptyList())
                     }
-                    decodeAndMap(rawJson, normalizedUrl)
+                }.orEmpty()
+
+                withTimeout(EXTRACTION_TIMEOUT_MS) {
+                    gate.withLock {
+                        val rawJson = withContext(Dispatchers.Main) {
+                            runHeadlessExtraction(normalizedUrl, cookies)
+                        }
+                        decodeAndMap(rawJson, normalizedUrl)
+                    }
                 }
             }
         } catch (e: TimeoutCancellationException) {
@@ -109,14 +123,26 @@ class ThreadsExtractor @Inject constructor(
 
         val items = mapThreadsItems(dto, sourceUrl) { thumbnailCache.store(it) }
         return if (items.isEmpty()) {
-            ExtractionResult.Error(ExtractionError.NoDownloadableMedia())
+            if (dto.loginWall) {
+                ExtractionResult.Error(
+                    ExtractionError.AuthWallDetected(
+                        platform = Platform.THREADS,
+                        detail = "Sign in to Threads to access this post",
+                    )
+                )
+            } else {
+                ExtractionResult.Error(ExtractionError.NoDownloadableMedia())
+            }
         } else {
             ExtractionResult.Success(items)
         }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun runHeadlessExtraction(postUrl: String): String =
+    private suspend fun runHeadlessExtraction(
+        postUrl: String,
+        cookies: List<ParsedNetscapeCookie>,
+    ): String =
         suspendCancellableCoroutine { continuation ->
             val mainHandler = Handler(Looper.getMainLooper())
             val finished = AtomicBoolean(false)
@@ -169,6 +195,15 @@ class ThreadsExtractor @Inject constructor(
                 val cm = CookieManager.getInstance()
                 cm.setAcceptCookie(true)
                 cm.setAcceptThirdPartyCookies(wv, true)
+                // 1) Replay the decrypted Netscape jar into CookieManager so extraction
+                // never depends on a live capture WebView session.
+                if (cookies.isNotEmpty()) {
+                    cookies.forEach { cookie ->
+                        cm.setCookie(cookie.url, cookie.setCookieHeader)
+                    }
+                    runCatching { cm.flush() }
+                }
+                // 2) Pre-seed consent cookies to avoid cookie banners blocking hydration.
                 CONSENT_COOKIES.forEach { cookie ->
                     cm.setCookie(THREADS_ORIGIN, "$cookie; Path=/; Secure")
                 }
@@ -284,6 +319,9 @@ class ThreadsExtractor @Inject constructor(
          */
         const val HYDRATION_CHECK_JS = """
 (function () {
+  if (/^\/login\b/i.test(location.pathname) || document.querySelector('input[type="password"], input[name="username"]')) {
+    return '1';
+  }
   var scripts = Array.prototype.slice.call(
     document.querySelectorAll('script[data-sjs], script[type="application/json"]')
   );
@@ -304,7 +342,12 @@ class ThreadsExtractor @Inject constructor(
          */
         const val EXTRACTOR_JS = """
 (function () {
-  var out = { status: 'ok', kind: 'none', shortcode: '', author: '', caption: '', items: [], diag: '' };
+  var bodySample = ((document.body && document.body.innerText) || '').slice(0, 3000);
+  var isLoginWall = /^\/login\b/i.test(location.pathname)
+    || !!document.querySelector('input[type="password"], input[name="username"]')
+    || /log in to see|this account is private|log in to threads|log in or sign up to view/i.test(bodySample);
+
+  var out = { status: 'ok', kind: 'none', shortcode: '', author: '', caption: '', loginWall: isLoginWall, items: [], diag: '' };
 
   var scMatch = location.href.match(/post\/([A-Za-z0-9_-]+)/);
   if (scMatch) out.shortcode = scMatch[1];

@@ -21,6 +21,7 @@ dependencies {
     implementation(project(":extraction:api"))
     implementation(project(":core:common"))
     implementation(project(":core:model"))
+    implementation(project(":core:cookies"))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)

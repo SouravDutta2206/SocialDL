@@ -54,10 +54,15 @@ class CookieCaptureController @Inject constructor(
         ) {
             return false
         }
-        val cookie = runCatching {
-            CookieManager.getInstance().getCookie(config.successOrigin)
+        val manager = CookieManager.getInstance()
+        val successCookie = runCatching {
+            manager.getCookie(config.successOrigin)
         }.getOrNull()
-        return hasMarkerCookies(config, cookie)
+        if (hasMarkerCookies(config, successCookie)) return true
+        return config.harvests.any { harvest ->
+            harvest.url != config.successOrigin &&
+                hasMarkerCookies(config, runCatching { manager.getCookie(harvest.url) }.getOrNull())
+        }
     }
 
     /**
@@ -95,20 +100,14 @@ class CookieCaptureController @Inject constructor(
                 return CaptureOutcome.NotSignedIn
             }
 
-            // Only a marker-bearing jar counts as signed in. This is the same check
-            // auto-detect uses, so the manual fallback can no longer persist an
-            // anonymous jar that merely happens to contain some cookies.
-            val successHeader = harvests.firstOrNull { harvest ->
-                CaptureHostPolicy.matchesSuccessHost(
-                    CaptureHostPolicy.hostOf(harvest.url),
-                    config.successOrigin
-                )
-            }?.header
-            if (!hasMarkerCookies(config, successHeader)) {
+            // Only a marker-bearing jar counts as signed in. Check all configured
+            // harvests so platforms whose auth cookies live on a sibling origin
+            // (e.g. Threads -> .instagram.com) still validate properly.
+            if (harvests.none { harvest -> hasMarkerCookies(config, harvest.header) }) {
                 Logger.w(
                     tag,
-                    "No ${config.markerCookies.joinToString("/")} marker in " +
-                        "${config.successOrigin}; refusing to store a signed-out jar"
+                    "No ${config.markerCookies.joinToString("/")} marker across " +
+                        "${config.harvests.joinToString { it.url }}; refusing to store a signed-out jar"
                 )
                 return CaptureOutcome.NotSignedIn
             }
