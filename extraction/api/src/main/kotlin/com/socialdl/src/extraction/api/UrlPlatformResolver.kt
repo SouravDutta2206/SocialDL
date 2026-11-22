@@ -34,7 +34,7 @@ object UrlPlatformResolver {
     )
 
     private val THREADS_REGEX = Pattern.compile(
-        """^(?:https?://)?(?:www\.)?(?:threads\.net|threads\.com)/(?:@[\w\.\-]+/post/|share/|post/)([\w\-]+)""",
+        """^(?:https?://)?(?:www\.)?(?:threads\.net|threads\.com)/(?:@[\w\.\-]+/post/|share/|post/|t/)([\w\-]+)""",
         Pattern.CASE_INSENSITIVE
     )
 

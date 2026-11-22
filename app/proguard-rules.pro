@@ -14,3 +14,12 @@
 
 # Keep data classes used for serialization
 -keep class com.socialdl.src.core.model.** { *; }
+
+# Keep WebView JavascriptInterface bridges
+-keepattributes JavascriptInterface
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+
+# Keep Threads extractor bridge and serializable DTOs
+-keep class com.socialdl.src.extraction.threads.** { *; }
