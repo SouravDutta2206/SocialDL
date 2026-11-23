@@ -9,8 +9,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -40,20 +42,27 @@ fun RequestStartupPermissions(
     }
 
     LaunchedEffect(Unit) {
+        // Compute what is actually missing BEFORE claiming the one-shot prompt.
+        // On API 29-32 there is nothing to ask yet (WRITE_EXTERNAL_STORAGE is
+        // capped at 28); claiming then burned the flag, so an upgrade to
+        // Android 13 never got the POST_NOTIFICATIONS dialog.
+        val missing = missingStartupPermissions(context)
+        if (missing.isEmpty()) return@LaunchedEffect
+
         // Claiming happens before the dialog is shown, so a rotation while it is
         // open cannot ask a second time.
         if (!viewModel.claimStartupPrompt()) return@LaunchedEffect
-        val missing = missingStartupPermissions(context)
-        if (missing.isNotEmpty()) {
-            launcher.launch(missing.toTypedArray())
-        }
+        launcher.launch(missing.toTypedArray())
     }
 }
 
 /**
- * Download-time gate. The permission prompt happens once on first launch, so this
- * does NOT show a dialog: it blocks the download (and explains why) whenever the
- * storage the export needs is still missing.
+ * Download-time gate.
+ *
+ * API 29+ uses scoped storage, so this is a no-op. API 24-28 needs legacy
+ * storage access for the MediaStore export: when it is missing, show the runtime
+ * permission prompt once instead of silently blocking every download. A grant
+ * runs the download that was waiting; a denial reports through [onStorageDenied].
  */
 @Composable
 fun rememberDownloadPermissionGate(
@@ -61,7 +70,20 @@ fun rememberDownloadPermissionGate(
 ): (onReady: () -> Unit) -> Unit {
     val context = LocalContext.current
     val currentOnStorageDenied by rememberUpdatedState(onStorageDenied)
-    return remember(context) {
+    var pendingOnReady by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val storagePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val onReady = pendingOnReady
+        pendingOnReady = null
+        if (granted) {
+            onReady?.invoke()
+        } else {
+            currentOnStorageDenied()
+        }
+    }
+
+    return remember(context, storagePermissionLauncher) {
         { onReady ->
             if (canStartDownload(
                     storageGranted = context.isGranted(Manifest.permission.WRITE_EXTERNAL_STORAGE),
@@ -70,7 +92,8 @@ fun rememberDownloadPermissionGate(
             ) {
                 onReady()
             } else {
-                currentOnStorageDenied()
+                pendingOnReady = onReady
+                storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             }
         }
     }

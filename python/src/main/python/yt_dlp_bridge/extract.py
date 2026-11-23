@@ -328,7 +328,10 @@ def _maybe_attach_js_diagnostics(payload, js_diag, debug_logger):
 
 def _normalize_single_entry(info: dict) -> dict:
     thumbnails = sorted(
-        info.get("thumbnails", []) or [],
+        [
+            t for t in (info.get("thumbnails") or [])
+            if isinstance(t, dict) and t.get("url")
+        ],
         key=lambda t: (t.get("height") or 0),
         reverse=True,
     )
@@ -369,12 +372,12 @@ def _normalize_single_entry(info: dict) -> dict:
         })
 
     vid_id = info.get("id")
-    # Clean URL: strip anything starting with &list or ?list to ensure clean standalone URL
+    # Clean URL: remove only the `list` parameter, preserving v= and every other
+    # parameter/fragment (naive `?list=`/`&list=` splitting truncated `v=`).
     if vid_id:
         clean_url = f"https://www.youtube.com/watch?v={vid_id}"
     else:
-        raw_url = info.get("webpage_url") or info.get("url") or ""
-        clean_url = raw_url.split("&list=")[0].split("?list=")[0]
+        clean_url = _strip_list_param(info.get("webpage_url") or info.get("url") or "")
 
     return {
         "id": vid_id,
@@ -385,6 +388,28 @@ def _normalize_single_entry(info: dict) -> dict:
         "thumbnail_url": best_thumb,
         "formats": formats,
     }
+
+
+def _strip_list_param(raw_url):
+    """Removes only the ``list`` query parameter from [raw_url].
+
+    `watch?list=...&v=ID` used to become `watch?` (the `v=` value was lost) and
+    `watch?v=ID&list=...` lost its trailing parameters. Parsing the query keeps
+    every other parameter, blank values, and the URL fragment intact.
+    """
+    if not raw_url:
+        return raw_url
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parsed = urlsplit(raw_url)
+    if not parsed.query:
+        return raw_url
+    kept = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() != "list"
+    ]
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(kept), parsed.fragment))
 
 def _normalize(info: dict) -> dict:
     if info.get("_type") == "playlist" or "entries" in info:

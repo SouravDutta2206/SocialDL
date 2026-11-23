@@ -74,7 +74,9 @@ class DownloadJobRepository @Inject constructor(
             jobDao.findActiveDuplicate(
                 sourceUrl = entity.sourceUrl,
                 carouselIndex = entity.carouselIndex,
-                formatId = entity.formatId
+                formatId = entity.formatId,
+                formatKind = entity.formatKind,
+                isPlaceholder = entity.isPlaceholder
             )?.let { existing -> return@withTransaction existing }
 
             jobDao.deleteFailedJob(entity.sourceUrl, entity.carouselIndex)

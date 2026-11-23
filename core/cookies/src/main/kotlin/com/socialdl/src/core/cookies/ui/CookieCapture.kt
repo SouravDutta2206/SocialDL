@@ -316,17 +316,19 @@ private fun CaptureWebView(
 ) {
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var loading by remember { mutableStateOf(true) }
+    // Popups opened by window.open() are real WebViews; every one must be
+    // destroyed on its close/transfer path and when this screen is disposed.
+    val popups = remember { mutableSetOf<WebView>() }
 
     // Deterministic teardown on BOTH the composable-leaves-composition path and
     // the ambient cancellation path (§2.6: destroy() on every exit path).
+    // Destroying while still attached to the view hierarchy leaks the renderer
+    // process, so safeDestroy() detaches first.
     DisposableEffect(Unit) {
         onDispose {
-            webViewRef?.let { wv ->
-                runCatching {
-                    wv.stopLoading()
-                    wv.destroy()
-                }
-            }
+            popups.toList().forEach { it.safeDestroy() }
+            popups.clear()
+            webViewRef?.safeDestroy()
             webViewRef = null
         }
     }
@@ -401,13 +403,14 @@ private fun CaptureWebView(
                             isUserGesture: Boolean,
                             resultMsg: Message
                         ): Boolean {
-                            return openPopupInPlace(view, config, resultMsg)
+                            return openPopupInPlace(view, config, resultMsg, popups)
                         }
                     }
                     settings.setSupportMultipleWindows(true)
                     loadUrl(config.loginUrl)
                 }.also { webViewRef = it }
-            }
+            },
+            onRelease = { view -> view.safeDestroy() }
         )
         if (loading) {
             LinearProgressIndicator(
@@ -468,12 +471,21 @@ private fun openPopupInPlace(
     opener: WebView,
     config: CookieCaptureConfig,
     resultMsg: Message,
+    popups: MutableSet<WebView>,
 ): Boolean {
     val popup = WebView(opener.context).apply {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
-        settings.userAgentString = opener.settings.userAgentString
+        // NEVER copy opener.settings.userAgentString into the popup: an explicit
+        // UA makes Chromium suppress Sec-CH-UA client hints, which Google's SSO
+        // risk-control rejects. The untouched WebView UA is what the opener uses.
         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+        webChromeClient = object : WebChromeClient() {
+            override fun onCloseWindow(window: WebView) {
+                popups.remove(window)
+                window.safeDestroy()
+            }
+        }
         webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(
                 view: WebView,
@@ -483,18 +495,27 @@ private fun openPopupInPlace(
                 // checked before the URL is handed to the visible WebView.
                 if (request.url.scheme?.lowercase() !in HTTP_SCHEMES) {
                     view.post {
-                        runCatching {
-                            view.stopLoading()
-                            view.destroy()
-                        }
+                        popups.remove(view)
+                        view.safeDestroy()
                     }
                     return true
                 }
                 return false
             }
 
+            override fun onReceivedError(
+                view: WebView,
+                request: WebResourceRequest,
+                error: WebResourceError
+            ) {
+                if (request.isForMainFrame) {
+                    popups.remove(view)
+                    view.post { view.safeDestroy() }
+                }
+            }
+
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-                if (url.isNullOrBlank() || url == "about:blank") return
+                if (url.isNullOrBlank() || url == "about:blank" || view in destroyingWebViews) return
                 val scheme = url.substringBefore(':').lowercase()
                 val allowed = scheme in HTTP_SCHEMES &&
                     CaptureHostPolicy.isAllowedHost(
@@ -504,34 +525,55 @@ private fun openPopupInPlace(
                     )
                 if (!allowed) {
                     Logger.w(TAG, "Discarded popup navigation: $url")
-                    view.post {
-                        runCatching {
-                            view.stopLoading()
-                            view.destroy()
-                        }
-                    }
+                    popups.remove(view)
+                    view.post { view.safeDestroy() }
                     return
                 }
                 view.stopLoading()
                 opener.post {
-                    runCatching { opener.loadUrl(url) }
-                        .onFailure { Logger.w(TAG, "Popup transfer failed", it) }
-                    runCatching { view.destroy() }
+                    if (opener !in destroyingWebViews) {
+                        runCatching { opener.loadUrl(url) }
+                            .onFailure { Logger.w(TAG, "Popup transfer failed", it) }
+                    }
+                    popups.remove(view)
+                    view.safeDestroy()
                 }
             }
         }
     }
     val transport = resultMsg.obj as? WebView.WebViewTransport
     if (transport == null) {
-        runCatching { popup.destroy() }
+        popup.safeDestroy()
         return false
     }
+    popups += popup
     transport.webView = popup
     resultMsg.sendToTarget()
     return true
 }
 
 private val HTTP_SCHEMES = setOf("http", "https")
+
+/**
+ * WebViews still being torn down. `destroy()` is not idempotent, and the
+ * dispose/release callbacks that fire on one screen exit can both target the
+ * same view.
+ */
+private val destroyingWebViews = java.util.Collections.synchronizedSet(
+    java.util.Collections.newSetFromMap(java.util.WeakHashMap<WebView, Boolean>())
+)
+
+/**
+ * Destroys a WebView safely: stop loading, detach it from whatever parent still
+ * holds it, then destroy it. Calling `destroy()` while attached leaks the
+ * renderer; repeated calls are ignored.
+ */
+private fun WebView.safeDestroy() {
+    if (!destroyingWebViews.add(this)) return
+    runCatching { stopLoading() }
+    runCatching { (parent as? ViewGroup)?.removeView(this) }
+    runCatching { destroy() }
+}
 
 
 // ============================ Navigation ============================

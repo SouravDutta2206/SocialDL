@@ -1,7 +1,9 @@
 package com.socialdl.src.feature.home.navigation
 
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
 import com.socialdl.src.core.cookies.ui.COOKIE_CAPTURE_RESULT_KEY
@@ -20,9 +22,16 @@ fun NavGraphBuilder.homeScreen(
 
         // §2.6 recapture flow: when a cookie-capture screen (launched from the
         // auth-wall card) pops itself off, it leaves its result on this entry's
-        // SavedStateHandle. A success here auto-retries the URL that hit the wall.
-        LaunchedEffect(backStackEntry.id) {
-            if (backStackEntry.savedStateHandle.remove<Boolean>(COOKIE_CAPTURE_RESULT_KEY) == true) {
+        // SavedStateHandle. Reading it as a StateFlow (not once by entry id)
+        // catches results delivered after the destination is already composed,
+        // and the key is removed so a recomposition/re-entry cannot replay it.
+        val captureResult by backStackEntry.savedStateHandle
+            .getStateFlow<Boolean?>(COOKIE_CAPTURE_RESULT_KEY, null)
+            .collectAsStateWithLifecycle()
+        LaunchedEffect(captureResult) {
+            val result = captureResult ?: return@LaunchedEffect
+            backStackEntry.savedStateHandle.remove<Boolean>(COOKIE_CAPTURE_RESULT_KEY)
+            if (result) {
                 viewModel.onAuthSignInCompleted()
             }
         }

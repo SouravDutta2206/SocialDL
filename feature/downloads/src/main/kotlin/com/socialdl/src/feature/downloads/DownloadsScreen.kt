@@ -1,5 +1,6 @@
 package com.socialdl.src.feature.downloads
 
+import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
@@ -226,6 +227,7 @@ fun DownloadsScreen(
                                         }
                                         context.startActivity(Intent.createChooser(intent, "Play Media").apply {
                                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                         })
                                     } catch (e: Exception) {
                                         Logger.e("DownloadsScreen", "Failed to open media", e)
@@ -235,14 +237,20 @@ fun DownloadsScreen(
                                 onShare = {
                                     try {
                                         val mimeType = history.resolvedMimeType()
+                                        val mediaUri = Uri.parse(history.localUri)
                                         val intent = Intent(Intent.ACTION_SEND).apply {
                                             type = mimeType
-                                            putExtra(Intent.EXTRA_STREAM, Uri.parse(history.localUri))
+                                            putExtra(Intent.EXTRA_STREAM, mediaUri)
+                                            // ACTION_SEND receivers need an explicit
+                                            // ClipData grant; otherwise Gmail/photos apps
+                                            // get SecurityException on the stream URI.
+                                            clipData = ClipData.newRawUri(history.title, mediaUri)
                                             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                         }
                                         context.startActivity(Intent.createChooser(intent, "Share Media").apply {
                                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                                         })
                                     } catch (e: Exception) {
                                         Logger.e("DownloadsScreen", "Failed to share media", e)

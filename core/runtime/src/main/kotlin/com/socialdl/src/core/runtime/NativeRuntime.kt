@@ -29,19 +29,29 @@ internal object NativeRuntime {
 
     /**
      * Returns the ready runtime for [source], unpacking it first if needed, or null if
-     * it cannot be used. Other sources and stale entries under [runtimeRoot] are removed.
+     * it cannot be used.
+     *
+     * Ordering is load-bearing: the source is verified ([readyCheck]) BEFORE
+     * [prune] deletes the component's other source trees. Pruning first let an
+     * installed-but-unusable helper APK wipe the working bundled runtime and leave
+     * the component unavailable.
+     *
+     * [is64Bit] / [readyCheck] are injectable seams for JVM tests; production
+     * callers use the defaults.
      */
     fun prepare(
         runtimeRoot: File,
         spec: NativeComponentSpec,
         source: NativeComponentSource,
+        is64Bit: Boolean = Process.is64Bit(),
+        readyCheck: (ResolvedNativeComponent) -> Unit = { ensureReady(it) },
     ): ResolvedNativeComponent? {
         val componentDir = File(runtimeRoot, spec.id)
-        prune(runtimeRoot, componentDir, keep = source.key)
         val runtimeDir = File(componentDir, source.key)
-        val runtime = ResolvedNativeComponent(spec, source, runtimeDir, ldLibraryPath(runtimeDir))
+        val runtime = ResolvedNativeComponent(spec, source, runtimeDir, ldLibraryPath(runtimeDir, is64Bit))
         return try {
-            ensureReady(runtime)
+            readyCheck(runtime)
+            prune(runtimeRoot, componentDir, keep = source.key)
             runtime
         } catch (e: Exception) {
             Logger.e(TAG, "${spec.displayName}: ${source.kind} runtime unusable", e)
@@ -85,9 +95,9 @@ internal object NativeRuntime {
     }
 
     /** Payloads are self-contained: only their unpacked libraries and the system libraries. */
-    private fun ldLibraryPath(runtimeDir: File): String = listOf(
+    private fun ldLibraryPath(runtimeDir: File, is64Bit: Boolean): String = listOf(
         File(runtimeDir, "usr/lib").absolutePath,
-        if (Process.is64Bit()) "/system/lib64" else "/system/lib",
+        if (is64Bit) "/system/lib64" else "/system/lib",
     ).joinToString(":")
 
     /** The nativeLibraryDir changes across installs, so the link is refreshed on every prepare. */

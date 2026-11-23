@@ -56,16 +56,33 @@ interface DownloadJobDao {
     @Query("SELECT * FROM download_jobs WHERE sourceUrl = :sourceUrl")
     suspend fun getJobsBySourceUrl(sourceUrl: String): List<DownloadJobEntity>
 
-    /** Idempotency lookup: the same stream slot already queued/running. */
+    /**
+     * Idempotency lookup: the same stream slot already queued/running.
+     *
+     * Placeholder jobs are re-resolved at download time, so their stored
+     * `formatId` can be rewritten by JIT resolution between enqueues. Matching a
+     * placeholder by `formatKind` (either side) closes that window: enqueueing
+     * the same placeholder again must coalesce onto the running job instead of
+     * starting a duplicate download.
+     */
     @Query(
         "SELECT * FROM download_jobs " +
-            "WHERE sourceUrl = :sourceUrl AND carouselIndex = :carouselIndex AND formatId = :formatId " +
-            "AND status IN ('QUEUED','DOWNLOADING','MUXING','EXPORTING') LIMIT 1"
+            "WHERE sourceUrl = :sourceUrl " +
+            "  AND carouselIndex = :carouselIndex " +
+            "  AND status IN ('QUEUED','DOWNLOADING','MUXING','EXPORTING') " +
+            "  AND (" +
+            "      formatId = :formatId " +
+            "      OR (:isPlaceholder = 1 AND formatKind = :formatKind) " +
+            "      OR (isPlaceholder = 1 AND formatKind = :formatKind)" +
+            "  ) " +
+            "LIMIT 1"
     )
     suspend fun findActiveDuplicate(
         sourceUrl: String,
         carouselIndex: Int,
-        formatId: String
+        formatId: String,
+        formatKind: String,
+        isPlaceholder: Boolean
     ): DownloadJobEntity?
 
     /**

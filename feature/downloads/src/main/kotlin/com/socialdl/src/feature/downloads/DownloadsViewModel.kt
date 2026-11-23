@@ -21,6 +21,7 @@ import com.socialdl.src.core.download.DownloadManager
 import com.socialdl.src.core.model.DownloadStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -83,6 +84,14 @@ class DownloadsViewModel @Inject constructor(
                 true,
                 contentObserver
             )
+            // Images are exported too (Instagram/Twitter photos); without this
+            // observer a deleted image stayed "present" until the next manual
+            // refresh, and a download completion did not refresh the list.
+            context.contentResolver.registerContentObserver(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                true,
+                contentObserver
+            )
         } catch (e: Exception) {
             Logger.w(tag, "Could not register MediaStore content observer", e)
         }
@@ -140,6 +149,9 @@ class DownloadsViewModel @Inject constructor(
                     Logger.i(tag, "Purging ${expired.size} history record(s) missing beyond the grace period")
                     downloadDao.deleteHistoryInChunks(expired)
                 }
+            } catch (e: CancellationException) {
+                // ViewModel teardown must not be logged as a purge failure.
+                throw e
             } catch (e: Exception) {
                 Logger.w(tag, "Error purging stale download history", e)
             } finally {
@@ -233,6 +245,9 @@ class DownloadsViewModel @Inject constructor(
         try {
             context.contentResolver.unregisterContentObserver(contentObserver)
         } catch (_: Exception) {}
+        // The debounce callback holds this ViewModel in a main-looper queue;
+        // without removing it a destroyed screen could still run refresh().
+        handler.removeCallbacksAndMessages(null)
     }
 
     private companion object {

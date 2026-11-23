@@ -84,7 +84,9 @@ internal object HelperPackageVerifier {
         return when {
             pins.isEmpty() && debugBuild -> null
             pins.isEmpty() -> "no helper signer pin configured"
-            helper.signers.any { it in pins } -> null
+            // Every signer of a multi-signed APK must be trusted. `any` let an
+            // APK signed by one pinned + one untrusted certificate through.
+            helper.signers.isNotEmpty() && helper.signers.all { it in pins } -> null
             else -> "helper signer is not pinned"
         }
     }

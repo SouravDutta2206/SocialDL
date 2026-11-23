@@ -2,6 +2,7 @@ package com.socialdl.src
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,7 +35,13 @@ import dagger.hilt.android.AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // The app forces a dark theme, so light bar icons/transparent bars must be
+        // explicit. The default auto style follows the system light/dark setting
+        // and would draw dark icons on our dark background.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         setContent {
             SocialDLTheme {
                 // One-shot: asks for notifications (API 33+) / storage (API <= 28)

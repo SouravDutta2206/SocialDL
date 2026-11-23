@@ -16,16 +16,20 @@ import instaloader
 from common.envelope import (
     AUTH_WALL,
     NETWORK,
+    NO_MEDIA,
     RATE_LIMITED,
     UNAVAILABLE,
     classify,
     fail,
+    has_http_status,
     succeed,
 )
 
 # Sign-in markers only. Rate-limit phrasing must never live here: "please wait a
 # few minutes" is Instagram's 429 text, and keeping it in this table reported a
-# rate-limited fetch as an auth wall (finding #7).
+# rate-limited fetch as an auth wall (finding #7). HTTP 401 is matched through
+# ``classify(..., auth_statuses=(401,))`` so a numeric id containing "401" is
+# never mistaken for an auth wall.
 _AUTH_MARKERS = (
     "login required",
     "login_required",
@@ -34,7 +38,6 @@ _AUTH_MARKERS = (
     "requires login",
     "not logged in",
     "checkpoint",
-    "401",
     "unauthorized",
 )
 
@@ -42,12 +45,11 @@ _AUTH_MARKERS = (
 # 429 can never be reported as a sign-in wall or as an unavailable post. The typed
 # TooManyRequestsException covers the first 429, but Instaloader retries and then
 # wraps the final one in a plain ConnectionException ("HTTP error 429: Too Many
-# Requests"), so the text markers are required as well.
+# Requests"), so the text markers and has_http_status() are required as well.
 _RATE_LIMIT_MARKERS = (
     "please wait",
     "rate limit",
     "too many requests",
-    "429",
 )
 
 _SHORTCODE_RE = re.compile(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)")
@@ -89,7 +91,7 @@ def extract(url):
 
         payload = _normalize(post)
         if not payload["items"]:
-            return fail(UNAVAILABLE, "This post contains no downloadable media")
+            return fail(NO_MEDIA, "This post contains no downloadable media")
         return succeed(payload)
 
     except Exception as error:
@@ -113,7 +115,7 @@ def _failure_envelope(error):
 
     if isinstance(error, instaloader.TooManyRequestsException) or _matches_any(
         text, _RATE_LIMIT_MARKERS
-    ):
+    ) or has_http_status(text, 429):
         return fail(
             RATE_LIMITED,
             "Instagram is rate-limiting requests — try again in a few minutes",
@@ -127,7 +129,7 @@ def _failure_envelope(error):
             tail=[str(error)],
         )
 
-    kind = classify(error, _AUTH_MARKERS)
+    kind = classify(error, _AUTH_MARKERS, auth_statuses=(401,))
     if kind == AUTH_WALL:
         return fail(
             AUTH_WALL,

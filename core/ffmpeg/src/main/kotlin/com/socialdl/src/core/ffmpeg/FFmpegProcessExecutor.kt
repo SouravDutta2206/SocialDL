@@ -45,16 +45,25 @@ class FFmpegProcessExecutor @Inject constructor(
          * Suppresses the error-level log for a failed process. Probes exit non-zero
          * by design (`ffmpeg -i` has no output), so they must not look like errors.
          */
-        quiet: Boolean = false
+        quiet: Boolean = false,
+        /**
+         * How many trailing stderr characters [FFmpegEvent.Failed.errorLog] carries.
+         * Probes need the whole (16 KB) metadata banner, not the usual error tail.
+         */
+        maxErrorTailChars: Int = MAX_ERROR_TAIL_CHARS,
     ): Flow<FFmpegEvent> = callbackFlow {
-        val binaryPath = binaryProvider.path()
+        // Resolve ONCE: the executable and its environment must come from the same
+        // runtime snapshot, or a hot-swap between two resolve() calls can pair an
+        // old binary with a new LD_LIBRARY_PATH (or vice versa).
+        val runtime = binaryProvider.resolveRuntime()
+        val binaryPath = runtime?.executable?.absolutePath ?: binaryProvider.path()
         val command = listOf(binaryPath) + args
         Logger.d(tag, "Executing ffmpeg command: ${command.joinToString(" ")}")
 
         val process = try {
             val pb = ProcessBuilder(command)
                 .redirectErrorStream(false)
-            val env = binaryProvider.environment()
+            val env = runtime?.environment ?: binaryProvider.environment()
             if (env.isNotEmpty()) {
                 pb.environment().putAll(env)
             }
@@ -148,7 +157,7 @@ class FFmpegProcessExecutor @Inject constructor(
                 send(FFmpegEvent.Completed)
             } else {
                 // errorBuffer already holds the bounded tail of stderr.
-                val errorTail = boundedTail(errorBuffer, MAX_ERROR_TAIL_CHARS)
+                val errorTail = boundedTail(errorBuffer, maxErrorTailChars)
                 if (!quiet) {
                     Logger.e(tag, "ffmpeg process failed with code $exitCode: $errorTail")
                 }
@@ -181,9 +190,14 @@ class FFmpegProcessExecutor @Inject constructor(
     suspend fun probe(file: File): MediaProbe? {
         var banner: String? = null
         run(
-            args = listOf("-v", "info", "-i", file.absolutePath),
+            // -nostdin prevents ffmpeg from touching the app's stdin; -hide_banner
+            // removes the build banner so the captured tail is metadata only.
+            args = listOf("-hide_banner", "-nostdin", "-v", "info", "-i", file.absolutePath),
             timeoutMs = PROBE_TIMEOUT_MS,
-            quiet = true
+            quiet = true,
+            // A rich metadata/chapter block can exceed the 4 KB error tail; keep
+            // the full 16 KB capture so the stream lines are never truncated away.
+            maxErrorTailChars = MAX_CAPTURED_CHARS,
         ).collect { event ->
             if (event is FFmpegEvent.Failed) banner = event.errorLog
         }
@@ -217,11 +231,29 @@ data class MediaProbe(
     val durationMs: Long?,
 )
 
-private val AUDIO_CODEC_REGEX = Regex("""Audio:\s*([A-Za-z0-9_]+)""")
-private val VIDEO_CODEC_REGEX = Regex("""Video:\s*([A-Za-z0-9_]+)""")
-private val STREAM_BITRATE_REGEX = Regex("""Audio:[^\n]*?,\s*(\d+)\s*kb/s""")
-private val CONTAINER_BITRATE_REGEX = Regex("""bitrate:\s*(\d+)\s*kb/s""")
-private val DURATION_REGEX = Regex("""Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)""")
+// Every pattern is anchored to a real ffmpeg structural line (Stream/Duration).
+// Without MULTILINE anchoring, a Metadata value such as `title : Video: fake`
+// could hijack codec detection and make a mux choose the wrong strategy.
+private val AUDIO_CODEC_REGEX = Regex(
+    """^\s*Stream #\d+:\d+[^\n]*?:\s*Audio:\s*([A-Za-z0-9_]+)""",
+    RegexOption.MULTILINE,
+)
+private val VIDEO_CODEC_REGEX = Regex(
+    """^\s*Stream #\d+:\d+[^\n]*?:\s*Video:\s*([A-Za-z0-9_]+)""",
+    RegexOption.MULTILINE,
+)
+private val STREAM_BITRATE_REGEX = Regex(
+    """^\s*Stream #\d+:\d+[^\n]*?:\s*Audio:[^\n]*?,\s*(\d+)\s*kb/s""",
+    RegexOption.MULTILINE,
+)
+private val CONTAINER_BITRATE_REGEX = Regex(
+    """^\s*Duration:[^\n]*?bitrate:\s*(\d+)\s*kb/s""",
+    RegexOption.MULTILINE,
+)
+private val DURATION_REGEX = Regex(
+    """^\s*Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)""",
+    RegexOption.MULTILINE,
+)
 
 /**
  * Parses one ffmpeg `-i` banner. Both stream kinds are optional so the same probe

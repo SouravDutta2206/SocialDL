@@ -95,8 +95,14 @@ internal data class ParsedNetscapeCookie(
  * Parses Netscape `cookies.txt` lines into `(url, Set-Cookie)` pairs suitable
  * for `CookieManager.setCookie(url, value)`, preserving `Domain`, `Path`,
  * `Secure`, and `HttpOnly` attributes.
+ *
+ * Expired rows are skipped (a jar can outlive its cookies). Netscape's expiry
+ * column is epoch seconds; `0` means a session cookie and is kept.
  */
-internal fun parseNetscapeCookies(lines: List<String>): List<ParsedNetscapeCookie> {
+internal fun parseNetscapeCookies(
+    lines: List<String>,
+    nowEpochSeconds: Long = System.currentTimeMillis() / 1000L,
+): List<ParsedNetscapeCookie> {
     val result = ArrayList<ParsedNetscapeCookie>(lines.size)
     for (rawLine in lines) {
         // Only strip line endings and leading indentation: `trim()` would also
@@ -115,6 +121,12 @@ internal fun parseNetscapeCookies(lines: List<String>): List<ParsedNetscapeCooki
         val name = cols[5].trim()
         val value = cols[6]
         if (host.isEmpty() || name.isEmpty()) continue
+
+        // Malformed (non-numeric) expiry rows cannot be trusted; skip them.
+        val expires = cols[4].trim().toLongOrNull() ?: continue
+        // Negative is expired; a positive timestamp at/before now is expired.
+        // Zero is a session cookie and is always valid for this replay.
+        if (expires < 0L || (expires > 0L && expires <= nowEpochSeconds)) continue
 
         val includeSubdomains = cols[1].equals("TRUE", ignoreCase = true) || rawDomain.startsWith(".")
         val path = cols[2].trim().ifEmpty { "/" }

@@ -267,19 +267,33 @@ class YoutubeExtractor @Inject constructor(
                     async(Dispatchers.Default) {
                         val cleanUrl = entryDto.webpage_url
                             ?: entryDto.id?.let { "https://www.youtube.com/watch?v=$it" }
-                            ?: sourceUrl.substringBefore("&list").substringBefore("?list")
+                            ?: stripListQueryParam(sourceUrl)
                         mapDtoToMediaItem(entryDto, cleanUrl, carouselIndex = index + 1)
                     }
                 }.awaitAll()
             }
             return ExtractionResult.Success(mediaItems)
         } else {
+            // A single video with no usable formats is not a downloadable video.
+            // (Playlist entries above legitimately carry no formats because of
+            // extract_flat, so their placeholder cards stay.)
+            if (!parsed.hasUsableMedia()) {
+                Logger.w(tag, "yt-dlp returned no usable audio/video format for $sourceUrl")
+                return ExtractionResult.Error(ExtractionError.NoDownloadableMedia())
+            }
             val singleCleanUrl = parsed.webpage_url
                 ?: parsed.id?.let { "https://www.youtube.com/watch?v=$it" }
-                ?: sourceUrl.substringBefore("&list").substringBefore("?list")
+                ?: stripListQueryParam(sourceUrl)
             val singleItem = mapDtoToMediaItem(parsed, singleCleanUrl, carouselIndex = null)
             return ExtractionResult.Success(listOf(singleItem))
         }
+    }
+
+    /** True when at least one format carries an audio or a video stream. */
+    private fun YtDlpNormalizedResponse.hasUsableMedia(): Boolean = formats.any { format ->
+        val hasVideo = format.vcodec != null && format.vcodec != "none"
+        val hasAudio = format.acodec != null && format.acodec != "none"
+        hasVideo || hasAudio
     }
 
     private suspend fun mapDtoToMediaItem(
@@ -293,7 +307,7 @@ class YoutubeExtractor @Inject constructor(
         } ?: dto.thumbnail_url
 
         // 1. Partition formats into audio-only, progressive (audio+video), and video-only (§4.2)
-        val audioFormats = mutableListOf<MediaFormat>()
+        val audioDtos = mutableListOf<YtDlpFormatDto>()
         val progressiveFormats = mutableListOf<MediaFormat>()
         val videoOnlyDtos = mutableListOf<YtDlpFormatDto>()
 
@@ -303,7 +317,7 @@ class YoutubeExtractor @Inject constructor(
 
             when {
                 !hasVideo && hasAudio -> {
-                    audioFormats.add(mapAudioFormat(fDto, duration))
+                    audioDtos.add(fDto)
                 }
                 hasVideo && hasAudio -> {
                     progressiveFormats.add(mapProgressiveFormat(fDto, duration))
@@ -314,8 +328,16 @@ class YoutubeExtractor @Inject constructor(
             }
         }
 
-        // Sort audio formats by bitrate descending
-        audioFormats.sortByDescending { it.approxSizeBytes ?: 0L }
+        // Rank audio by reported bitrate first (the actual quality signal), then
+        // by the mapped format's size estimate as a tie-breaker. Sorting by size
+        // alone picked a larger but lower-bitrate stream.
+        val audioFormats = audioDtos
+            .map { audioDto -> (audioDto.abr ?: audioDto.tbr ?: 0.0) to mapAudioFormat(audioDto, duration) }
+            .sortedWith(
+                compareByDescending<Pair<Double, MediaFormat>> { it.first }
+                    .thenByDescending { it.second.approxSizeBytes ?: 0L }
+            )
+            .map { it.second }
 
         // 2. Map video-only formats and precompute paired audio format (§4.2 + §4.4)
         val bestAudio = audioFormats.firstOrNull()
@@ -449,7 +471,7 @@ class YoutubeExtractor @Inject constructor(
             height = dto.height,
             isHdr = isHdr,
             directUrl = dto.url,
-            requiresMuxing = true,
+            requiresMuxing = bestAudio != null,
             pairedAudioFormatId = bestAudio?.id,
             httpChunkSizeBytes = extractChunkSize(dto)
         )
@@ -492,5 +514,32 @@ class YoutubeExtractor @Inject constructor(
 
     private companion object {
         const val MAX_CONCURRENT_THUMBNAIL_FETCHES = 4
+    }
+}
+
+/**
+ * Removes only the ``list`` query parameter from [url], preserving ``v=``, every
+ * other parameter, blank values, and the fragment.
+ *
+ * The previous `substringBefore("?list")` / `substringBefore("&list")` approach
+ * turned `watch?list=...&v=ID` into `watch?` (losing the video id) and dropped
+ * every parameter after `&list=`.
+ */
+internal fun stripListQueryParam(url: String): String {
+    val fragmentIndex = url.indexOf('#')
+    val fragment = if (fragmentIndex >= 0) url.substring(fragmentIndex) else ""
+    val withoutFragment = if (fragmentIndex >= 0) url.substring(0, fragmentIndex) else url
+    val queryIndex = withoutFragment.indexOf('?')
+    if (queryIndex < 0) return url
+
+    val base = withoutFragment.substring(0, queryIndex)
+    val params = withoutFragment.substring(queryIndex + 1).split('&')
+    val kept = params.filter { parameter ->
+        parameter.isNotEmpty() && !parameter.substringBefore('=').equals("list", ignoreCase = true)
+    }
+    return buildString {
+        append(base)
+        if (kept.isNotEmpty()) append('?').append(kept.joinToString("&"))
+        append(fragment)
     }
 }

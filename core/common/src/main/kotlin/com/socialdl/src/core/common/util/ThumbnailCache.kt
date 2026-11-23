@@ -2,7 +2,13 @@ package com.socialdl.src.core.common.util
 
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -52,7 +58,7 @@ open class ThumbnailCache @Inject constructor(
     private var explicitDirectory: File? = null
 
     private class LockEntry {
-        val lock = Any()
+        val mutex = Mutex()
         var references = 0
     }
 
@@ -60,12 +66,21 @@ open class ThumbnailCache @Inject constructor(
     // while different URLs proceed in parallel. Entries are ref-counted and removed.
     private val urlLocks = ConcurrentHashMap<String, LockEntry>()
 
+    /** Serializes eviction so two stores cannot delete each other's fresh files. */
+    private val evictionLock = Any()
+
     private val dir: File by lazy {
         (explicitDirectory ?: File(getRealDir(), "thumbnails")).apply {
             mkdirs()
             deleteStaleTempFiles(this)
         }
     }
+
+    /**
+     * Recreates the cache directory when the OS cleared it mid-session. Without
+     * this a store() after a cache clear failed with ENOENT until app restart.
+     */
+    private fun ensureDir(): File = dir.apply { if (!exists()) mkdirs() }
 
     private fun getRealDir(): File {
         val ctx = requireNotNull(context) { "ThumbnailCache (test fake, no context) had dir accessed" }
@@ -90,52 +105,74 @@ open class ThumbnailCache @Inject constructor(
 
         val entry = acquireLock(hash)
         try {
-            return@withContext synchronized(entry.lock) {
+            return@withContext entry.mutex.withLock {
                 // Re-check under the lock: another caller may have stored it while we raced.
                 findCached(hash)?.let { cachedNow ->
-                    return@synchronized "file://${cachedNow.absolutePath}"
+                    return@withLock "file://${cachedNow.absolutePath}"
                 }
 
+                // Clearing the OS cache deletes this directory mid-session.
+                ensureDir()
                 val tmp = File(dir, "$hash.tmp")
                 try {
                     val request = Request.Builder()
                         .url(sourceUrl)
                         .header("Accept", "image/*")
                         .build()
-                    thumbnailClient.newCall(request).execute().use { response ->
-                        if (!response.isSuccessful) return@synchronized sourceUrl
-                        val body = response.body ?: return@synchronized sourceUrl
-
-                        val mime = body.contentType()?.toString()?.substringBefore(';')?.trim().orEmpty()
-                        if (mime.isNotEmpty() && !mime.startsWith("image/", ignoreCase = true)) {
-                            Logger.w(tag, "Thumbnail rejected: content-type '$mime' for $sourceUrl")
-                            return@synchronized sourceUrl
-                        }
-
-                        val declaredLength = body.contentLength()
-                        if (declaredLength > MAX_THUMBNAIL_BYTES) {
-                            Logger.w(tag, "Thumbnail rejected: declared $declaredLength bytes for $sourceUrl")
-                            return@synchronized sourceUrl
-                        }
-
-                        val cachedFile = File(dir, "$hash.${extensionFor(mime, sourceUrl)}")
-                        val written = body.byteStream().use { input ->
-                            FileOutputStream(tmp).use { output -> copyBounded(input, output, MAX_THUMBNAIL_BYTES) }
-                        }
-                        if (written <= 0L) {
-                            tmp.delete()
-                            return@synchronized sourceUrl
-                        }
-                        if (tmp.renameTo(cachedFile)) {
-                            enforceCacheCap()
-                            return@synchronized "file://${cachedFile.absolutePath}"
-                        }
-                        if (cachedFile.exists()) {
-                            tmp.delete()
-                            return@synchronized "file://${cachedFile.absolutePath}"
-                        }
+                    val call = thumbnailClient.newCall(request)
+                    // A blocking OkHttp execute() ignores coroutine cancellation;
+                    // cancel the call when the caller's job is cancelled so a
+                    // screen exit never holds the per-URL mutex on a dead request.
+                    val cancelHandle = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+                        if (cause != null) call.cancel()
                     }
+                    try {
+                        call.execute().use { response ->
+                            currentCoroutineContext().ensureActive()
+                            if (!response.isSuccessful) return@withLock sourceUrl
+                            val body = response.body ?: return@withLock sourceUrl
+
+                            val mime = body.contentType()?.toString()?.substringBefore(';')?.trim().orEmpty()
+                            if (mime.isNotEmpty() && !mime.startsWith("image/", ignoreCase = true)) {
+                                Logger.w(tag, "Thumbnail rejected: content-type '$mime' for $sourceUrl")
+                                return@withLock sourceUrl
+                            }
+
+                            val declaredLength = body.contentLength()
+                            if (declaredLength > MAX_THUMBNAIL_BYTES) {
+                                Logger.w(tag, "Thumbnail rejected: declared $declaredLength bytes for $sourceUrl")
+                                return@withLock sourceUrl
+                            }
+
+                            ensureDir()
+                            val cachedFile = File(dir, "$hash.${extensionFor(mime, sourceUrl)}")
+                            val written = body.byteStream().use { input ->
+                                FileOutputStream(tmp).use { output -> copyBounded(input, output, MAX_THUMBNAIL_BYTES) }
+                            }
+                            currentCoroutineContext().ensureActive()
+                            if (written <= 0L) {
+                                tmp.delete()
+                                return@withLock sourceUrl
+                            }
+                            if (tmp.renameTo(cachedFile)) {
+                                // Never evict the file this store just admitted.
+                                enforceCacheCap(protectedFile = cachedFile)
+                                return@withLock "file://${cachedFile.absolutePath}"
+                            }
+                            if (cachedFile.exists()) {
+                                tmp.delete()
+                                return@withLock "file://${cachedFile.absolutePath}"
+                            }
+                        }
+                    } finally {
+                        cancelHandle?.dispose()
+                    }
+                } catch (e: CancellationException) {
+                    // Structured cancellation is never a cache miss.
+                    throw e
                 } catch (e: Exception) {
+                    // OkHttp cancel() or stream interrupts surface as IOException("Canceled").
+                    currentCoroutineContext().ensureActive()
                     Logger.w(tag, "Failed to download thumbnail $sourceUrl: ${e.message}")
                 } finally {
                     runCatching { tmp.delete() }
@@ -148,24 +185,33 @@ open class ThumbnailCache @Inject constructor(
         }
     }
 
-    /** Evicts oldest-accessed non-temp files until the cache fits the cap. */
-    internal fun enforceCacheCap() {
-        try {
-            // Never evict a .tmp file: it may belong to an in-flight download.
-            val files = dir.listFiles { _, name -> !name.endsWith(".tmp") } ?: return
-            var totalSize = files.sumOf { it.length() }
-            if (totalSize <= maxCacheSizeBytes) return
+    /**
+     * Evicts oldest-accessed non-temp files until the cache fits the cap.
+     *
+     * @param protectedFile the file a concurrent store just admitted; eviction
+     *   skips it so the caller's own cap check can never delete its result.
+     */
+    internal fun enforceCacheCap(protectedFile: File? = null) {
+        synchronized(evictionLock) {
+            try {
+                // Never evict a .tmp file: it may belong to an in-flight download.
+                val files = dir.listFiles { _, name -> !name.endsWith(".tmp") } ?: return
+                var totalSize = files.sumOf { it.length() }
+                if (totalSize <= maxCacheSizeBytes) return
 
-            val sortedByOldestAccess = files.sortedBy { it.lastModified() }
-            for (file in sortedByOldestAccess) {
-                if (totalSize <= maxCacheSizeBytes) break
-                val size = file.length()
-                if (file.delete()) {
-                    totalSize -= size
+                val protectedPath = protectedFile?.absolutePath
+                val sortedByOldestAccess = files.sortedBy { it.lastModified() }
+                for (file in sortedByOldestAccess) {
+                    if (totalSize <= maxCacheSizeBytes) break
+                    if (protectedPath != null && file.absolutePath == protectedPath) continue
+                    val size = file.length()
+                    if (file.delete()) {
+                        totalSize -= size
+                    }
                 }
+            } catch (e: Exception) {
+                Logger.w(tag, "Error enforcing thumbnail cache cap: ${e.message}")
             }
-        } catch (e: Exception) {
-            Logger.w(tag, "Error enforcing thumbnail cache cap: ${e.message}")
         }
     }
 
@@ -203,7 +249,7 @@ open class ThumbnailCache @Inject constructor(
     }
 
     /** Copies at most [maxBytes]; returns -1 when the response exceeds the cap. */
-    private fun copyBounded(
+    private suspend fun copyBounded(
         input: java.io.InputStream,
         output: java.io.OutputStream,
         maxBytes: Long
@@ -211,6 +257,8 @@ open class ThumbnailCache @Inject constructor(
         val buffer = ByteArray(16 * 1024)
         var total = 0L
         while (true) {
+            // Cancellation point for a blocking body read.
+            currentCoroutineContext().ensureActive()
             val read = input.read(buffer)
             if (read < 0) break
             total += read

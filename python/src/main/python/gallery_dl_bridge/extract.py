@@ -19,10 +19,12 @@ from common import gallery_dl_util
 from common.envelope import (
     AUTH_WALL,
     NETWORK,
+    NO_MEDIA,
     RATE_LIMITED,
     UNAVAILABLE,
     classify,
     fail,
+    has_http_status,
     succeed,
 )
 
@@ -73,7 +75,7 @@ def extract(url, cookiefile=None, user_agent=None):
         return _failure_envelope(error, cookiefile)
 
     if not files:
-        return fail(UNAVAILABLE, "This post contains no downloadable media")
+        return fail(NO_MEDIA, "This post contains no downloadable media")
 
     items = []
     for fallback_index, (media_url, meta) in enumerate(files, 1):
@@ -151,7 +153,8 @@ def _failure_envelope(error, cookiefile):
         )
         return fail(AUTH_WALL, detail, tail=[str(error)])
 
-    if "please wait" in text or "rate limit" in text or "429" in text:
+    # Bare "429" used to match numeric ids/URLs; only a real status context counts.
+    if "please wait" in text or "rate limit" in text or has_http_status(text, 429):
         return fail(
             RATE_LIMITED,
             "Instagram is rate-limiting requests — try again in a few minutes",
@@ -166,6 +169,12 @@ def _failure_envelope(error, cookiefile):
         )
 
     kind = classify(error)
+    if kind == RATE_LIMITED:
+        return fail(
+            RATE_LIMITED,
+            "Instagram is rate-limiting requests — try again in a few minutes",
+            tail=[str(error)],
+        )
     if kind == NETWORK:
         return fail(NETWORK, "Couldn't reach Instagram — check your connection", tail=[str(error)])
 

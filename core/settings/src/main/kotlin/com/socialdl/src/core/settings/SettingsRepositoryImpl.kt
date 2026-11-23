@@ -3,21 +3,32 @@ package com.socialdl.src.core.settings
 import android.content.Context
 import android.net.Uri
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.settings.model.AppTheme
 import com.socialdl.src.core.settings.model.SearchEngine
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "socialdl_settings")
+// A corrupt preferences file (power loss / partial write) must not crash the app
+// forever: replace it with empty preferences and let the safe reader fall back.
+private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
+    name = "socialdl_settings",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
 
 @Singleton
 class SettingsRepositoryImpl @Inject constructor(
@@ -35,45 +46,59 @@ class SettingsRepositoryImpl @Inject constructor(
         val STARTUP_PERMISSIONS_REQUESTED = booleanPreferencesKey("startup_permissions_requested")
     }
 
-    override val theme: Flow<AppTheme> = context.dataStore.data.map { prefs ->
+    /**
+     * One shared reader: an IOException (corrupt/unreadable file) degrades to
+     * defaults instead of crashing every collector, and unchanged preferences do
+     * not re-emit (which used to restart theme/search observers on every write).
+     */
+    private val safeData: Flow<Preferences> = context.dataStore.data.catch { error ->
+        if (error is IOException) {
+            Logger.e("SettingsRepository", "Failed reading settings DataStore", error)
+            emit(emptyPreferences())
+        } else {
+            throw error
+        }
+    }
+
+    override val theme: Flow<AppTheme> = safeData.map { prefs ->
         when (prefs[Keys.THEME]) {
             AppTheme.LIGHT.name -> AppTheme.LIGHT
             AppTheme.SYSTEM.name -> AppTheme.SYSTEM
             else -> AppTheme.DARK // Default to dark per spec
         }
-    }
+    }.distinctUntilChanged()
 
-    override val fallbackSearchEngine: Flow<SearchEngine> = context.dataStore.data.map { prefs ->
+    override val fallbackSearchEngine: Flow<SearchEngine> = safeData.map { prefs ->
         when (prefs[Keys.SEARCH_ENGINE]) {
             SearchEngine.PIPED.name -> SearchEngine.PIPED
             SearchEngine.INVIDIOUS.name -> SearchEngine.INVIDIOUS
             else -> SearchEngine.YOUTUBE
         }
-    }
+    }.distinctUntilChanged()
 
-    override val videoFolderUri: Flow<Uri?> = context.dataStore.data.map { prefs ->
+    override val videoFolderUri: Flow<Uri?> = safeData.map { prefs ->
         prefs[Keys.VIDEO_FOLDER_URI]?.let { Uri.parse(it) }
-    }
+    }.distinctUntilChanged()
 
-    override val audioFolderUri: Flow<Uri?> = context.dataStore.data.map { prefs ->
+    override val audioFolderUri: Flow<Uri?> = safeData.map { prefs ->
         prefs[Keys.AUDIO_FOLDER_URI]?.let { Uri.parse(it) }
-    }
+    }.distinctUntilChanged()
 
-    override val maxConcurrentDownloads: Flow<Int> = context.dataStore.data.map { prefs ->
+    override val maxConcurrentDownloads: Flow<Int> = safeData.map { prefs ->
         prefs[Keys.MAX_CONCURRENT_DOWNLOADS] ?: 3
-    }
+    }.distinctUntilChanged()
 
-    override val wifiOnlyDownloads: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    override val wifiOnlyDownloads: Flow<Boolean> = safeData.map { prefs ->
         prefs[Keys.WIFI_ONLY_DOWNLOADS] ?: false
-    }
+    }.distinctUntilChanged()
 
-    override val forceH264Transcode: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    override val forceH264Transcode: Flow<Boolean> = safeData.map { prefs ->
         prefs[Keys.FORCE_H264_TRANSCODE] ?: false
-    }
+    }.distinctUntilChanged()
 
-    override val startupPermissionsRequested: Flow<Boolean> = context.dataStore.data.map { prefs ->
+    override val startupPermissionsRequested: Flow<Boolean> = safeData.map { prefs ->
         prefs[Keys.STARTUP_PERMISSIONS_REQUESTED] ?: false
-    }
+    }.distinctUntilChanged()
 
     override suspend fun setTheme(theme: AppTheme) {
         context.dataStore.edit { prefs ->

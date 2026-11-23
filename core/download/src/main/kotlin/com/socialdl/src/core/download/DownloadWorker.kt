@@ -92,7 +92,14 @@ class DownloadWorker @AssistedInject constructor(
 
     override suspend fun getForegroundInfo(): ForegroundInfo {
         val jobId = inputData.getString(KEY_JOB_ID).orEmpty()
-        val job = runCatching { jobRepository.getJob(jobId) }.getOrNull()
+        val job = try {
+            jobRepository.getJob(jobId)
+        } catch (e: CancellationException) {
+            // Never swallow structured cancellation as "no job".
+            throw e
+        } catch (_: Exception) {
+            null
+        }
         return notificationManager.buildForegroundInfo(
             jobId = jobId,
             title = job?.title ?: "Downloading media",
@@ -123,6 +130,8 @@ class DownloadWorker @AssistedInject constructor(
                 )
             )
             isForeground = true
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Logger.w(tag, "[${job.id}] Foreground promotion failed (continuing in background)", e)
         }
@@ -151,6 +160,8 @@ class DownloadWorker @AssistedInject constructor(
                     formatKind = FormatKind.fromOrNull(job.formatKind)
                 )
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Logger.w(tag, "[$jobId] Foreground notification refresh failed", e)
         }
@@ -267,6 +278,7 @@ class DownloadWorker @AssistedInject constructor(
         var attempt = 0
         var rejectedFormatId: String? = null
         var rejectedUrl: String? = null
+        var rejectedAudioUrl: String? = null
 
         while (true) {
             // 0 = normal, 1 = anonymous (when available), 2 = session-bound refresh.
@@ -278,6 +290,7 @@ class DownloadWorker @AssistedInject constructor(
                     useSavedSession = useSavedSession,
                     rejectedFormatId = rejectedFormatId,
                     rejectedUrl = rejectedUrl,
+                    rejectedAudioUrl = rejectedAudioUrl,
                 )
             ) {
                 is ResolveOutcome.Ready -> outcome.streams
@@ -305,16 +318,29 @@ class DownloadWorker @AssistedInject constructor(
                 return downloadResolved(job, resolved, scratchDir, callCanceller)
             } catch (e: Exception) {
                 if (e.isRefreshableRejection() && attempt + 1 < maxAttempts) {
+                    val rejection = e as? StreamRejectedException
+                    val audioRejected = rejection?.isAudio == true
+                    val rejectedStreamUrl = rejection?.streamUrl
                     Logger.w(
                         tag,
-                        "[${job.id}] CDN refused the signed stream URL " +
-                            "(host=${hostOf(resolved.directUrl)}, format=${resolved.formatId}, " +
-                            "container=${resolved.container}, ${e.message}); " +
-                            "refreshing (attempt ${attempt + 1}/$maxAttempts, " +
+                        "[${job.id}] CDN refused the signed " +
+                            "${if (audioRejected) "audio" else resolved.formatKind.name.lowercase(Locale.ROOT)} stream URL " +
+                            "(host=${hostOf(rejectedStreamUrl ?: resolved.directUrl)}, " +
+                            "format=${resolved.formatId}, container=${resolved.container}, " +
+                            "${e.message}); refreshing (attempt ${attempt + 1}/$maxAttempts, " +
                             "savedSession=${!anonymousRetry || attempt + 1 != 1})"
                     )
-                    rejectedFormatId = resolved.formatId
-                    rejectedUrl = resolved.directUrl
+                    if (audioRejected) {
+                        // The video URL was not refused: keep it (or its placeholder)
+                        // as the selection input and only steer the audio pairing.
+                        rejectedFormatId = null
+                        rejectedUrl = null
+                        rejectedAudioUrl = rejectedStreamUrl
+                    } else {
+                        rejectedFormatId = resolved.formatId
+                        rejectedUrl = resolved.directUrl
+                        rejectedAudioUrl = null
+                    }
                     attempt++
                     // A fresh attempt must not append to the refused attempt's bytes.
                     scratchDir.listFiles()?.forEach { it.deleteRecursively() }
@@ -330,8 +356,19 @@ class DownloadWorker @AssistedInject constructor(
      * 401/403 to a stream URL. Every other transfer error keeps its existing
      * terminal semantics (retrying a 404 or a corrupt range is pointless).
      */
-    private fun Exception.isRefreshableRejection(): Boolean =
-        this is HttpStatusException && (code == 401 || code == 403)
+    private fun Throwable.isRefreshableRejection(): Boolean = when (this) {
+        is HttpStatusException -> code == 401 || code == 403
+        // A wrapped audio rejection keeps the typed cause for DownloadError.from().
+        is StreamRejectedException -> cause?.isRefreshableRejection() == true
+        else -> false
+    }
+
+    /** Marks which half of a video+audio download the CDN refused. */
+    private class StreamRejectedException(
+        val streamUrl: String,
+        val isAudio: Boolean,
+        cause: HttpStatusException,
+    ) : Exception(cause.message, cause)
 
     /** Host only — a signed CDN URL must never be written to logcat. */
     private fun hostOf(url: String): String =
@@ -345,6 +382,12 @@ class DownloadWorker @AssistedInject constructor(
         callCanceller: DownloadCallCanceller,
     ): Boolean {
         val finalFile = if (resolved.requiresMuxing) {
+            // Fail before fetching hundreds of MB if the mux step can never run.
+            if (!ffmpegProcessExecutor.isAvailable()) {
+                Logger.e(tag, "[${job.id}] FFmpeg binary is unavailable; cannot mux")
+                markFailed(job.id, DownloadError.MuxFailed)
+                return false
+            }
             val videoTemp = File(scratchDir, "video.tmp")
             val audioTemp = File(scratchDir, "audio.tmp")
 
@@ -356,6 +399,16 @@ class DownloadWorker @AssistedInject constructor(
                 platform = job.platform,
                 canceller = callCanceller,
             )
+
+            if (videoTemp.length() == 0L || audioTemp.length() == 0L) {
+                Logger.e(
+                    tag,
+                    "[${job.id}] Stream download produced an empty file " +
+                        "(video=${videoTemp.length()}, audio=${audioTemp.length()})"
+                )
+                markFailed(job.id, DownloadError.MissingStream)
+                return false
+            }
 
             // The probe tells the mux which streams can be copied into the chosen
             // container and which must be re-encoded to fit it.
@@ -377,6 +430,16 @@ class DownloadWorker @AssistedInject constructor(
             ) ?: return false // failure already written
         } else {
             val mediaTemp = File(scratchDir, "media.tmp")
+
+            // Images are stored as-is; every other single stream is converted by
+            // FFmpeg, so check the binary before spending the download.
+            if (resolved.formatKind != FormatKind.IMAGE &&
+                !ffmpegProcessExecutor.isAvailable()
+            ) {
+                Logger.e(tag, "[${job.id}] FFmpeg binary is unavailable; cannot convert")
+                markFailed(job.id, DownloadError.ConversionFailed)
+                return false
+            }
 
             downloadSingle(
                 jobId = job.id,
@@ -443,26 +506,41 @@ class DownloadWorker @AssistedInject constructor(
         }
 
         Logger.d(tag, "[$jobId] Downloading audio stream (chunkSize=${resolved.audioChunkSize})...")
-        chunkedDownloader.download(
-            url = resolved.audioDirectUrl,
-            destination = audioTemp,
-            chunkSizeBytes = resolved.audioChunkSize,
-            platform = platform,
-            isStopped = { isStopped },
-            canceller = canceller
-        ) { bytesWritten, totalBytes ->
-            val progress = if (totalBytes != null && totalBytes > 0) {
-                0.8f + (bytesWritten.toFloat() / totalBytes) * 0.15f // Audio accounts for 15%
-            } else {
-                0.9f
+        try {
+            chunkedDownloader.download(
+                url = resolved.audioDirectUrl,
+                destination = audioTemp,
+                chunkSizeBytes = resolved.audioChunkSize,
+                platform = platform,
+                isStopped = { isStopped },
+                canceller = canceller
+            ) { bytesWritten, totalBytes ->
+                val progress = if (totalBytes != null && totalBytes > 0) {
+                    0.8f + (bytesWritten.toFloat() / totalBytes) * 0.15f // Audio accounts for 15%
+                } else {
+                    0.9f
+                }
+                registerProgress(
+                    jobId,
+                    DownloadStatus.DOWNLOADING,
+                    progress,
+                    videoTemp.length() + bytesWritten,
+                    totalBytes?.let { it + videoTemp.length() }
+                )
             }
-            registerProgress(
-                jobId,
-                DownloadStatus.DOWNLOADING,
-                progress,
-                videoTemp.length() + bytesWritten,
-                totalBytes?.let { it + videoTemp.length() }
-            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: HttpStatusException) {
+            // Without this marker the retry would blame/refresh the video stream
+            // even though the audio URL was the one refused.
+            if (e.code == 401 || e.code == 403) {
+                throw StreamRejectedException(
+                    streamUrl = resolved.audioDirectUrl,
+                    isAudio = true,
+                    cause = e,
+                )
+            }
+            throw e
         }
     }
 
@@ -569,6 +647,11 @@ class DownloadWorker @AssistedInject constructor(
             markFailed(jobId, DownloadError.MuxFailed)
             return null
         }
+
+        // The muxed file is the only artifact needed from here on; keeping both
+        // source streams through export triples the peak disk footprint.
+        videoTemp.delete()
+        audioTemp.delete()
 
         return muxedFile
     }

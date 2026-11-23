@@ -68,10 +68,30 @@ object UrlPlatformResolver {
      * resolution.
      */
     private fun containsHost(url: String, host: String): Boolean {
+        if (url.contains("://")) {
+            // Only real web URLs are platform links: javascript:, intent://,
+            // content:// and friends must never resolve to a platform.
+            val scheme = runCatching { java.net.URI(url).scheme?.lowercase() }.getOrNull()
+            if (scheme != "http" && scheme != "https") return false
+        } else {
+            // A scheme without slashes (`javascript:youtube.com/...` or
+            // `javascript:443@youtube.com/...`) is not a URL; only allow a true
+            // `host:port` prefix (`youtube.com:443/...`).
+            if (SCHEME_PREFIX.matcher(url).find() && !HOST_PORT_PREFIX.matcher(url).find()) {
+                return false
+            }
+        }
         val withScheme = if (url.contains("://")) url else "https://$url"
         val uriHost = runCatching {
             java.net.URI(withScheme).host?.lowercase()
         }.getOrNull() ?: return false
         return uriHost == host || uriHost == "www.$host" || uriHost.endsWith(".$host")
     }
+
+    /** Matches any `scheme:` prefix; paired with [HOST_PORT_PREFIX] to keep `host:port`. */
+    private val SCHEME_PREFIX = Pattern.compile("^[a-zA-Z][a-zA-Z0-9+.-]*:")
+
+    private val HOST_PORT_PREFIX = Pattern.compile(
+        "^[a-zA-Z0-9-]+(?:\\.[a-zA-Z0-9-]+)+:\\d+(?:[/?#]|$)"
+    )
 }

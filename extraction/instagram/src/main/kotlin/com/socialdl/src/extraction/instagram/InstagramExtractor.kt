@@ -89,37 +89,40 @@ class InstagramExtractor @Inject constructor(
             return ExtractionResult.Error(ExtractionError.UnsupportedUrl(url))
         }
 
-        Logger.d(tag, "Extracting Instagram metadata for $normalizedUrl (cookies=${cookieStore.jarState(Platform.INSTAGRAM) != null})")
+        Logger.d(tag, "Extracting Instagram metadata for $normalizedUrl")
 
         return try {
-            // Hybrid engine routing (Oct 2026):
-            // - cookies captured → gallery-dl (works for public + private content)
-            // - no cookies → anonymous Instaloader fallback; a failure surfaces the
+            // Hybrid engine routing (Oct 2026), decided atomically under the one
+            // cookie-jar call:
+            // - a decrypted jar exists → gallery-dl (works for public + private content)
+            // - no jar → anonymous Instaloader fallback; a failure surfaces the
             //   normal typed error (auth wall / rate limited / unavailable).
-            val hasCookies = cookieStore.jarState(Platform.INSTAGRAM) != null
-            val envelope = if (hasCookies) {
-                // gallery-dl must present the same UA the capture WebView used, or a
-                // UA-bound session looks logged out. Capture never overrides the UA
-                // (§2.6), so the engine default *is* what the capture screen sent.
-                val captureUserAgent = runCatching {
-                    WebSettings.getDefaultUserAgent(context)
-                }.getOrNull()?.takeIf { it.isNotBlank() } ?: FALLBACK_USER_AGENT
-                cookieStore.withCookieFile(Platform.INSTAGRAM) { cookiePath ->
-                    val rawJson = pythonEngine.run(
+            //
+            // The previous `jarState()` check followed by `withCookieFile()` was a
+            // TOCTOU race: the jar can be cleared/replaced between the two calls.
+            // The cookie path handed to the block is the single source of truth.
+            val envelope = cookieStore.withCookieFile(Platform.INSTAGRAM) { cookiePath ->
+                val rawJson = if (cookiePath != null) {
+                    // gallery-dl must present the same UA the capture WebView used, or a
+                    // UA-bound session looks logged out. Capture never overrides the UA
+                    // (§2.6), so the engine default *is* what the capture screen sent.
+                    val captureUserAgent = runCatching {
+                        WebSettings.getDefaultUserAgent(context)
+                    }.getOrNull()?.takeIf { it.isNotBlank() } ?: FALLBACK_USER_AGENT
+                    pythonEngine.run(
                         module = "gallery_dl_bridge.extract",
                         function = "extract",
                         normalizedUrl,
                         cookiePath,
                         captureUserAgent
                     ) { it }
-                    decodeEnvelope(rawJson)
+                } else {
+                    pythonEngine.run(
+                        module = "instaloader_bridge.extract",
+                        function = "extract",
+                        normalizedUrl
+                    ) { it }
                 }
-            } else {
-                val rawJson = pythonEngine.run(
-                    module = "instaloader_bridge.extract",
-                    function = "extract",
-                    normalizedUrl
-                ) { it }
                 decodeEnvelope(rawJson)
             }
 

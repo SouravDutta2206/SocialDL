@@ -32,12 +32,14 @@ the field is ``None`` and no video URL is ever used as a stand-in thumbnail.
 """
 
 import re
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
 from common.envelope import (
     AUTH_WALL,
     NETWORK,
+    NO_MEDIA,
     RATE_LIMITED,
     UNAVAILABLE,
     classify,
@@ -59,14 +61,16 @@ except Exception:
 
 # ── Constants & patterns (reference twitter_x.py :133–172) ───────────────────
 
-# Matches x.com/USER/status/ID, twitter.com/USER/status/ID and the i/web variants.
+# Matches x.com/USER/status/ID, twitter.com/USER/status/ID, mobile hosts, and the
+# i/web variants.
 _TWEET_URL_RE = re.compile(
-    r"(?:https?://)?(?:www\.)?(?:x\.com|twitter\.com)/"
-    r"(?:i/web/status|i/status|status|[^/]+/status)/(\d+)"
+    r"(?:https?://)?(?:www\.|mobile\.|m\.)?(?:x\.com|twitter\.com)/"
+    r"(?:i/web/status|i/status|status|[^/]+/status)/(\d+)",
+    re.IGNORECASE,
 )
 
 # Bare t.co short links (resolved by a redirect-following GET before parsing).
-_TCO_RE = re.compile(r"(?:https?://)?t\.co/\w+")
+_TCO_RE = re.compile(r"(?:https?://)?t\.co/\w+", re.IGNORECASE)
 
 # Syndication CDN endpoint and its required static parameters (reference :144–161).
 _SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result"
@@ -95,7 +99,9 @@ _VIDEO_PATH_RES = re.compile(r"/vid/(?:avc1/)?(\d+)x(\d+)/")
 _VIDEO_EXTENSIONS = ("mp4", "m4v", "mov", "webm", "mkv")
 
 # Twitter/X sign-in failure vocabulary. Auth-wall markers are platform-domain
-# knowledge and stay in this bridge (same split as the Instagram bridges).
+# knowledge and stay in this bridge (same split as the Instagram bridges). HTTP
+# 401/403 are matched through classify(..., auth_statuses=(401, 403)) so digits
+# inside tweet ids or CDN URLs are never mistaken for auth failures.
 _AUTH_MARKERS = (
     "authentication",
     "authorization",
@@ -104,8 +110,6 @@ _AUTH_MARKERS = (
     "sign in",
     "sign-in",
     "cookies",
-    "401",
-    "403",
     "unauthorized",
 )
 
@@ -152,9 +156,23 @@ def extract(url, cookiefile=None, user_agent=None):
             payload = _via_gallery_dl(normalized, cookiefile, user_agent)
             payload["engine"] = "gallery-dl"
             return succeed(payload)
+        except _Failure as failure:
+            # A text-only tweet is a definitive answer: the syndication engine
+            # would only repeat the same request (and waste a second fetch) to
+            # discover the same absence of media.
+            if failure.kind == NO_MEDIA:
+                return fail(failure.kind, failure.detail, tail=failure.tail)
+            gdl_error = str(failure)
+            gdl_auth_failure = (
+                classify(gdl_error, _AUTH_MARKERS, auth_statuses=(401, 403))
+                == AUTH_WALL
+            )
         except Exception as error:  # noqa: BLE001 — deliberate fallback boundary
             gdl_error = str(error)
-            gdl_auth_failure = classify(gdl_error, _AUTH_MARKERS) == AUTH_WALL
+            gdl_auth_failure = (
+                classify(gdl_error, _AUTH_MARKERS, auth_statuses=(401, 403))
+                == AUTH_WALL
+            )
 
     try:
         payload = _via_syndication(normalized, tweet_id, gdl_error)
@@ -178,19 +196,51 @@ def extract(url, cookiefile=None, user_agent=None):
 
 
 def _normalize_url(url):
-    """Normalize a tweet URL: strip ``www.``, resolve t.co, twitter.com -> x.com."""
-    url = url.strip().replace("www.", "")
+    """Normalize a tweet URL: resolve t.co, then twitter.com/mobile -> x.com.
 
-    if "t.co/" in url:
+    Short links are detected from the parsed hostname, never from a ``t.co/``
+    substring inside a path/query. The redirect request is streamed and closed
+    so no response body is ever buffered just to read the final URL.
+    """
+    candidate = (url or "").strip()
+    if not candidate:
+        raise ValueError("Empty URL")
+    if "://" not in candidate:
+        candidate = "https://" + candidate
+
+    parsed = urlsplit(candidate)
+    if (parsed.scheme or "").lower() in ("http", "https") and (
+        parsed.hostname or ""
+    ).lower() in ("t.co", "www.t.co"):
         try:
-            response = requests.get(
-                url, headers=_HEADERS, allow_redirects=True, timeout=10
-            )
-            url = response.url
+            with requests.get(
+                candidate,
+                headers=_HEADERS,
+                allow_redirects=True,
+                timeout=10,
+                stream=True,
+            ) as response:
+                candidate = response.url
         except requests.RequestException:
             pass
 
-    return url.replace("twitter.com/", "x.com/")
+    parsed = urlsplit(candidate)
+    scheme = (parsed.scheme or "https").lower()
+    raw_host = (parsed.hostname or "").lower()
+    canonical_host = raw_host
+    for prefix in ("www.", "mobile.", "m."):
+        if canonical_host.startswith(prefix):
+            canonical_host = canonical_host[len(prefix):]
+            break
+    # Only strip X/Twitter host prefixes; any other host is left untouched.
+    host = canonical_host if canonical_host in ("twitter.com", "x.com") else raw_host
+    if host == "twitter.com":
+        host = "x.com"
+
+    netloc = host
+    if parsed.port is not None:
+        netloc = "%s:%d" % (host, parsed.port)
+    return urlunsplit((scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 def _extract_tweet_id(url):
@@ -223,7 +273,7 @@ def _via_gallery_dl(url, cookiefile, user_agent):
     )
 
     if not files:
-        raise _Failure(UNAVAILABLE, "This tweet contains no downloadable media")
+        raise _Failure(NO_MEDIA, "This tweet contains no downloadable media")
 
     owner = "unknown"
     author = tweet.get("author") or {}
@@ -270,7 +320,7 @@ def _via_gallery_dl(url, cookiefile, user_agent):
         items.append(item)
 
     if not items:
-        raise _Failure(UNAVAILABLE, "This tweet contains no downloadable media")
+        raise _Failure(NO_MEDIA, "This tweet contains no downloadable media")
 
     return {
         "shortcode": shortcode,
@@ -370,7 +420,7 @@ def _via_syndication(url, tweet_id, gdl_error=None):
 
     if not items:
         raise _Failure(
-            UNAVAILABLE,
+            NO_MEDIA,
             "This tweet contains no downloadable media",
             fallback_tail,
         )
@@ -474,8 +524,12 @@ def _parse_fallback_media(data):
             else:
                 src = ""
                 for variant in video.get("variants") or []:
-                    src = variant.get("src") or variant.get("url") or ""
-                    if src:
+                    if not isinstance(variant, dict):
+                        continue
+                    candidate = variant.get("src") or variant.get("url") or ""
+                    variant_ct = variant.get("content_type") or variant.get("type") or ""
+                    if candidate and not _is_hls_variant(variant_ct, candidate):
+                        src = candidate
                         break
                 if src:
                     items.append(
@@ -510,10 +564,10 @@ def _extract_video_variants(variants):
         if not isinstance(variant, dict):
             continue
         content_type = variant.get("content_type") or variant.get("type") or ""
-        if content_type == "application/x-mpegURL":
+        variant_url = variant.get("url") or variant.get("src") or ""
+        if _is_hls_variant(content_type, variant_url):
             continue
 
-        variant_url = variant.get("url") or variant.get("src") or ""
         if not variant_url or variant_url in seen_urls:
             continue
         seen_urls.add(variant_url)
@@ -523,6 +577,17 @@ def _extract_video_variants(variants):
 
     parsed.sort(key=lambda entry: (entry["width"] * entry["height"], entry["bitrate"]), reverse=True)
     return parsed
+
+
+def _is_hls_variant(content_type, url):
+    """True for HLS playlists, whose manifests the byte downloader cannot fetch.
+
+    Content-type comparison is case-insensitive, and the URL check ignores any
+    query string, so ``.../master.M3U8?token=...`` is still recognized.
+    """
+    if "mpegurl" in str(content_type or "").lower():
+        return True
+    return str(url or "").split("?", 1)[0].lower().endswith(".m3u8")
 
 
 def _variant(url, width=0, height=0, bitrate=0):
@@ -597,7 +662,7 @@ def _failure_envelope(error, cookiefile):
         )
 
     text = str(error)
-    kind = classify(text, _AUTH_MARKERS)
+    kind = classify(text, _AUTH_MARKERS, auth_statuses=(401, 403))
 
     if kind == AUTH_WALL:
         detail = (
@@ -606,6 +671,10 @@ def _failure_envelope(error, cookiefile):
             else "X needs a signed-in session for this content"
         )
         return fail(AUTH_WALL, detail, tail=[text])
+    if kind == RATE_LIMITED:
+        return fail(
+            RATE_LIMITED, "X is rate-limiting requests — try again in a few minutes", tail=[text]
+        )
     if kind == NETWORK:
         return fail(
             NETWORK, "Couldn't reach X — check your connection", tail=[text]

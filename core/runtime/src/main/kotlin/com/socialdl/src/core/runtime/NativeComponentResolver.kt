@@ -16,23 +16,25 @@ import javax.inject.Singleton
 class NativeComponentResolver @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    private val resolved = HashMap<NativeComponentSpec, ResolvedNativeComponent?>()
+    // Only successfully resolved components are cached. A transient failure
+    // (helper APK mid-install, storage momentarily unavailable) must be retried
+    // by the next resolve() instead of being remembered as "unavailable" for the
+    // rest of the process.
+    private val resolved = HashMap<NativeComponentSpec, ResolvedNativeComponent>()
 
     /** The runtime to use for [spec], or null if the component is unavailable. */
     @Synchronized
     fun resolve(spec: NativeComponentSpec): ResolvedNativeComponent? {
-        if (!resolved.containsKey(spec)) {
-            resolved[spec] = select(spec)
-            return resolved[spec]
+        val cached = resolved[spec]
+        if (cached != null) {
+            if (cached.executable.canExecute()) return cached
+            // The helper APK can be uninstalled (or the app updated) while this
+            // process runs, which leaves the cached path dangling. Drop it and
+            // pick a source again instead of failing every later call.
+            Logger.w(TAG, "${spec.displayName}: cached ${cached.source.kind} runtime is gone; re-resolving")
+            resolved.remove(spec)
         }
-        val cached = resolved[spec] ?: return null
-        if (cached.executable.canExecute()) return cached
-
-        // The helper APK can be uninstalled (or the app updated) while this process
-        // runs, which leaves the cached path dangling. Pick a source again instead of
-        // failing every later FFmpeg/Node call until the next app start.
-        Logger.w(TAG, "${spec.displayName}: cached ${cached.source.kind} runtime is gone; re-resolving")
-        return select(spec).also { resolved[spec] = it }
+        return select(spec)?.also { resolved[spec] = it }
     }
 
     private fun select(spec: NativeComponentSpec): ResolvedNativeComponent? {

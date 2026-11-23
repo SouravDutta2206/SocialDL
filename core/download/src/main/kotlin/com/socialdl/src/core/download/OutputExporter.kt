@@ -170,6 +170,15 @@ class OutputExporter @Inject constructor(
                 deletePublishedExport(jobId, outputUri)
             }
             throw e
+        } catch (e: Exception) {
+            // A non-cancellation DB failure after publish would otherwise leak a
+            // visible MediaStore row with no history record. Compensate exactly
+            // like the cancellation path, then let doWork map the typed error.
+            if (!historyRecorded) {
+                Logger.e(tag, "[$jobId] Export failed after publish; deleting the published file", e)
+                deletePublishedExport(jobId, outputUri)
+            }
+            throw e
         }
     }
 

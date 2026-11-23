@@ -41,10 +41,10 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -57,6 +57,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.ui.theme.SocialDLAccent
@@ -142,9 +145,18 @@ fun SettingsScreen(
     // a lost target would drop the picked cookies.txt without importing it.
     var importTargetName by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Jar state is file-stamp based (no watcher), so the panels re-stat whenever the
-    // screen re-enters composition — including the pop-back from a capture round-trip.
-    LaunchedEffect(Unit) { viewModel.refreshCookieStates() }
+    // Jar state is file-stamp based (no watcher), so the panels re-stat on every
+    // ON_RESUME: this covers both the pop-back from a capture round-trip and a
+    // return from DocumentsUI (cookies import), including predictive-back that
+    // never recomposes this screen.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refreshCookieStates()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     // One cookies.txt picker for every platform (§2.6 fallback); the platform that
     // launched it is remembered until the result arrives.

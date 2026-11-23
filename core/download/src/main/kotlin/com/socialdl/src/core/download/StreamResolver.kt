@@ -11,6 +11,7 @@ import com.socialdl.src.core.model.MuxStrategy
 import com.socialdl.src.core.settings.SettingsRepository
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.ExtractorRegistry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import java.util.Locale
 import javax.inject.Inject
@@ -76,6 +77,8 @@ class StreamResolver @Inject constructor(
      * @param rejectedFormatId / @param rejectedUrl the stream the CDN refused, so the
      *   retry picks another candidate when one exists instead of repeating the same
      *   rejected request.
+     * @param rejectedAudioUrl the audio stream the CDN refused. The paired-audio
+     *   choice prefers any other audio before falling back to it.
      */
     internal suspend fun resolve(
         job: DownloadJobEntity,
@@ -83,6 +86,7 @@ class StreamResolver @Inject constructor(
         useSavedSession: Boolean = true,
         rejectedFormatId: String? = null,
         rejectedUrl: String? = null,
+        rejectedAudioUrl: String? = null,
     ): ResolveOutcome {
         val jobId = job.id
         Logger.i(
@@ -133,8 +137,14 @@ class StreamResolver @Inject constructor(
         var effectiveFormatLabel = job.formatLabel
         var effectiveFormatId = job.formatId
         var resolvedViaExtraction = false
-        val forceH264 = runCatching { settingsRepository.forceH264Transcode.first() }
-            .getOrDefault(false)
+        val forceH264 = try {
+            settingsRepository.forceH264Transcode.first()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // A settings read failure must not fail the download; default off.
+            false
+        }
 
         // Resolve when the job is a placeholder, its signed URL expired or was
         // refused, or a legacy row has no container to derive an extension/MIME from.
@@ -241,7 +251,18 @@ class StreamResolver @Inject constructor(
                     }
 
                     if (resolvedFormat.requiresMuxing) {
-                        val pairedAudio = resolvedItem.audioFormats.find { it.id == resolvedFormat.pairedAudioFormatId }
+                        // Prefer the paired stream, but never re-request an audio
+                        // URL the CDN just refused. Fall back to the paired id,
+                        // then to any audio format, only when nothing else exists.
+                        val pairedAudio = resolvedItem.audioFormats
+                            .firstOrNull {
+                                it.id == resolvedFormat.pairedAudioFormatId &&
+                                    it.directUrl != rejectedAudioUrl
+                            }
+                            ?: resolvedItem.audioFormats
+                                .firstOrNull { it.directUrl != rejectedAudioUrl }
+                            ?: resolvedItem.audioFormats
+                                .firstOrNull { it.id == resolvedFormat.pairedAudioFormatId }
                             ?: resolvedItem.audioFormats.firstOrNull()
                         effectiveAudioDirectUrl = pairedAudio?.directUrl
                         effectiveAudioChunkSize = pairedAudio?.httpChunkSizeBytes ?: 0L

@@ -158,6 +158,9 @@ private val CAPTURE_CONFIGS = listOf(
             "gstatic.com",
             "googleapis.com",
         ),
+        // X's "Continue with Google" lands on Google's country domains too; without
+        // the pattern a signed-in redirect bounces out to the external browser.
+        allowedHostPatterns = listOf(CaptureHostPolicy.GOOGLE_COUNTRY_DOMAIN),
         title = "Sign in with X",
         subtitle = "Log in normally (2FA included). SocialDL never sees your password; only cookies are stored encrypted.",
     ),
@@ -219,11 +222,13 @@ object CaptureHostPolicy {
      * WebView spinning on the accounts page forever.
      *
      * Matched against the whole host, so the optional `.*\.` accepts any
-     * subdomain while the TLD fallback still rejects lookalikes such as
-     * `google.evil.com` or `google.co.in.evil.com`.
+     * subdomain. The TLD set is deliberately narrow: only `google.com`, Google's
+     * two-part ccTLDs (`co.uk`, `com.au`, …) and two-letter ccTLDs (`de`, `in`).
+     * Lookalikes such as `google.evil.com`, `google.xyz`, `google.top` and
+     * `google.biz` are rejected.
      */
     val GOOGLE_COUNTRY_DOMAIN =
-        Regex("""(^|.*\.)google\.[a-z]{2,3}(\.[a-z]{2})?$""", RegexOption.IGNORE_CASE)
+        Regex("""(^|.*\.)google\.(?:com|(?:co|com)\.[a-z]{2}|[a-z]{2})$""", RegexOption.IGNORE_CASE)
 
     /**
      * True when [host] is one of [allowedHosts] or a subdomain of one, or matches
@@ -257,12 +262,19 @@ object CaptureHostPolicy {
         return normalized == family || normalized.endsWith(".$family")
     }
 
-    /** Lowercases, trims and drops a trailing root dot; null for blank input. */
+    /** Lowercases, trims and drops a trailing root dot; null for blank/invalid input. */
     fun normalizeHost(host: String?): String? = host
         ?.trim()
         ?.lowercase()
         ?.trimEnd('.')
         ?.takeIf { it.isNotEmpty() }
+        // A host can never contain a backslash, whitespace, or a control char.
+        // URL parsers disagree about `evil.com\@www.youtube.com` (some treat the
+        // backslash as user-info separator), so a malformed value is rejected
+        // rather than interpreted.
+        ?.takeIf { candidate ->
+            candidate.none { it == '\\' || it.isWhitespace() || it.isISOControl() }
+        }
 
     /**
      * Extracts the host from an absolute URL (or a bare `host/path` string)
@@ -277,6 +289,10 @@ object CaptureHostPolicy {
             .substringBefore('/')
             .substringBefore('?')
             .substringBefore('#')
+            // A backslash is not a path separator in a URL authority, but some
+            // parsers let `https://evil.com\@youtube.com/` read as user-info and
+            // then report the trusted-looking host. Cut it before user-info.
+            .substringBefore('\\')
         val hostPort = authority.substringAfterLast('@')
         if (hostPort.isEmpty()) return null
         val host = if (hostPort.startsWith("[")) {

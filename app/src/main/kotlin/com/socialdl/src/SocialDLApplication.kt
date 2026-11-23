@@ -8,11 +8,14 @@ import com.socialdl.src.core.ffmpeg.FFmpegBinaryProvider
 import com.socialdl.src.core.node.NodeBinaryProvider
 import com.socialdl.src.core.python.PythonBootstrap
 import dagger.hilt.android.HiltAndroidApp
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.concurrent.TimeUnit
 import androidx.hilt.work.HiltWorkerFactory
@@ -70,7 +73,11 @@ class SocialDLApplication : Application(), Configuration.Provider {
         // Foreground download notification channel (P1-1) — created once at app start.
         notificationManager.ensureChannel()
 
-        runDiagnosticsSmokeTest()
+        // Diagnostics spawn Python and subprocesses; release cold starts must not
+        // pay that cost (or log backend probes) for the whole user base.
+        if (BuildConfig.DEBUG) {
+            runDiagnosticsSmokeTest()
+        }
         cleanupLegacyInstaloaderSessionArtifacts()
     }
 
@@ -129,6 +136,78 @@ class SocialDLApplication : Application(), Configuration.Provider {
         }
     }
 
+    /**
+     * Runs one version/health subprocess: drains the entire merged output stream
+     * (keeping only the first line for the log), waits with a timeout, kills the
+     * process on timeout, and closes every stream in `finally`.
+     *
+     * Draining to EOF matters: `ffmpeg -version`/`node -e` can emit more than a
+     * pipe buffer's worth of text, and reading only the first line left the child
+     * blocked on a full pipe for the rest of its life.
+     */
+    private suspend fun runSmokeCommand(
+        label: String,
+        executablePath: String,
+        environment: Map<String, String>,
+        args: List<String>,
+    ) {
+        val process = ProcessBuilder(listOf(executablePath) + args)
+            .redirectErrorStream(true)
+            .apply { environment().putAll(environment) }
+            .start()
+
+        try {
+            var firstLine = ""
+            coroutineScope {
+                val drain = launch(Dispatchers.IO) {
+                    try {
+                        process.inputStream.bufferedReader().use { reader ->
+                            firstLine = reader.readLine().orEmpty()
+                            // Consume the rest to EOF so the OS pipe never fills.
+                            while (reader.readLine() != null) {
+                                // discard
+                            }
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Logger.w("SocialDL_Boot", "$label output drain failed: ${e.message}")
+                    }
+                }
+
+                val finished = waitForWithTimeout(process, 10)
+                if (!finished) {
+                    Logger.w("SocialDL_Boot", "$label smoke test timed out after 10s; killing process")
+                    destroyProcess(process)
+                    runCatching { process.inputStream.close() }
+                }
+                // Give the drain coroutine a bounded window to reach EOF; a grandchild
+                // inheriting the pipe fd must not hang boot diagnostics indefinitely.
+                if (withTimeoutOrNull(1_000L) { drain.join() } == null) {
+                    drain.cancel()
+                }
+
+                if (finished) {
+                    val exitCode = process.exitValue()
+                    Logger.i("SocialDL_Boot", "$label Smoke Test exit=$exitCode: $firstLine")
+                }
+            }
+        } finally {
+            runCatching { process.inputStream.close() }
+            runCatching { process.errorStream.close() }
+            runCatching { process.outputStream.close() }
+            runCatching { if (process.isAliveCompat()) destroyProcess(process) }
+        }
+    }
+
+    /** API 26+ exposes [Process.isAlive]; older releases only exitValue(). */
+    private fun Process.isAliveCompat(): Boolean = try {
+        exitValue()
+        false
+    } catch (_: IllegalThreadStateException) {
+        true
+    }
+
     private fun runDiagnosticsSmokeTest() {
         diagnosticsScope.launch {
             try {
@@ -155,45 +234,40 @@ class SocialDLApplication : Application(), Configuration.Provider {
 
                 // FFmpeg/node smoke tests spawn subprocesses; only worth the boot cost in DEBUG builds.
                 if (BuildConfig.DEBUG) {
-                    // 2. FFmpeg binary smoke test per Phase 0 exit criteria
-                    val ffmpegPath = ffmpegBinaryProvider.path()
+                    // 2. FFmpeg binary smoke test per Phase 0 exit criteria.
+                    // Resolve ONCE so the executable and its LD_LIBRARY_PATH are a
+                    // matching pair even if a runtime hot-swap lands mid-check.
+                    val ffmpegRuntime = ffmpegBinaryProvider.resolveRuntime()
+                    val ffmpegPath = ffmpegRuntime?.executable?.absolutePath
+                        ?: ffmpegBinaryProvider.path()
+                    val ffmpegEnv = ffmpegRuntime?.environment
+                        ?: ffmpegBinaryProvider.environment()
                     val ffmpegFile = File(ffmpegPath)
-                    val ldPath = ffmpegBinaryProvider.librarySearchPath()
                     if (ffmpegFile.exists() && ffmpegFile.canExecute()) {
-                        val pb = ProcessBuilder(ffmpegPath, "-version")
-                            .redirectErrorStream(true)
-                        pb.environment().putAll(ffmpegBinaryProvider.environment())
-                        val process = pb.start()
-                        val versionLine = process.inputStream.bufferedReader().readLine() ?: ""
-                        val finished = waitForWithTimeout(process, 10)
-                        if (!finished) {
-                            Logger.w("SocialDL_Boot", "FFmpeg smoke test timed out after 10s; killing process")
-                            destroyProcess(process)
-                        } else {
-                            val exitCode = process.exitValue()
-                            Logger.i("SocialDL_Boot", "FFmpeg Smoke Test exit=$exitCode: $versionLine")
-                        }
+                        runSmokeCommand(
+                            label = "FFmpeg",
+                            executablePath = ffmpegPath,
+                            environment = ffmpegEnv,
+                            args = listOf("-version"),
+                        )
                     } else {
                         Logger.w("SocialDL_Boot", "FFmpeg binary not executable at: $ffmpegPath")
                     }
 
-                    // 3. Node binary smoke test per Phase 0 exit criteria
-                    val nodePath = nodeBinaryProvider.path()
+                    // 3. Node binary smoke test per Phase 0 exit criteria.
+                    val nodeRuntime = nodeBinaryProvider.resolveRuntime()
+                    val nodePath = nodeRuntime?.executable?.absolutePath
+                        ?: nodeBinaryProvider.path()
+                    val nodeEnv = nodeRuntime?.environment
+                        ?: nodeBinaryProvider.environment()
                     val nodeFile = File(nodePath)
                     if (nodeFile.exists() && nodeFile.canExecute()) {
-                        val pb = ProcessBuilder(nodePath, "-e", "console.log('NodeJS OK')")
-                            .redirectErrorStream(true)
-                        pb.environment().putAll(nodeBinaryProvider.environment())
-                        val process = pb.start()
-                        val nodeOutput = process.inputStream.bufferedReader().readLine() ?: ""
-                        val finished = waitForWithTimeout(process, 10)
-                        if (!finished) {
-                            Logger.w("SocialDL_Boot", "Node smoke test timed out after 10s; killing process")
-                            destroyProcess(process)
-                        } else {
-                            val exitCode = process.exitValue()
-                            Logger.i("SocialDL_Boot", "Node Smoke Test exit=$exitCode: $nodeOutput")
-                        }
+                        runSmokeCommand(
+                            label = "Node",
+                            executablePath = nodePath,
+                            environment = nodeEnv,
+                            args = listOf("-e", "console.log('NodeJS OK')"),
+                        )
                     } else {
                         Logger.w("SocialDL_Boot", "Node binary not executable at: $nodePath")
                     }

@@ -10,6 +10,7 @@ import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.socialdl.src.core.common.util.Logger
@@ -105,6 +106,23 @@ class ThreadsExtractor @Inject constructor(
             ExtractionResult.Error(ExtractionError.Timeout())
         } catch (e: CancellationException) {
             throw e
+        } catch (e: ThreadsHttpException) {
+            // A 4xx/5xx main-frame response is definitive: the page will never
+            // hydrate, so fail fast with a typed, user-facing error.
+            Logger.w(tag, "Threads main-frame HTTP ${e.statusCode} for $normalizedUrl")
+            val error = when {
+                e.statusCode == 429 -> ExtractionError.RateLimited()
+                e.statusCode == 404 || e.statusCode == 410 ->
+                    ExtractionError.ContentUnavailable(
+                        "This Threads post is deleted, private, or unavailable"
+                    )
+                e.statusCode in 500..599 ->
+                    ExtractionError.NetworkFailure("Threads returned HTTP ${e.statusCode}", e)
+                else -> ExtractionError.ContentUnavailable(
+                    "Threads returned HTTP ${e.statusCode}"
+                )
+            }
+            ExtractionResult.Error(error)
         } catch (e: ThreadsWebViewLoadException) {
             Logger.w(tag, "Threads WebView load failed for $normalizedUrl: ${e.message}")
             ExtractionResult.Error(ExtractionError.NetworkFailure(e.message ?: "Failed to load Threads page", e))
@@ -131,6 +149,12 @@ class ThreadsExtractor @Inject constructor(
                         platform = Platform.THREADS,
                         detail = "Sign in to Threads to access this post",
                     )
+                )
+            } else if (dto.status == "error") {
+                // The extractor script itself threw. That is a parse failure, not
+                // "this post has no media", and must be retryable.
+                ExtractionResult.Error(
+                    ExtractionError.ParsingFailed("Couldn't process Threads' response")
                 )
             } else {
                 ExtractionResult.Error(ExtractionError.NoDownloadableMedia())
@@ -284,6 +308,20 @@ class ThreadsExtractor @Inject constructor(
                         }
                     }
 
+                    override fun onReceivedHttpError(
+                        view: WebView,
+                        request: WebResourceRequest,
+                        errorResponse: WebResourceResponse,
+                    ) {
+                        val scheme = request.url?.scheme?.lowercase()
+                        if (scheme != "http" && scheme != "https") return
+                        if (!request.isForMainFrame) return
+                        val statusCode = errorResponse.statusCode
+                        if (statusCode >= 400) {
+                            finishWithError(ThreadsHttpException(statusCode))
+                        }
+                    }
+
                     override fun onRenderProcessGone(
                         view: WebView,
                         detail: RenderProcessGoneDetail,
@@ -353,6 +391,10 @@ class ThreadsExtractor @Inject constructor(
 
     private class ThreadsWebViewLoadException(message: String) : Exception(message)
 
+    /** A main-frame HTTP error response; mapped to a typed error in `extract()`. */
+    private class ThreadsHttpException(val statusCode: Int) :
+        Exception("Threads returned HTTP $statusCode")
+
     private companion object {
         const val EXTRACTION_TIMEOUT_MS = 20_000L
         const val POLL_INTERVAL_MS = 500L
@@ -406,6 +448,7 @@ class ThreadsExtractor @Inject constructor(
          */
         const val EXTRACTOR_JS = """
 (function () {
+ try {
   var bodySample = ((document.body && document.body.innerText) || '').slice(0, 3000);
   var isLoginWall = /^\/login\b/i.test(location.pathname)
     || !!document.querySelector('input[type="password"], input[name="username"]')
@@ -439,10 +482,14 @@ class ThreadsExtractor @Inject constructor(
     catch (e) { return null; }
   }
 
+  function safeDecodeURIComponent(s) {
+    try { return decodeURIComponent(s); } catch (e) { return s; }
+  }
+
   function mediaIdOf(url) {
     var k = (url.match(/ig_cache_key=([^&]+)/) || [])[1];
     if (!k) return null;
-    var dec = b64url(decodeURIComponent(k).split('.')[0]);
+    var dec = b64url(safeDecodeURIComponent(k).split('.')[0]);
     return dec ? dec.replace(/[^0-9]/g, '') : null;
   }
 
@@ -475,7 +522,7 @@ class ThreadsExtractor @Inject constructor(
     }
     var efgMatch = videoUrl.match(/[?&]efg=([^&]+)/);
     if (efgMatch) {
-      var efgText = b64url(decodeURIComponent(efgMatch[1]));
+      var efgText = b64url(safeDecodeURIComponent(efgMatch[1]));
       if (efgText) {
         try {
           var efgObj = JSON.parse(efgText);
@@ -488,9 +535,11 @@ class ThreadsExtractor @Inject constructor(
     return null;
   }
 
-  var primaryContainer = document.querySelector('article, [data-pressable-container="true"]') || document;
-  var domVids = findAllProgressiveVideos(primaryContainer);
-  if (domVids.length === 0) domVids = findAllProgressiveVideos(document);
+  // Scope DOM video lookup to the main post. When a primary container exists,
+  // never fall back to document: a text-only/photo post would otherwise steal a
+  // reply's video and present it as the post's media.
+  var primaryEl = document.querySelector('article, [data-pressable-container="true"]');
+  var domVids = findAllProgressiveVideos(primaryEl || document);
 
   function takeNextDomVideo() {
     for (var i = 0; i < domVids.length; i++) {
@@ -654,6 +703,15 @@ class ThreadsExtractor @Inject constructor(
 
   out.items = items;
   window.AndroidMedia && window.AndroidMedia.onExtracted(JSON.stringify(out));
+ } catch (err) {
+  window.AndroidMedia && window.AndroidMedia.onExtracted(JSON.stringify({
+    status: 'error',
+    kind: 'none',
+    loginWall: false,
+    items: [],
+    diag: 'js_error:' + (err && err.message ? err.message : String(err))
+  }));
+ }
 })()
 """
     }

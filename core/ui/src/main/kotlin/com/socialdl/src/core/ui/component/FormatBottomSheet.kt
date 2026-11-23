@@ -1,5 +1,6 @@
 package com.socialdl.src.core.ui.component
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -101,7 +102,9 @@ fun FormatBottomSheet(
     onConfirmDownload: (selectedFormat: MediaFormat, container: String, title: String, author: String) -> Unit,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 ) {
-    var selectedTab by remember { mutableIntStateOf(if (initialTab == FormatKind.AUDIO) 0 else 1) }
+    var selectedTab by remember(item, initialTab) {
+        mutableIntStateOf(if (initialTab == FormatKind.AUDIO) 0 else 1)
+    }
     val isAudio = selectedTab == 0
 
     val availableFormats = if (isAudio) item.audioFormats else item.videoFormats
@@ -111,13 +114,14 @@ fun FormatBottomSheet(
 
     // Containers that can be produced for the selected stream. Audio streams offer the
     // conversion targets; muxed video keeps the codec-derived list so a WebM/Opus pair
-    // is never relabelled as MP4.
-    val containerOptions = remember(selectedFormat?.id) {
+    // is never relabelled as MP4. Keyed by the full format: two formats can share an
+    // id across a refresh but describe different streams.
+    val containerOptions = remember(selectedFormat) {
         selectedFormat?.let { format ->
             MediaContainer.optionsFor(format).map { it.extension.uppercase() }
         } ?: listOf("Default")
     }
-    var selectedContainer by remember(selectedFormat?.id) {
+    var selectedContainer by remember(selectedFormat) {
         // Default to the native container (codec-matched, so a lossless copy) rather
         // than whatever happens to be first in the list.
         mutableStateOf(
@@ -129,7 +133,11 @@ fun FormatBottomSheet(
     var customTitle by remember(item) { mutableStateOf(item.title) }
     var customAuthor by remember(item) { mutableStateOf(item.author ?: "") }
 
-    var showFormatSubmenu by remember { mutableStateOf(false) }
+    var showFormatSubmenu by remember(item) { mutableStateOf(false) }
+
+    // The sheet is full-screen: system back must close the submenu instead of
+    // dismissing the whole sheet (and losing the selection).
+    BackHandler(enabled = showFormatSubmenu) { showFormatSubmenu = false }
 
     SocialDLModalBottomSheet(
         onDismiss = onDismiss,
@@ -214,7 +222,8 @@ private fun MainDownloadSheetView(
                 SheetPillButton(
                     label = "Download",
                     icon = Icons.Default.ArrowDownward,
-                    onClick = onDownload
+                    onClick = onDownload,
+                    enabled = selectedFormat != null
                 )
 
                 IconButton(onClick = onClose) {

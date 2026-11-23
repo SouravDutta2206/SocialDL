@@ -48,16 +48,22 @@ fun FormatSubmenuView(
     onBack: () -> Unit
 ) {
     // The submenu follows the active tab: an audio picker must never offer a
-    // video stream (and vice versa). Fall back to any available kind only when
-    // the active one is genuinely empty, so the sheet is never blank.
-    val formats = when (activeKind) {
+    // video stream (and vice versa). Fall back to another available kind only
+    // when the active one is genuinely empty, and describe/key the list by the
+    // kind actually shown — never by the empty active tab.
+    val activeFormats = when (activeKind) {
         FormatKind.AUDIO -> item.audioFormats
         FormatKind.IMAGE -> item.imageFormats
         FormatKind.VIDEO -> item.videoFormats
-    }.ifEmpty {
-        item.videoFormats.ifEmpty { item.audioFormats }.ifEmpty { item.imageFormats }
     }
-    val sectionLabel = when (activeKind) {
+    val (effectiveKind, formats) = when {
+        activeFormats.isNotEmpty() -> activeKind to activeFormats
+        item.videoFormats.isNotEmpty() -> FormatKind.VIDEO to item.videoFormats
+        item.audioFormats.isNotEmpty() -> FormatKind.AUDIO to item.audioFormats
+        item.imageFormats.isNotEmpty() -> FormatKind.IMAGE to item.imageFormats
+        else -> activeKind to emptyList()
+    }
+    val sectionLabel = when (effectiveKind) {
         FormatKind.AUDIO -> "AUDIO STREAMS"
         FormatKind.IMAGE -> "IMAGE STREAMS"
         FormatKind.VIDEO -> "VIDEO STREAMS"
@@ -89,7 +95,7 @@ fun FormatSubmenuView(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (formats.isNotEmpty()) {
-                item(key = "section_$activeKind") {
+                item(key = "section_$effectiveKind") {
                     Text(
                         text = sectionLabel,
                         style = MaterialTheme.typography.labelSmall,
@@ -97,7 +103,7 @@ fun FormatSubmenuView(
                         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
                     )
                 }
-                items(formats, key = { it.id }) { fmt ->
+                items(formats, key = { "${effectiveKind}_${it.id}" }) { fmt ->
                     FormatItemRow(
                         format = fmt,
                         isSelected = fmt.id == selectedFormat?.id,

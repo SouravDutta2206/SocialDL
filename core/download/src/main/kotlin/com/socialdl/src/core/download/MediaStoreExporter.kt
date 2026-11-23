@@ -15,6 +15,7 @@ import kotlinx.coroutines.ensureActive
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -85,10 +86,22 @@ class MediaStoreExporter @Inject constructor(
         val isAudio = kind == FormatKind.AUDIO
         val isImage = kind == FormatKind.IMAGE
         val ext = container.lowercase(Locale.ROOT)
-        val sanitizedTitle = title.replace(Regex("[^a-zA-Z0-9.-]"), "_")
-            .replace(Regex("_+"), "_")
-            .take(50)
-            .trim('_')
+        val sanitizedBase = title
+            .replace(Regex("[^a-zA-Z0-9.-]"), "_")
+            // Collapse runs of separators and trim every leading/trailing one, so
+            // a title like "..hidden" can never produce a dotfile name.
+            .replace(Regex("[_.]+"), "_")
+            .trim('_', '.', '-')
+        val sanitizedTitle = when {
+            // No usable ASCII base (e.g. "日本語の動画", "🔥🔥", "..."): a stable
+            // hash keeps the name unique instead of inserting "_.mp4".
+            sanitizedBase.isEmpty() -> "media_${shortTitleHash(title)}"
+            // Distinct non-ASCII titles can sanitize to the same few ASCII
+            // leftovers and collide within the same second; the hash keeps them
+            // apart. 41 + 1 + 8 = 50 characters.
+            title.any { it.code > 127 } -> "${sanitizedBase.take(41)}_${shortTitleHash(title)}"
+            else -> sanitizedBase.take(50)
+        }
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         // Carousel slides all carry the post caption as their title and finish
         // exporting within the same second. A title+timestamp name therefore made
@@ -125,6 +138,20 @@ class MediaStoreExporter @Inject constructor(
                     }
                 )
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
+            } else {
+                // Pre-Q MediaProvider ignores RELATIVE_PATH and DISPLAY_NAME alone
+                // does not choose a directory, so the row must carry an explicit
+                // DATA path under the public collection's SocialDL folder.
+                val publicDir = Environment.getExternalStoragePublicDirectory(
+                    when {
+                        isImage -> Environment.DIRECTORY_PICTURES
+                        isAudio -> Environment.DIRECTORY_MUSIC
+                        else -> Environment.DIRECTORY_MOVIES
+                    }
+                )
+                val targetDir = File(publicDir, "SocialDL").apply { mkdirs() }
+                @Suppress("DEPRECATION")
+                put(MediaStore.MediaColumns.DATA, File(targetDir, fileName).absolutePath)
             }
         }
 
@@ -159,8 +186,14 @@ class MediaStoreExporter @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // Provider-side rejection (MIME validation, permission, missing volume).
-            // Never leave the worker to classify it as an unknown failure.
+            // A missing storage permission or a full volume is typed, actionable
+            // failure — never swallow it into a generic "ExportFailed".
+            if (e is SecurityException || DownloadError.from(e) == DownloadError.StorageFull) {
+                Logger.e(tag, "MediaStore insert failed for a typed cause ($fileName)", e)
+                throw e
+            }
+            // Other provider-side rejections (MIME validation, missing volume) are
+            // reported as a normal export failure.
             Logger.e(tag, "MediaStore rejected the export row ($fileName, $mimeType)", e)
             return null
         }
@@ -229,10 +262,22 @@ class MediaStoreExporter @Inject constructor(
             throw e
         } catch (e: Exception) {
             Logger.e(tag, "Failed to copy file to MediaStore URI: $itemUri", e)
-            // finally-guarded: never leave a dangling pending row behind a failed copy
+            // finally-guarded: never leave a dangling pending row behind a failed copy.
             deleteRow(itemUri)
+            // A permission denial or a full disk is typed (StoragePermission /
+            // StorageFull); only generic I/O failures become ExportFailed.
+            if (e is SecurityException || DownloadError.from(e) == DownloadError.StorageFull) {
+                throw e
+            }
             null
         }
+    }
+
+    /** Stable 8-hex-char digest of the raw title, used to disambiguate names. */
+    private fun shortTitleHash(title: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(title.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }.take(8)
     }
 
     /**

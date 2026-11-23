@@ -42,7 +42,6 @@ val SocialDLTypography = Typography(
         fontSize = 32.sp,
         lineHeight = 38.sp,
         letterSpacing = (-0.5).sp,
-        color = SocialDLOnSurface
     ),
     displayMedium = TextStyle(
         fontFamily = PlusJakartaSansFamily,
@@ -50,7 +49,6 @@ val SocialDLTypography = Typography(
         fontSize = 26.sp,
         lineHeight = 32.sp,
         letterSpacing = (-0.25).sp,
-        color = SocialDLOnSurface
     ),
     titleLarge = TextStyle(
         fontFamily = PlusJakartaSansFamily,
@@ -58,7 +56,6 @@ val SocialDLTypography = Typography(
         fontSize = 20.sp,
         lineHeight = 26.sp,
         letterSpacing = 0.sp,
-        color = SocialDLOnSurface
     ),
     titleMedium = TextStyle(
         fontFamily = PlusJakartaSansFamily,
@@ -66,7 +63,6 @@ val SocialDLTypography = Typography(
         fontSize = 16.sp,
         lineHeight = 22.sp,
         letterSpacing = 0.1.sp,
-        color = SocialDLOnSurface
     ),
     titleSmall = TextStyle(
         fontFamily = PlusJakartaSansFamily,
@@ -74,7 +70,6 @@ val SocialDLTypography = Typography(
         fontSize = 14.sp,
         lineHeight = 20.sp,
         letterSpacing = 0.1.sp,
-        color = SocialDLOnSurface
     ),
     bodyLarge = TextStyle(
         fontFamily = RobotoFamily,
@@ -82,7 +77,6 @@ val SocialDLTypography = Typography(
         fontSize = 15.sp,
         lineHeight = 22.sp,
         letterSpacing = 0.25.sp,
-        color = SocialDLOnSurface
     ),
     bodyMedium = TextStyle(
         fontFamily = RobotoFamily,
@@ -90,7 +84,6 @@ val SocialDLTypography = Typography(
         fontSize = 13.sp,
         lineHeight = 18.sp,
         letterSpacing = 0.25.sp,
-        color = SocialDLOnSurfaceVariant
     ),
     bodySmall = TextStyle(
         fontFamily = RobotoFamily,
@@ -98,7 +91,6 @@ val SocialDLTypography = Typography(
         fontSize = 12.sp,
         lineHeight = 16.sp,
         letterSpacing = 0.3.sp,
-        color = SocialDLOnSurfaceDim
     ),
     labelLarge = TextStyle(
         fontFamily = PlusJakartaSansFamily,
@@ -106,7 +98,6 @@ val SocialDLTypography = Typography(
         fontSize = 13.sp,
         lineHeight = 18.sp,
         letterSpacing = 0.1.sp,
-        color = SocialDLOnSurface
     ),
     labelMedium = TextStyle(
         fontFamily = PlusJakartaSansFamily,
@@ -114,7 +105,6 @@ val SocialDLTypography = Typography(
         fontSize = 12.sp,
         lineHeight = 16.sp,
         letterSpacing = 0.4.sp,
-        color = SocialDLOnSurface
     ),
     labelSmall = TextStyle(
         fontFamily = PlusJakartaSansFamily,
@@ -122,6 +112,5 @@ val SocialDLTypography = Typography(
         fontSize = 11.sp,
         lineHeight = 15.sp,
         letterSpacing = 0.5.sp,
-        color = SocialDLOnSurfaceVariant
     )
 )
