@@ -147,7 +147,9 @@ _JS_RUNTIME_PROBE_CACHE = {}
 
 def _probe_js_runtime(node_dir, native_bin_dir):
     """Resolves + exec-verifies the bundled node runtime. Memoized per resolved
-    directory pair (a §2.5.2 hot-swap changes the path, which re-probes).
+    directory pair (a §2.5.2 hot-swap changes the path, which re-probes), and
+    only a healthy result is memoized: a missing-at-boot or exec-failing runtime
+    is re-probed by the next extraction instead of being pinned for the process.
 
     Returns a dict: runtime (name or None), path, version, exec_ok, min_supported
     (yt-dlp's own minimum for node), ejs_package (solver distribution present).
@@ -190,7 +192,11 @@ def _probe_js_runtime(node_dir, native_bin_dir):
         except Exception:
             diag["exec_ok"] = False
 
-    _JS_RUNTIME_PROBE_CACHE[cache_key] = diag
+    # Cache only a healthy probe: a missing-at-boot runtime or a transient exec
+    # failure must be retried on the next extraction instead of being pinned for
+    # the life of the process.
+    if diag["runtime"] is not None and diag["exec_ok"] is True:
+        _JS_RUNTIME_PROBE_CACHE[cache_key] = diag
     return diag
 
 
@@ -217,8 +223,8 @@ def warmup():
     Called during app startup on Dispatchers.IO to eliminate first-search latency.
     """
     try:
-        ydl = yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "no_warnings": True})
-        ydl.get_info_extractor("Youtube")
+        with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "no_warnings": True}) as ydl:
+            ydl.get_info_extractor("Youtube")
     except Exception:
         pass
 
@@ -275,7 +281,12 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
-                return fail("no_info", "No metadata returned by yt-dlp")
+                return fail(
+                    "no_info",
+                    "No metadata returned by yt-dlp",
+                    tail=debug_logger.lines,
+                    extra=_js_diagnostics(js_diag, debug_logger),
+                )
             return succeed(_maybe_attach_js_diagnostics(_normalize(info), js_diag, debug_logger))
 
     except yt_dlp.utils.DownloadError as e:

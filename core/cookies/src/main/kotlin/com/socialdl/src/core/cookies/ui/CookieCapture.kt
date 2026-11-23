@@ -12,6 +12,9 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,12 +35,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -93,6 +98,8 @@ class CookieCaptureViewModel @Inject constructor(
         val message: String? = null,
         /** True when the user hit Cancel. */
         val cancelled: Boolean = false,
+        /** Terminal init failure; the screen shows this instead of an endless spinner. */
+        val initError: String? = null,
     )
 
     private val _uiState = MutableStateFlow(CaptureUiState())
@@ -106,6 +113,9 @@ class CookieCaptureViewModel @Inject constructor(
     fun initialize(platform: Platform) {
         if (initializedFor == platform) return
         initializedFor = platform
+        // A platform switch must never show the previous platform's config (or a
+        // stale init error) while the new config resolves.
+        _uiState.update { it.copy(config = null, initError = null) }
         viewModelScope.launch {
             runCatching { controller.config(platform) }
                 .onSuccess { config ->
@@ -114,7 +124,7 @@ class CookieCaptureViewModel @Inject constructor(
                 .onFailure { error ->
                     _uiState.update {
                         it.copy(
-                            message = error.message
+                            initError = error.message
                                 ?: "Cookie sign-in is not available for this platform"
                         )
                     }
@@ -140,11 +150,20 @@ class CookieCaptureViewModel @Inject constructor(
     }
 
     fun onCancelClicked() {
-        _uiState.update { it.copy(cancelled = true) }
+        // Cancel is terminal: once cancelled (or the success result landed) a
+        // second tap must not re-trigger the exit side effect.
+        _uiState.update {
+            if (it.cancelled || it.result != null) it else it.copy(cancelled = true)
+        }
     }
 
     fun acknowledgeResult() {
         _uiState.update { it.copy(result = null) }
+    }
+
+    /** Clears the one-shot cancel flag after the screen delivered its exit. */
+    fun acknowledgeCancel() {
+        _uiState.update { it.copy(cancelled = false) }
     }
 
     /** Clears the transient message once the user has seen it. */
@@ -210,10 +229,16 @@ fun CookieCaptureScreen(
     // Deliver the one-shot result exactly once. Failure/NotSignedIn are shown
     // inline instead of being treated as terminal, so the user can finish the
     // redirect (or retry) without losing the WebView session.
+    var exitDelivered by remember { mutableStateOf(false) }
     LaunchedEffect(uiState.result, uiState.cancelled) {
         when {
-            uiState.cancelled -> onResult(false)
-            uiState.result is CaptureOutcome.Success -> {
+            !exitDelivered && uiState.cancelled -> {
+                exitDelivered = true
+                viewModel.acknowledgeCancel()
+                onResult(false)
+            }
+            !exitDelivered && uiState.result is CaptureOutcome.Success -> {
+                exitDelivered = true
                 viewModel.acknowledgeResult()
                 onResult(true)
             }
@@ -287,18 +312,53 @@ fun CookieCaptureScreen(
 
         Box(modifier = Modifier.fillMaxSize()) {
             val config = uiState.config
-            if (config != null) {
-                CaptureWebView(config = config, onSettled = viewModel::onPageFinished)
-            } else {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            when {
+                config != null -> key(config.platform, config.loginUrl) {
+                    CaptureWebView(config = config, onSettled = viewModel::onPageFinished)
+                }
+                uiState.initError != null -> Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp)
+                        .align(Alignment.Center),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        text = uiState.initError.orEmpty(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White
+                    )
+                    TextButton(onClick = viewModel::onCancelClicked) {
+                        Text("Close", color = Color(0xFFEF4444))
+                    }
+                }
+                else -> Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
                     CircularProgressIndicator()
                 }
             }
             if (uiState.busy) {
+                // Opaque to input: taps/drags must never reach the WebView that is
+                // still laid out underneath this scrim while a harvest is running.
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0x66000000)),
+                        .background(Color(0x66000000))
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    awaitPointerEvent().changes.forEach { it.consume() }
+                                }
+                            }
+                        }
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {}
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     CircularProgressIndicator()
@@ -615,7 +675,13 @@ fun NavGraphBuilder.cookieCaptureScreen(navController: NavController) {
         }.getOrDefault(Platform.UNKNOWN)
         CookieCaptureScreen(
             platform = platform,
-            onResult = { success -> publishResult(navController, success) }
+            onResult = { success ->
+                // A stale/re-delivered callback from an old capture entry must not
+                // pop the destination that happens to be current now.
+                if (navController.currentBackStackEntry?.id == entry.id) {
+                    publishResult(navController, success)
+                }
+            }
         )
     }
 }

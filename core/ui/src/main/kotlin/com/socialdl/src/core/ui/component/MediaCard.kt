@@ -132,15 +132,16 @@ fun MediaCard(
                     }
                 }
 
-                // Duration Badge
-                if (item.durationSeconds != null) {
+                // Duration Badge — skip unknown/zero durations so no "0:00" pill renders.
+                val durationSeconds = item.durationSeconds
+                if (durationSeconds != null && durationSeconds > 0) {
                     Surface(
                         shape = CircleShape,
                         color = Color.Black.copy(alpha = 0.6f),
                         modifier = Modifier.padding(start = 8.dp)
                     ) {
                         Text(
-                            text = item.durationSeconds.toTimeString(),
+                            text = durationSeconds.toTimeString(),
                             style = MaterialTheme.typography.labelSmall,
                             color = SocialDLOnSurface,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)

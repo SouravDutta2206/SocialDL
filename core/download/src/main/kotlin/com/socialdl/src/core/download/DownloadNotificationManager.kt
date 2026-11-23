@@ -127,10 +127,15 @@ class DownloadNotificationManager @Inject constructor(
         formatKind: FormatKind?
     ): Notification {
         val percent = (progress.coerceIn(0f, 1f) * 100).toInt()
+        val knownTotal = totalBytes != null && totalBytes > 0L
         val statusText = when (status) {
-            DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING ->
-                "${downloadedBytes.toHumanReadableSize()} of " +
-                    (totalBytes?.toHumanReadableSize() ?: "unknown") + " ($percent%)"
+            DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING -> when {
+                knownTotal ->
+                    "${downloadedBytes.toHumanReadableSize()} of " +
+                        "${totalBytes!!.toHumanReadableSize()} ($percent%)"
+                downloadedBytes > 0L -> "${downloadedBytes.toHumanReadableSize()} downloaded"
+                else -> "Downloading..."
+            }
             DownloadStatus.MUXING ->
                 if (formatKind == FormatKind.AUDIO) "Converting audio..." else "Merging video and audio..."
             DownloadStatus.EXPORTING -> "Saving to media storage..."
@@ -150,7 +155,7 @@ class DownloadNotificationManager @Inject constructor(
                 DownloadCancelReceiver.pendingIntent(context, jobId)
             )
 
-        BuilderProgress.apply(builder, status, percent)
+        BuilderProgress.apply(builder, status, percent, knownTotal)
 
         return builder.build()
     }
@@ -179,10 +184,21 @@ private object BuilderProgress {
     fun apply(
         builder: NotificationCompat.Builder,
         status: DownloadStatus,
-        percent: Int
+        percent: Int,
+        knownTotal: Boolean
     ) {
-        if (status == DownloadStatus.DOWNLOADING || status == DownloadStatus.QUEUED) {
-            builder.setProgress(100, percent, percent == 0)
+        when (status) {
+            DownloadStatus.DOWNLOADING, DownloadStatus.QUEUED ->
+                if (knownTotal) {
+                    builder.setProgress(100, percent, percent == 0)
+                } else {
+                    // No usable total: the percent would be a lie, so show an
+                    // indeterminate bar and let the text carry the byte count.
+                    builder.setProgress(0, 0, true)
+                }
+            DownloadStatus.MUXING, DownloadStatus.EXPORTING ->
+                builder.setProgress(0, 0, true)
+            else -> Unit
         }
     }
 }

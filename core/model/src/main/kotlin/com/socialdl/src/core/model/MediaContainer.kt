@@ -231,11 +231,41 @@ data class MediaContainer(
         /**
          * Best-effort container from a direct media URL's path extension. Used by
          * platforms whose bridge reports a URL but not a container (Instagram).
+         *
+         * Only the URL *path* is considered: a host/TLD (`.mov`), a directory name
+         * (`/dir.mp4/media`), or a query/fragment never picks the container.
          */
         fun fromUrl(url: String?, fallback: MediaContainer): MediaContainer {
-            val path = url?.substringBefore('?')?.substringBefore('#') ?: return fallback
-            val extension = path.substringAfterLast('.', "")
+            if (url.isNullOrBlank()) return fallback
+            val trimmed = url.trim()
+            val path = runCatching { java.net.URI(trimmed).rawPath }.getOrNull()
+                ?: pathOrNull(trimmed)
+                ?: return fallback
+            val fileName = path.substringAfterLast('/')
+            // No dot in the last path segment: it has no extension at all (this is
+            // also what rejects a bare host such as `https://example.mov/`).
+            if ('.' !in fileName) return fallback
+            val extension = fileName.substringAfterLast('.', "")
             return from(extension) ?: fallback
+        }
+
+        /**
+         * Pure-Kotlin path extraction for URLs `java.net.URI` rejects (unencoded
+         * spaces and similar). Strips query/fragment and the `scheme://authority`
+         * prefix (or the leading `host/` segment for scheme-less input), returning
+         * `null` when there is no path segment after the authority.
+         */
+        private fun pathOrNull(url: String): String? {
+            val withoutQuery = url.substringBefore('?').substringBefore('#')
+            if (withoutQuery.isEmpty()) return null
+            val schemeIndex = withoutQuery.indexOf("://")
+            val pathStart = if (schemeIndex >= 0) {
+                withoutQuery.indexOf('/', schemeIndex + 3)
+            } else {
+                withoutQuery.indexOf('/')
+            }
+            if (pathStart < 0) return null
+            return withoutQuery.substring(pathStart)
         }
 
         /**

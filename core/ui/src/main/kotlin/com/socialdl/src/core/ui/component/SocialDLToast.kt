@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
@@ -86,11 +86,13 @@ fun SocialDLToastHost(
         ) {
             lastToast?.let { current ->
                 Surface(
-                    shape = CircleShape,
+                    // Rounded rect (not a pill) + side insets so long wrapped
+                    // messages never clip against the screen edges.
+                    shape = RoundedCornerShape(24.dp),
                     color = SocialDLToastBg.copy(alpha = 0.95f),
                     shadowElevation = 8.dp,
                     modifier = Modifier
-                        .padding(bottom = 80.dp)
+                        .padding(start = 16.dp, end = 16.dp, bottom = 80.dp)
                         // Announce toast text to screen readers instead of only drawing it.
                         .semantics { liveRegion = LiveRegionMode.Polite }
                 ) {

@@ -140,9 +140,9 @@ class DownloadsViewModel @Inject constructor(
                     }
                 }
 
-                if (present.isNotEmpty()) downloadDao.clearMissing(present)
+                if (present.isNotEmpty()) downloadDao.clearMissingInChunks(present)
                 if (newlyMissing.isNotEmpty()) {
-                    downloadDao.markMissing(newlyMissing, now)
+                    downloadDao.markMissingInChunks(newlyMissing, now)
                     Logger.i(tag, "Marked ${newlyMissing.size} history record(s) as missing (grace period)")
                 }
                 if (expired.isNotEmpty()) {

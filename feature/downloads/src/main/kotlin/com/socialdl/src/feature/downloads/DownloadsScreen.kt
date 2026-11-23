@@ -330,15 +330,33 @@ private fun ActiveDownloadCard(
                     maxLines = 2
                 )
             } else {
-                LinearProgressIndicator(
-                    progress = { job.progress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(6.dp)
-                        .clip(CircleShape),
-                    color = SocialDLAccent,
-                    trackColor = SocialDLCard.copy(alpha = 0.5f)
-                )
+                val clampedProgress = job.progress.coerceIn(0f, 1f)
+                // No byte total (or a bogus one) means the extractor never learned the
+                // file size: show an indeterminate bar instead of a fake 0%/50% value.
+                val totalBytes = job.totalBytes
+                val isUnknownSize = job.status == DownloadStatus.DOWNLOADING &&
+                    (totalBytes == null || totalBytes <= 0L)
+
+                if (isUnknownSize) {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(CircleShape),
+                        color = SocialDLAccent,
+                        trackColor = SocialDLOnSurfaceVariant.copy(alpha = 0.25f)
+                    )
+                } else {
+                    LinearProgressIndicator(
+                        progress = { clampedProgress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(CircleShape),
+                        color = SocialDLAccent,
+                        trackColor = SocialDLOnSurfaceVariant.copy(alpha = 0.25f)
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
@@ -346,9 +364,10 @@ private fun ActiveDownloadCard(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    val percentage = (job.progress * 100).toInt()
+                    val percentage = (clampedProgress * 100).toInt()
                     Text(
-                        text = if (job.status == DownloadStatus.MUXING) "Muxing streams..."
+                        text = if (isUnknownSize) "Downloading..."
+                        else if (job.status == DownloadStatus.MUXING) "Muxing streams..."
                         else if (job.status == DownloadStatus.EXPORTING) "Exporting..."
                         else if (job.status == DownloadStatus.QUEUED) "Queued..."
                         else "$percentage%",
@@ -356,7 +375,7 @@ private fun ActiveDownloadCard(
                         color = SocialDLOnSurfaceVariant
                     )
                     Text(
-                        text = job.downloadedBytes.toHumanReadableSize() + (job.totalBytes?.let { " / " + it.toHumanReadableSize() } ?: ""),
+                        text = job.downloadedBytes.toHumanReadableSize() + (totalBytes?.takeIf { it > 0L }?.let { " / " + it.toHumanReadableSize() } ?: ""),
                         style = MaterialTheme.typography.labelSmall,
                         color = SocialDLOnSurfaceDim
                     )

@@ -8,6 +8,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import java.io.File
@@ -81,6 +82,9 @@ class FFmpegProcessExecutor @Inject constructor(
         // silently dropping; progress ticks may still use trySend (droppable).
         val errorBuffer = StringBuilder()
         val stdoutBuffer = StringBuilder()
+        // Set immediately before a forced kill so the drain jobs can tell "the pipe
+        // died because we killed ffmpeg" apart from a real read failure.
+        val killed = AtomicBoolean(false)
 
         fun appendBounded(target: StringBuilder, line: String) {
             // stdout/stderr are drained on two IO coroutines and the waiter reads
@@ -95,8 +99,16 @@ class FFmpegProcessExecutor @Inject constructor(
                 process.inputStream.bufferedReader().forEachLine { line ->
                     appendBounded(stdoutBuffer, line)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Logger.e(tag, "Error reading ffmpeg stdout", e)
+                // A forced kill closes the pipe under the reader; that is expected
+                // cleanup noise, not an error worth a stack trace in logcat.
+                if (killed.get() || !isActive) {
+                    Logger.d(tag, "Error reading ffmpeg stdout: ${e.message}")
+                } else {
+                    Logger.e(tag, "Error reading ffmpeg stdout", e)
+                }
             }
         }
 
@@ -107,8 +119,15 @@ class FFmpegProcessExecutor @Inject constructor(
                     // the end, not in the first 4 KB.
                     appendBounded(errorBuffer, line)
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                Logger.e(tag, "Error reading ffmpeg stderr", e)
+                // See stdoutJob: a kill-induced read failure is expected.
+                if (killed.get() || !isActive) {
+                    Logger.d(tag, "Error reading ffmpeg stderr: ${e.message}")
+                } else {
+                    Logger.e(tag, "Error reading ffmpeg stderr", e)
+                }
             }
         }
 
@@ -117,6 +136,7 @@ class FFmpegProcessExecutor @Inject constructor(
             delay(timeoutMs)
             timedOut.set(true)
             Logger.w(tag, "ffmpeg timed out after ${timeoutMs}ms; killing process")
+            killed.set(true)
             process.destroyForciblyCompat()
         }
 
@@ -173,6 +193,7 @@ class FFmpegProcessExecutor @Inject constructor(
             stdoutJob.cancel()
             if (process.isAliveCompat()) {
                 Logger.d(tag, "Forcibly killing active ffmpeg process on flow cancel")
+                killed.set(true)
                 process.destroyForciblyCompat()
             }
         }

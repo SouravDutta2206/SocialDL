@@ -19,7 +19,7 @@ object UrlPlatformResolver {
     )
 
     private val INSTAGRAM_REGEX = Pattern.compile(
-        """^(?:https?://)?(?:www\.)?instagram\.com/(?:p|reels?|tv|stories)/([\w\-]+)""",
+        """^(?:https?://)?(?:www\.)?instagram\.com/(?:(?:p|reels?|tv)/([\w\-]+)|stories/([\w.\-]+))""",
         Pattern.CASE_INSENSITIVE
     )
 

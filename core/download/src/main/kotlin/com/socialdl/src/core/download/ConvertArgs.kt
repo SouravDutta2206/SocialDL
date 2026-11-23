@@ -97,7 +97,8 @@ internal object ConvertArgs {
         if (!forceEncode && (target == MediaContainer.MKV || MediaContainer.videoCopyable(target, sourceCodec))) {
             return listOf("-c:v", "copy")
         }
-        // H.264 at CRF 18 is visually lossless for a typical download. VP9 runs in
+        // H.264 at CRF 18 is visually lossless for a typical download. yuv420p keeps
+        // 10-bit/4:4:4 sources playable on hardware decoders. VP9 runs in
         // realtime mode: the default "good" deadline encoded 1080p at 0.16x realtime on
         // the Pixel 7a (25 min for a 4-minute video), realtime+cpu-used 8 gives ~2.6x.
         return when (target) {
@@ -105,7 +106,9 @@ internal object ConvertArgs {
                 "-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0",
                 "-deadline", "realtime", "-cpu-used", "8", "-row-mt", "1"
             )
-            else -> listOf("-c:v", "libx264", "-preset", "fast", "-crf", "18")
+            else -> listOf(
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "18"
+            )
         }
     }
 

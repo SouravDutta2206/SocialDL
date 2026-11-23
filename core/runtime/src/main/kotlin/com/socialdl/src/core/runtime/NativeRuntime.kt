@@ -128,11 +128,19 @@ internal object NativeRuntime {
     /** Extracts [zip] into [destination], refusing any entry that would resolve outside it. */
     internal fun unzip(zip: File, destination: File) {
         destination.mkdirs()
-        val root = destination.canonicalPath + File.separator
+        val canonicalDest = destination.canonicalPath
+        val root = canonicalDest + File.separator
         ZipFile(zip).use { archive ->
             for (entry in archive.entries()) {
                 val target = File(destination, entry.name)
-                require(target.canonicalPath.startsWith(root)) { "zip entry escapes runtime: ${entry.name}" }
+                val canonicalTarget = target.canonicalPath
+                // The destination itself is valid only for a directory entry (archives
+                // may carry a "./" root marker). A plain prefix check would reject it
+                // and would also accept a sibling such as "../runtime-evil".
+                require(
+                    canonicalTarget.startsWith(root) ||
+                        (entry.isDirectory && canonicalTarget == canonicalDest)
+                ) { "zip entry escapes runtime: ${entry.name}" }
                 if (entry.isDirectory) {
                     target.mkdirs()
                 } else {

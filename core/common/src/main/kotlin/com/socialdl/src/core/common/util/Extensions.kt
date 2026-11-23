@@ -37,17 +37,21 @@ fun Long?.toHumanReadableSize(): String {
 }
 
 /**
- * Ensures a URL string has an https:// scheme prefix, healing the common
- * "ttps://..." clipboard typo (dropped leading h) on the way.
+ * Ensures a URL string has a lowercase `https://` scheme prefix, healing the
+ * common "ttps://..." clipboard typo (dropped leading h) on the way. The scheme
+ * match is case-insensitive because clipboard/browser input routinely uppercases
+ * it (`HTTPS://...`), and blank input stays blank instead of becoming `https://`.
  */
 fun String.ensureHttps(): String {
     val trimmed = this.trim()
-    return when {
-        trimmed.startsWith("https://") -> trimmed
-        trimmed.startsWith("http://") -> trimmed.replaceFirst("http://", "https://")
-        trimmed.startsWith("ttps://") -> "h$trimmed"
-        else -> "https://$trimmed"
+    if (trimmed.isEmpty()) return ""
+    val rest = when {
+        trimmed.startsWith("https://", ignoreCase = true) -> trimmed.substring(8)
+        trimmed.startsWith("http://", ignoreCase = true) -> trimmed.substring(7)
+        trimmed.startsWith("ttps://", ignoreCase = true) -> trimmed.substring(7)
+        else -> trimmed
     }
+    return "https://$rest"
 }
 
 /**

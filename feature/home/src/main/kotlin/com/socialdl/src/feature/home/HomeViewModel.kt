@@ -240,7 +240,10 @@ class HomeViewModel @Inject constructor(
                 if (taskIds.isEmpty()) {
                     messageBus.post("No downloads were queued", isError = true)
                 } else {
-                    messageBus.post("Queued ${taskIds.size} downloads")
+                    messageBus.post(
+                        if (taskIds.size == 1) "Queued 1 download"
+                        else "Queued ${taskIds.size} downloads"
+                    )
                 }
             } catch (e: CancellationException) {
                 // ViewModel cleared mid-batch: not a user-facing failure.

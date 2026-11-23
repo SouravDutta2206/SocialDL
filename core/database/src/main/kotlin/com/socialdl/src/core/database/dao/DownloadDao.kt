@@ -35,6 +35,16 @@ interface DownloadDao {
     @Query("UPDATE download_history SET missingSince = NULL WHERE id IN (:ids)")
     suspend fun clearMissing(ids: List<String>)
 
+    /** Chunked flag update: SQLite's default bind limit is ~999; 500 leaves headroom. */
+    suspend fun markMissingInChunks(ids: List<String>, missingSince: Long) {
+        ids.chunked(SQLITE_BIND_LIMIT).forEach { markMissing(it, missingSince) }
+    }
+
+    /** Chunked un-flag update: SQLite's default bind limit is ~999; 500 leaves headroom. */
+    suspend fun clearMissingInChunks(ids: List<String>) {
+        ids.chunked(SQLITE_BIND_LIMIT).forEach { clearMissing(it) }
+    }
+
     companion object {
         const val SQLITE_BIND_LIMIT = 500
     }

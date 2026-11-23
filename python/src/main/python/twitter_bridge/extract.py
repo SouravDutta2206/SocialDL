@@ -32,7 +32,7 @@ the field is ``None`` and no video URL is ever used as a stand-in thumbnail.
 """
 
 import re
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -629,8 +629,22 @@ def _poster_url(media):
 
 
 def _large_image(url):
-    # Full-quality request, and never double-append a query (reference :491–497).
-    return url + ("?name=orig" if "?" not in url else "")
+    # Full-quality request: Twitter's CDN URLs carry ``?format=jpg&name=small``,
+    # so upgrade an existing ``name`` parameter in place instead of appending a
+    # second one. Parse the query so ``format``, every other parameter, and the
+    # fragment survive; never double-append a query.
+    if not url:
+        return url
+    parsed = urlsplit(url)
+    params = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.lower() != "name"
+    ]
+    params.append(("name", "orig"))
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(params), parsed.fragment)
+    )
 
 
 def _duration_seconds(value):

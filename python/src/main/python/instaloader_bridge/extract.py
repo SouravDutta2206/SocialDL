@@ -54,9 +54,18 @@ _RATE_LIMIT_MARKERS = (
 
 _SHORTCODE_RE = re.compile(r"/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)")
 
+# Story URLs have no anonymous shortcode endpoint at all; they are rejected up
+# front so Instaloader is never constructed (and never pins a dispatcher thread).
+_STORIES_RE = re.compile(r"/stories/[A-Za-z0-9_.\-]+", re.IGNORECASE)
+
 
 def extract(url):
     try:
+        if _STORIES_RE.search(url or ""):
+            return fail(
+                AUTH_WALL,
+                "Instagram stories require a signed-in session — sign in with Instagram to download",
+            )
         # Bounded transport: Instaloader's defaults (300s timeout x 3 connection
         # attempts) can pin a PythonDispatcher thread for ~15 minutes on a stalled
         # request. These caps keep one anonymous fetch short.

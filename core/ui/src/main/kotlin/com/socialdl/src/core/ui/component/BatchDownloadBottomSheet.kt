@@ -171,11 +171,16 @@ fun BatchDownloadBottomSheet(
                         )
                     }
 
-                    IconButton(onClick = ::handleConfirm) {
+                    // Confirm is meaningless with nothing selected: disable and dim it.
+                    IconButton(
+                        onClick = ::handleConfirm,
+                        enabled = selectedUrls.isNotEmpty()
+                    ) {
                         Icon(
                             imageVector = Icons.Default.ArrowDownward,
                             contentDescription = "Download selected",
-                            tint = SocialDLOnSurfaceVariant
+                            tint = if (selectedUrls.isNotEmpty()) SocialDLOnSurfaceVariant
+                            else SocialDLOnSurfaceDim.copy(alpha = 0.4f)
                         )
                     }
                 }

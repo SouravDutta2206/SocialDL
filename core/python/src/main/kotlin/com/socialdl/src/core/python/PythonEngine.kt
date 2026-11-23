@@ -47,10 +47,12 @@ open class PythonEngine @Inject constructor(
         redactArgs: Boolean = false,
         parse: (String) -> T
     ): T = withContext(pythonDispatcher) {
-        // Chaquopy starts on a background thread during app boot; every call
-        // waits for it here instead of blocking Application.onCreate.
-        PythonBootstrap.awaitStarted()
         withTimeout(timeoutMs) {
+            // Chaquopy starts on a background thread during app boot; every call
+            // waits for it here instead of blocking Application.onCreate. The wait
+            // lives inside this call's timeout so startup consumes the caller's
+            // existing budget instead of adding a second full timeout on top.
+            PythonBootstrap.awaitStarted(timeoutMs)
             runInterruptible {
                 try {
                     if (redactArgs) {

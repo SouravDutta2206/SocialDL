@@ -2,6 +2,7 @@ package com.socialdl.src.feature.settings
 
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -62,6 +63,9 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.socialdl.src.core.model.Platform
+import com.socialdl.src.core.ui.component.SocialDLToastHost
+import com.socialdl.src.core.ui.component.ToastMessage
+import com.socialdl.src.core.ui.component.ToastType
 import com.socialdl.src.core.ui.theme.SocialDLAccent
 import com.socialdl.src.core.ui.theme.SocialDLBg
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
@@ -141,6 +145,16 @@ fun SettingsScreen(
     var expandedSection by remember { mutableStateOf<SettingsSection?>(null) }
     var expandedCookie by remember { mutableStateOf<Platform?>(null) }
     var pendingClear by remember { mutableStateOf<Platform?>(null) }
+    var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
+
+    /**
+     * Expand/collapse a non-cookie accordion. Opening any of these collapses an
+     * open cookie panel so only one section is ever expanded.
+     */
+    fun toggleSection(section: SettingsSection) {
+        expandedCookie = null
+        expandedSection = if (expandedSection == section) null else section
+    }
     // Stored as the platform NAME: DocumentsUI can destroy/recreate the activity, and
     // a lost target would drop the picked cookies.txt without importing it.
     var importTargetName by rememberSaveable { mutableStateOf<String?>(null) }
@@ -181,27 +195,44 @@ fun SettingsScreen(
     val videoFolderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
-        uri?.let {
+        uri?.let { pickedUri ->
+            // Only persist the folder once the grant is durable; a non-persisted
+            // URI would silently lose access after a restart.
             runCatching {
                 context.contentResolver.takePersistableUriPermission(
-                    it,
+                    pickedUri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
+            }.onSuccess {
+                viewModel.setVideoFolder(pickedUri)
+            }.onFailure { error ->
+                // :feature:settings has no dependency on :core:common, so use Log.
+                Log.w("SettingsScreen", "Could not persist SAF folder permission", error)
+                toastMessage = ToastMessage(
+                    message = "Couldn't get persistent access to the selected folder",
+                    type = ToastType.ERROR
+                )
             }
-            viewModel.setVideoFolder(it)
         }
     }
     val audioFolderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
-        uri?.let {
+        uri?.let { pickedUri ->
             runCatching {
                 context.contentResolver.takePersistableUriPermission(
-                    it,
+                    pickedUri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                 )
+            }.onSuccess {
+                viewModel.setAudioFolder(pickedUri)
+            }.onFailure { error ->
+                Log.w("SettingsScreen", "Could not persist SAF folder permission", error)
+                toastMessage = ToastMessage(
+                    message = "Couldn't get persistent access to the selected folder",
+                    type = ToastType.ERROR
+                )
             }
-            viewModel.setAudioFolder(it)
         }
     }
 
@@ -252,9 +283,7 @@ fun SettingsScreen(
                         expanded = expandedSection == SettingsSection.GENERAL,
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            expandedSection =
-                                if (expandedSection == SettingsSection.GENERAL) null
-                                else SettingsSection.GENERAL
+                            toggleSection(SettingsSection.GENERAL)
                         }
                     )
                 }
@@ -279,9 +308,7 @@ fun SettingsScreen(
                         expanded = expandedSection == SettingsSection.FOLDERS,
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            expandedSection =
-                                if (expandedSection == SettingsSection.FOLDERS) null
-                                else SettingsSection.FOLDERS
+                            toggleSection(SettingsSection.FOLDERS)
                         }
                     )
                 }
@@ -338,9 +365,7 @@ fun SettingsScreen(
                         expanded = expandedSection == SettingsSection.LOGS,
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            expandedSection =
-                                if (expandedSection == SettingsSection.LOGS) null
-                                else SettingsSection.LOGS
+                            toggleSection(SettingsSection.LOGS)
                         }
                     )
                 }
@@ -356,9 +381,7 @@ fun SettingsScreen(
                         expanded = expandedSection == SettingsSection.ABOUT,
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            expandedSection =
-                                if (expandedSection == SettingsSection.ABOUT) null
-                                else SettingsSection.ABOUT
+                            toggleSection(SettingsSection.ABOUT)
                         }
                     )
                 }
@@ -371,6 +394,12 @@ fun SettingsScreen(
                 }
             }
         }
+
+        // Floating Toast (folder-permission failures share the app-wide pill style)
+        SocialDLToastHost(
+            toast = toastMessage,
+            onDismiss = { toastMessage = null }
+        )
     }
 
     // §2.6: Clear cookies is a destructive action — confirmation dialog first.

@@ -78,10 +78,15 @@ class DownloadWorker @AssistedInject constructor(
     /** Foreground-service notification promotion state (P1-1). */
     private var isForeground = false
     private var lastNotifiedPercent = -1
+    private var lastNotifiedStatus: DownloadStatus? = null
+    private var lastNotifiedAtMs = 0L
 
     companion object {
         /** The ONLY work input: everything else lives in the Room job row. */
         const val KEY_JOB_ID = "job_id"
+
+        /** Unknown-size downloads refresh the foreground notification at most this often. */
+        private const val NOTIFICATION_REFRESH_MS = 1_000L
 
         /**
          * Linux rejects a single argv element above ~128 KB, so a base64 picture block
@@ -140,14 +145,26 @@ class DownloadWorker @AssistedInject constructor(
     /**
      * Updates the foreground notification on progress ticks when the integer
      * percent changes, and on phase transitions. Throttled by percent to keep
-     * notification churn sane under high-frequency Room ticks.
+     * notification churn sane under high-frequency Room ticks. When the total size
+     * is unknown the percent never moves, so those ticks are throttled by time
+     * instead and the byte counter still advances live.
      */
     private suspend fun maybeRefreshForeground(jobId: String) {
         if (!isForeground) return
         val job = jobRepository.getJob(jobId) ?: return
         val percent = (job.progress.coerceIn(0f, 1f) * 100).toInt()
-        if (percent == lastNotifiedPercent && job.status == DownloadStatus.DOWNLOADING) return
+        val totalBytes = job.totalBytes
+        val now = System.currentTimeMillis()
+        if (job.status == DownloadStatus.DOWNLOADING && job.status == lastNotifiedStatus) {
+            if (totalBytes != null && totalBytes > 0L) {
+                if (percent == lastNotifiedPercent) return
+            } else if (now - lastNotifiedAtMs < NOTIFICATION_REFRESH_MS) {
+                return
+            }
+        }
         lastNotifiedPercent = percent
+        lastNotifiedStatus = job.status
+        lastNotifiedAtMs = now
         try {
             setForeground(
                 notificationManager.buildForegroundInfo(
@@ -497,12 +514,13 @@ class DownloadWorker @AssistedInject constructor(
             isStopped = { isStopped },
             canceller = canceller
         ) { bytesWritten, totalBytes ->
-            val progress = if (totalBytes != null && totalBytes > 0) {
-                (bytesWritten.toFloat() / totalBytes) * 0.8f // Video accounts for 80% of download progress
+            val total = totalBytes?.takeIf { it > 0 }
+            val progress = if (total != null) {
+                (bytesWritten.toFloat() / total) * 0.8f // Video accounts for 80% of download progress
             } else {
-                0.2f
+                0f
             }
-            registerProgress(jobId, DownloadStatus.DOWNLOADING, progress, bytesWritten, totalBytes)
+            registerProgress(jobId, DownloadStatus.DOWNLOADING, progress, bytesWritten, total)
         }
 
         Logger.d(tag, "[$jobId] Downloading audio stream (chunkSize=${resolved.audioChunkSize})...")
@@ -515,17 +533,21 @@ class DownloadWorker @AssistedInject constructor(
                 isStopped = { isStopped },
                 canceller = canceller
             ) { bytesWritten, totalBytes ->
-                val progress = if (totalBytes != null && totalBytes > 0) {
-                    0.8f + (bytesWritten.toFloat() / totalBytes) * 0.15f // Audio accounts for 15%
+                val videoBytes = videoTemp.length()
+                val total = totalBytes?.takeIf { it > 0 }
+                val progress = if (total != null) {
+                    0.8f + (bytesWritten.toFloat() / total) * 0.15f // Audio accounts for 15%
                 } else {
-                    0.9f
+                    0f
                 }
                 registerProgress(
                     jobId,
                     DownloadStatus.DOWNLOADING,
                     progress,
-                    videoTemp.length() + bytesWritten,
-                    totalBytes?.let { it + videoTemp.length() }
+                    videoBytes + bytesWritten,
+                    // An unknown audio size keeps the combined total unknown too:
+                    // adding videoTemp.length() would fabricate a bogus denominator.
+                    total?.let { it + videoBytes }
                 )
             }
         } catch (e: CancellationException) {
@@ -565,12 +587,13 @@ class DownloadWorker @AssistedInject constructor(
             isStopped = { isStopped },
             canceller = canceller
         ) { bytesWritten, totalBytes ->
-            val progress = if (totalBytes != null && totalBytes > 0) {
-                bytesWritten.toFloat() / totalBytes
+            val total = totalBytes?.takeIf { it > 0 }
+            val progress = if (total != null) {
+                bytesWritten.toFloat() / total
             } else {
-                0.5f
+                0f
             }
-            registerProgress(jobId, DownloadStatus.DOWNLOADING, progress, bytesWritten, totalBytes)
+            registerProgress(jobId, DownloadStatus.DOWNLOADING, progress, bytesWritten, total)
         }
     }
 

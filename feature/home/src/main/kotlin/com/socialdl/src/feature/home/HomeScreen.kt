@@ -270,6 +270,9 @@ fun HomeScreen(
                 onClick = {
                     val clipText = readClipboardText(context)
                     if (!clipText.isNullOrBlank()) {
+                        // Populate the search bar too: the URL stays visible while
+                        // loading and if extraction fails.
+                        viewModel.onQueryChange(clipText)
                         viewModel.submitQuery(clipText)
                     }
                 },

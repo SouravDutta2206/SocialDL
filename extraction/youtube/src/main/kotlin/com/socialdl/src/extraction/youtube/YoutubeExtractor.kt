@@ -27,8 +27,8 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlin.math.roundToInt
 import javax.inject.Inject
@@ -392,11 +392,13 @@ class YoutubeExtractor @Inject constructor(
         val container = dto.ext?.uppercase() ?: "M4A"
         // Do not guess a numeric bitrate: label the reported abr when present, fall back
         // to tbr marked as approximate, and omit the number entirely when neither exists.
-        // (Previously opus streams without abr were mislabeled "128kbps".)
-        val reportedAbr = dto.abr?.toInt()
+        // (Previously opus streams without abr were mislabeled "128kbps".) Zero or
+        // non-positive reports are treated as absent so "0kbps"/"~0kbps" never render.
+        val reportedAbr = dto.abr?.takeIf { it.isFinite() }?.roundToInt()?.takeIf { it > 0 }
+        val reportedTbr = dto.tbr?.takeIf { it.isFinite() }?.roundToInt()?.takeIf { it > 0 }
         val label = when {
             reportedAbr != null -> "${reportedAbr}kbps $container"
-            dto.tbr != null -> "~${dto.tbr.toInt()}kbps $container"
+            reportedTbr != null -> "~${reportedTbr}kbps $container"
             else -> container
         }
         val sampleRate = dto.asr?.let {
@@ -508,8 +510,12 @@ class YoutubeExtractor @Inject constructor(
     }
 
     private fun extractChunkSize(dto: YtDlpFormatDto): Long? {
-        val options = dto.downloader_options?.jsonObject ?: return null
-        return options["http_chunk_size"]?.jsonPrimitive?.longOrNull
+        // yt-dlp's downloader_options is untrusted JSON: tolerate nulls, arrays,
+        // primitives, and nested/non-numeric http_chunk_size instead of throwing
+        // a ClassCastException out of extraction.
+        val options = dto.downloader_options as? JsonObject ?: return null
+        val chunkSize = options["http_chunk_size"] as? JsonPrimitive ?: return null
+        return chunkSize.longOrNull?.takeIf { it > 0 }
     }
 
     private companion object {

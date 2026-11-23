@@ -93,14 +93,18 @@ class ThreadsExtractor @Inject constructor(
                 }.orEmpty()
             }
 
-            withTimeout(EXTRACTION_TIMEOUT_MS) {
+            val rawJson = withTimeout(EXTRACTION_TIMEOUT_MS) {
                 gate.withLock {
-                    val rawJson = withContext(Dispatchers.Main) {
+                    withContext(Dispatchers.Main) {
                         runHeadlessExtraction(normalizedUrl, cookies)
                     }
-                    decodeAndMap(rawJson, normalizedUrl)
                 }
             }
+            // Decode/map (including thumbnail network fetches) runs after the
+            // WebView gate unlocks and outside the extraction timeout: slow
+            // thumbnail downloads must not hold the singleton WebView mutex,
+            // and must not turn a successful page load into a timeout.
+            decodeAndMap(rawJson, normalizedUrl)
         } catch (e: TimeoutCancellationException) {
             Logger.w(tag, "Threads extraction timed out for $normalizedUrl")
             ExtractionResult.Error(ExtractionError.Timeout())

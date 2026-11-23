@@ -488,7 +488,7 @@ object NetscapeCookieJarWriter {
     }
 
     /**
-     * Splits one `; `-joined header into `(name, value)` pairs.
+     * Splits one `;`-delimited header into `(name, value)` pairs.
      *
      * Cookie values are kept byte-for-byte — they are base64-ish opaque tokens, and
      * UrlEncoding them would corrupt SAPISID/SID. A segment is skipped entirely when
@@ -498,11 +498,11 @@ object NetscapeCookieJarWriter {
     fun parseHeader(header: String): List<Pair<String, String>> {
         if (header.isBlank()) return emptyList()
         val out = ArrayList<Pair<String, String>>()
-        for (segment in header.split("; ")) {
-            // A trailing ";" before the end of a header (or stray double separators)
-            // leaves a dangling ';' on the last token — cookie values cannot contain
-            // ';', so it is safe to trim it off.
-            val trimmed = segment.trim().trimEnd(';')
+        for (segment in header.split(';')) {
+            // ';' is the pair delimiter, so a stray/trailing separator leaves an
+            // empty segment; blank segments are skipped below. Cookie values cannot
+            // contain ';'.
+            val trimmed = segment.trim()
             if (trimmed.isEmpty()) continue
             val eq = trimmed.indexOf('=')
             if (eq <= 0) continue // no separator, or empty name

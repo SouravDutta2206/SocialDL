@@ -30,6 +30,21 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
     corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
 )
 
+// Worker-count bounds. A persisted value outside this range (old build, manual
+// DataStore edit) must never reach the download scheduler.
+internal const val MIN_CONCURRENT_DOWNLOADS = 1
+internal const val MAX_CONCURRENT_DOWNLOADS = 10
+internal const val DEFAULT_MAX_CONCURRENT_DOWNLOADS = 3
+
+/** Clamps a stored/supplied worker count into the supported range. */
+internal fun clampConcurrentDownloads(value: Int?): Int =
+    (value ?: DEFAULT_MAX_CONCURRENT_DOWNLOADS)
+        .coerceIn(MIN_CONCURRENT_DOWNLOADS, MAX_CONCURRENT_DOWNLOADS)
+
+/** Trims a stored folder URI string; blank strings mean "not configured". */
+internal fun normalizeFolderUriString(raw: String?): String? =
+    raw?.trim()?.takeIf { it.isNotEmpty() }
+
 @Singleton
 class SettingsRepositoryImpl @Inject constructor(
     @ApplicationContext private val context: Context
@@ -77,15 +92,19 @@ class SettingsRepositoryImpl @Inject constructor(
     }.distinctUntilChanged()
 
     override val videoFolderUri: Flow<Uri?> = safeData.map { prefs ->
-        prefs[Keys.VIDEO_FOLDER_URI]?.let { Uri.parse(it) }
+        normalizeFolderUriString(prefs[Keys.VIDEO_FOLDER_URI])
+            ?.let { Uri.parse(it) }
+            ?.takeUnless { it == Uri.EMPTY }
     }.distinctUntilChanged()
 
     override val audioFolderUri: Flow<Uri?> = safeData.map { prefs ->
-        prefs[Keys.AUDIO_FOLDER_URI]?.let { Uri.parse(it) }
+        normalizeFolderUriString(prefs[Keys.AUDIO_FOLDER_URI])
+            ?.let { Uri.parse(it) }
+            ?.takeUnless { it == Uri.EMPTY }
     }.distinctUntilChanged()
 
     override val maxConcurrentDownloads: Flow<Int> = safeData.map { prefs ->
-        prefs[Keys.MAX_CONCURRENT_DOWNLOADS] ?: 3
+        clampConcurrentDownloads(prefs[Keys.MAX_CONCURRENT_DOWNLOADS])
     }.distinctUntilChanged()
 
     override val wifiOnlyDownloads: Flow<Boolean> = safeData.map { prefs ->
@@ -113,28 +132,27 @@ class SettingsRepositoryImpl @Inject constructor(
     }
 
     override suspend fun setVideoFolderUri(uri: Uri?) {
-        context.dataStore.edit { prefs ->
-            if (uri != null) {
-                prefs[Keys.VIDEO_FOLDER_URI] = uri.toString()
-            } else {
-                prefs.remove(Keys.VIDEO_FOLDER_URI)
-            }
-        }
+        setFolderUri(Keys.VIDEO_FOLDER_URI, uri)
     }
 
     override suspend fun setAudioFolderUri(uri: Uri?) {
+        setFolderUri(Keys.AUDIO_FOLDER_URI, uri)
+    }
+
+    /** Stores a usable document-tree URI; null/empty/blank input clears the key. */
+    private suspend fun setFolderUri(key: Preferences.Key<String>, uri: Uri?) {
         context.dataStore.edit { prefs ->
-            if (uri != null) {
-                prefs[Keys.AUDIO_FOLDER_URI] = uri.toString()
+            if (uri == null || uri == Uri.EMPTY || uri.toString().isBlank()) {
+                prefs.remove(key)
             } else {
-                prefs.remove(Keys.AUDIO_FOLDER_URI)
+                prefs[key] = uri.toString()
             }
         }
     }
 
     override suspend fun setMaxConcurrentDownloads(max: Int) {
         context.dataStore.edit { prefs ->
-            prefs[Keys.MAX_CONCURRENT_DOWNLOADS] = max.coerceIn(1, 10)
+            prefs[Keys.MAX_CONCURRENT_DOWNLOADS] = clampConcurrentDownloads(max)
         }
     }
 
