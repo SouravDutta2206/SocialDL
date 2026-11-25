@@ -12,14 +12,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-
-
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,18 +23,15 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
-
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
@@ -63,26 +56,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.ui.theme.SocialDLBadgeBlue
-
-
-
-
-
-import com.socialdl.src.core.ui.theme.SocialDLButton
 import com.socialdl.src.core.ui.theme.SocialDLIndicator
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
-import com.socialdl.src.core.ui.theme.SocialDLSurface
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerHigh
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerLow
-import com.socialdl.src.core.ui.theme.SocialDLSurfaceVariant
 
 /**
  * Format selection bottom sheet matching the reference UI mock.
@@ -189,6 +173,61 @@ fun FormatBottomSheet(
     }
 }
 
+/** Shared editable metadata card used for both the Title and Author fields. */
+@Composable
+private fun EditableMetadataField(
+    label: String,
+    value: String,
+    placeholder: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = SocialDLSurfaceContainerLow
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 11.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.6.sp
+                ),
+                color = SocialDLOnSurfaceVariant
+            )
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium.copy(
+                    color = SocialDLOnSurface,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 14.sp
+                ),
+                cursorBrush = SolidColor(SocialDLIndicator),
+                modifier = Modifier.fillMaxWidth(),
+                decorationBox = { innerTextField ->
+                    if (value.isEmpty()) {
+                        Text(
+                            text = placeholder,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
+                            color = SocialDLOnSurfaceDim
+                        )
+                    }
+                    innerTextField()
+                }
+            )
+        }
+    }
+}
+
 @Composable
 private fun MainDownloadSheetView(
     item: MediaItem,
@@ -282,50 +321,13 @@ private fun MainDownloadSheetView(
         }
 
         // Title Field - Editable Input Form
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            color = SocialDLSurfaceContainerLow
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 11.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = "TITLE",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.6.sp
-                    ),
-                    color = SocialDLOnSurfaceVariant
-                )
-                BasicTextField(
-                    value = customTitle,
-                    onValueChange = onTitleChange,
-                    singleLine = true,
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(
-                        color = SocialDLOnSurface,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.sp
-                    ),
-                    cursorBrush = SolidColor(SocialDLIndicator),
-                    modifier = Modifier.fillMaxWidth(),
-                    decorationBox = { innerTextField ->
-                        if (customTitle.isEmpty()) {
-                            Text(
-                                text = "Enter custom title...",
-                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
-                                color = SocialDLOnSurfaceDim
-                            )
-                        }
-                        innerTextField()
-                    }
-                )
-            }
-        }
+        EditableMetadataField(
+            label = "TITLE",
+            value = customTitle,
+            placeholder = "Enter custom title...",
+            onValueChange = onTitleChange,
+            modifier = Modifier.fillMaxWidth()
+        )
 
         // Author & Container row
         Row(
@@ -333,50 +335,13 @@ private fun MainDownloadSheetView(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // Author Box - Editable Input Form
-            Surface(
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(16.dp),
-                color = SocialDLSurfaceContainerLow
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 11.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        text = "AUTHOR",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.6.sp
-                        ),
-                        color = SocialDLOnSurfaceVariant
-                    )
-                    BasicTextField(
-                        value = customAuthor,
-                        onValueChange = onAuthorChange,
-                        singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(
-                            color = SocialDLOnSurface,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 14.sp
-                        ),
-                        cursorBrush = SolidColor(SocialDLIndicator),
-                        modifier = Modifier.fillMaxWidth(),
-                        decorationBox = { innerTextField ->
-                            if (customAuthor.isEmpty()) {
-                                Text(
-                                    text = "Enter author...",
-                                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
-                                    color = SocialDLOnSurfaceDim
-                                )
-                            }
-                            innerTextField()
-                        }
-                    )
-                }
-            }
+            EditableMetadataField(
+                label = "AUTHOR",
+                value = customAuthor,
+                placeholder = "Enter author...",
+                onValueChange = onAuthorChange,
+                modifier = Modifier.weight(1f)
+            )
 
             // Container Dropdown Box
             var containerMenuExpanded by remember { mutableStateOf(false) }

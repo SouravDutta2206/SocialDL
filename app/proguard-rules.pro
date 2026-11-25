@@ -16,7 +16,6 @@
 -keep class com.socialdl.src.core.model.** { *; }
 
 # Keep WebView JavascriptInterface bridges
--keepattributes JavascriptInterface
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }

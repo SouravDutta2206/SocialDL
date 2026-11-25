@@ -18,6 +18,7 @@ import com.socialdl.src.core.common.util.ThumbnailCache
 import com.socialdl.src.core.cookies.CookieStore
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.extraction.api.ExtractionError
+import com.socialdl.src.extraction.api.ExtractionJson
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
@@ -30,7 +31,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -52,12 +52,6 @@ class ThreadsExtractor @Inject constructor(
 
     private val tag = "ThreadsExtractor"
 
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-        coerceInputValues = true
-    }
-
     /** Serialize WebView runs so two extractions never race each other. */
     private val gate = Mutex()
 
@@ -77,9 +71,6 @@ class ThreadsExtractor @Inject constructor(
             return ExtractionResult.Error(ExtractionError.UnsupportedUrl(url))
         }
 
-        val hasCookies = cookieStore.jarState(Platform.THREADS) != null
-        Logger.d(tag, "Extracting Threads metadata for $normalizedUrl (cookies=$hasCookies)")
-
         return try {
             // Parse the decrypted jar while its throwaway file is alive; the file
             // is deleted as soon as this block returns, before the WebView starts.
@@ -92,6 +83,10 @@ class ThreadsExtractor @Inject constructor(
                     }
                 }.orEmpty()
             }
+            Logger.d(
+                tag,
+                "Extracting Threads metadata for $normalizedUrl (cookies=${cookies.isNotEmpty()})"
+            )
 
             val rawJson = withTimeout(EXTRACTION_TIMEOUT_MS) {
                 gate.withLock {
@@ -139,7 +134,7 @@ class ThreadsExtractor @Inject constructor(
     private suspend fun decodeAndMap(rawJson: String, sourceUrl: String): ExtractionResult {
         Logger.d(tag, "Threads raw extraction JSON: ${rawJson.take(1500)}")
         val dto = try {
-            json.decodeFromString<ThreadsExtractionDto>(rawJson)
+            ExtractionJson.decodeFromString<ThreadsExtractionDto>(rawJson)
         } catch (e: Exception) {
             Logger.e(tag, "Failed to deserialize Threads JSON", e)
             return ExtractionResult.Error(ExtractionError.ParsingFailed("Malformed Threads response", e))

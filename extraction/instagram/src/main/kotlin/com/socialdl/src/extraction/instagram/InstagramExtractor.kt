@@ -9,17 +9,13 @@ import com.socialdl.src.core.cookies.CookieStore
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.python.PythonEngine
 import com.socialdl.src.core.python.PythonExecutionException
-import com.socialdl.src.extraction.api.ExtractionEnvelope
 import com.socialdl.src.extraction.api.ExtractionError
+import com.socialdl.src.extraction.api.ExtractionJson
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
-import com.socialdl.src.extraction.api.decodeEnvelope
-import com.socialdl.src.extraction.api.mapErrorKind
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.TimeoutCancellationException
+import com.socialdl.src.extraction.api.runEnvelopeExtraction
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.decodeFromJsonElement
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -67,12 +63,6 @@ class InstagramExtractor @Inject constructor(
         get() = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-        coerceInputValues = true
-    }
-
     override val platform: Platform = Platform.INSTAGRAM
 
     override val capabilities: PlatformCapabilities = PlatformCapabilities(
@@ -91,73 +81,53 @@ class InstagramExtractor @Inject constructor(
 
         Logger.d(tag, "Extracting Instagram metadata for $normalizedUrl")
 
-        return try {
-            // Hybrid engine routing (Oct 2026), decided atomically under the one
-            // cookie-jar call:
-            // - a decrypted jar exists → gallery-dl (works for public + private content)
-            // - no jar → anonymous Instaloader fallback; a failure surfaces the
-            //   normal typed error (auth wall / rate limited / unavailable).
-            //
-            // The previous `jarState()` check followed by `withCookieFile()` was a
-            // TOCTOU race: the jar can be cleared/replaced between the two calls.
-            // The cookie path handed to the block is the single source of truth.
-            val envelope = cookieStore.withCookieFile(Platform.INSTAGRAM) { cookiePath ->
-                val rawJson = if (cookiePath != null) {
-                    // gallery-dl must present the same UA the capture WebView used, or a
-                    // UA-bound session looks logged out. Capture never overrides the UA
-                    // (§2.6), so the engine default *is* what the capture screen sent.
-                    val captureUserAgent = runCatching {
-                        WebSettings.getDefaultUserAgent(context)
-                    }.getOrNull()?.takeIf { it.isNotBlank() } ?: FALLBACK_USER_AGENT
-                    pythonEngine.run(
-                        module = "gallery_dl_bridge.extract",
-                        function = "extract",
-                        normalizedUrl,
-                        cookiePath,
-                        captureUserAgent
-                    ) { it }
-                } else {
-                    pythonEngine.run(
-                        module = "instaloader_bridge.extract",
-                        function = "extract",
-                        normalizedUrl
-                    ) { it }
-                }
-                decodeEnvelope(rawJson)
-            }
-
-            when (envelope) {
-                is ExtractionEnvelope.Failure -> {
-                    Logger.w(tag, "Instagram error envelope: ${envelope.kind} | ${envelope.detail}")
-                    envelope.debugLog?.takeIf { it.isNotBlank() }?.let {
-                        Logger.w(tag, "Instagram bridge log:\n$it")
+        return runEnvelopeExtraction(
+            tag = tag,
+            platform = Platform.INSTAGRAM,
+            url = url,
+            bridgeErrorMessage = "Couldn't process Instagram's response",
+            isBridgeException = { it is PythonExecutionException },
+            fetchRawJson = {
+                // Hybrid engine routing (Oct 2026), decided atomically under the one
+                // cookie-jar call:
+                // - a decrypted jar exists → gallery-dl (works for public + private content)
+                // - no jar → anonymous Instaloader fallback; a failure surfaces the
+                //   normal typed error (auth wall / rate limited / unavailable).
+                //
+                // The previous `jarState()` check followed by `withCookieFile()` was a
+                // TOCTOU race: the jar can be cleared/replaced between the two calls.
+                // The cookie path handed to the block is the single source of truth.
+                cookieStore.withCookieFile(Platform.INSTAGRAM) { cookiePath ->
+                    if (cookiePath != null) {
+                        // gallery-dl must present the same UA the capture WebView used, or a
+                        // UA-bound session looks logged out. Capture never overrides the UA
+                        // (§2.6), so the engine default *is* what the capture screen sent.
+                        val captureUserAgent = runCatching {
+                            WebSettings.getDefaultUserAgent(context)
+                        }.getOrNull()?.takeIf { it.isNotBlank() } ?: FALLBACK_USER_AGENT
+                        pythonEngine.run(
+                            module = "gallery_dl_bridge.extract",
+                            function = "extract",
+                            normalizedUrl,
+                            cookiePath,
+                            captureUserAgent
+                        ) { it }
+                    } else {
+                        pythonEngine.run(
+                            module = "instaloader_bridge.extract",
+                            function = "extract",
+                            normalizedUrl
+                        ) { it }
                     }
-                    ExtractionResult.Error(
-                        mapErrorKind(envelope.kind, envelope.detail, Platform.INSTAGRAM)
-                    )
                 }
-
-                is ExtractionEnvelope.Success -> mapPayload(envelope.payload, normalizedUrl)
-            }
-        } catch (e: TimeoutCancellationException) {
-            Logger.e(tag, "Extraction timed out for $url", e)
-            ExtractionResult.Error(ExtractionError.Timeout())
-        } catch (e: CancellationException) {
-            // User cancel or structured cancellation — never convert to a user-facing
-            // failure; let the coroutine unwind (same contract as YoutubeExtractor).
-            throw e
-        } catch (e: PythonExecutionException) {
-            Logger.e(tag, "Extraction failed for $url", e)
-            ExtractionResult.Error(ExtractionError.ParsingFailed("Couldn't process Instagram's response"))
-        } catch (e: Exception) {
-            Logger.e(tag, "Extraction failed for $url", e)
-            ExtractionResult.Error(ExtractionError.ParsingFailed(e.message ?: "Unknown extraction error"))
-        }
+            },
+            mapSuccess = { payload -> mapPayload(payload, normalizedUrl) },
+        )
     }
 
     private suspend fun mapPayload(payload: JsonElement, sourceUrl: String): ExtractionResult {
         val dto = try {
-            json.decodeFromJsonElement<InstagramResponseDto>(payload)
+            ExtractionJson.decodeFromJsonElement<InstagramResponseDto>(payload)
         } catch (e: Exception) {
             Logger.e(tag, "Failed to deserialize Instagram JSON", e)
             return ExtractionResult.Error(ExtractionError.ParsingFailed("Malformed Instagram JSON: ${e.message}"))

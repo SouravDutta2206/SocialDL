@@ -67,37 +67,38 @@ internal fun confirmEndOfFile(knownTotal: Long?, contentRangeHeader: String?, ch
 }
 
 /**
- * Copies one chunk body. Rejects bytes beyond the claimed range before writing them, and
- * reports progress as `chunkStart + bytesReadSoFar`, throttled to 500 ms, with a final report.
+ * Copies one stream body into [output]. When [maxBytes] is set (a 206 chunk's claimed
+ * range length), bytes beyond it are rejected before they are written. Progress is
+ * reported as `offsetBytes + bytesWrittenSoFar`, throttled to 500 ms, with a final report.
  * Returns the number of bytes written.
  */
-internal suspend fun copyChunkBody(
+internal suspend fun copyStreamWithProgress(
     input: InputStream,
     output: OutputStream,
-    chunkStart: Long,
-    claimedBytes: Long,
     totalBytes: Long?,
     isStopped: () -> Boolean,
     onProgress: suspend (bytesWritten: Long, totalBytes: Long?) -> Unit,
+    offsetBytes: Long = 0L,
+    maxBytes: Long? = null,
 ): Long {
     val buffer = ByteArray(64 * 1024)
-    var chunkBytesRead = 0L
+    var bytesReadTotal = 0L
     var lastProgressReport = System.currentTimeMillis()
     while (true) {
         val bytesRead = input.read(buffer)
         if (bytesRead == -1) break
         if (isStopped()) throw CancellationException("Download was stopped")
-        if (chunkBytesRead + bytesRead > claimedBytes) {
-            throw RangeInvalidException("Chunk body exceeded Content-Range claim of $claimedBytes bytes")
+        if (maxBytes != null && bytesReadTotal + bytesRead > maxBytes) {
+            throw RangeInvalidException("Chunk body exceeded Content-Range claim of $maxBytes bytes")
         }
         output.write(buffer, 0, bytesRead)
-        chunkBytesRead += bytesRead
+        bytesReadTotal += bytesRead
         val now = System.currentTimeMillis()
         if (now - lastProgressReport >= 500) {
-            onProgress(chunkStart + chunkBytesRead, totalBytes)
+            onProgress(offsetBytes + bytesReadTotal, totalBytes)
             lastProgressReport = now
         }
     }
-    onProgress(chunkStart + chunkBytesRead, totalBytes)
-    return chunkBytesRead
+    onProgress(offsetBytes + bytesReadTotal, totalBytes)
+    return bytesReadTotal
 }

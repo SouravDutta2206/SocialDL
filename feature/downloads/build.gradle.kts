@@ -26,22 +26,13 @@ dependencies {
     implementation(project(":core:database"))
 
 
-    // Compose
+    // Compose (UI, Material3, icons, Coil and lifecycle Compose are exposed as `api` by :core:ui)
     implementation(platform(libs.compose.bom))
-    implementation(libs.compose.ui)
-    implementation(libs.compose.material3)
-    implementation(libs.compose.material.icons.extended)
     implementation(libs.compose.ui.tooling.preview)
     debugImplementation(libs.compose.ui.tooling)
-    implementation(libs.coil.compose)
-
 
     // Navigation
     implementation(libs.navigation.compose)
-
-    // Lifecycle
-    implementation(libs.lifecycle.runtime.compose)
-    implementation(libs.lifecycle.viewmodel.compose)
 
     // Hilt
     implementation(libs.hilt.android)

@@ -4,12 +4,11 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.socialdl.src.core.cookies.CAPTURABLE_PLATFORMS
 import com.socialdl.src.core.cookies.CookieCaptureController
 import com.socialdl.src.core.cookies.CookieStore
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.settings.SettingsRepository
-import com.socialdl.src.core.settings.model.AppTheme
-import com.socialdl.src.core.settings.model.SearchEngine
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -20,7 +19,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -29,22 +27,10 @@ import javax.inject.Inject
 /**
  * UI state backed by [SettingsRepository].
  *
- * Download-affecting preferences are now consumed by the pipeline: concurrency
- * (semaphore size), Wi-Fi-only (WorkManager network constraint) and force-H.264
- * (mux strategy). Theme, accent, preferred search engine and SAF folder redirects
- * remain storage-only and are not yet applied by the UI/exporter.
+ * Every preference is consumed by the download pipeline: concurrency (semaphore
+ * size), Wi-Fi-only (WorkManager network constraint) and force-H.264 (mux strategy).
  */
 data class SettingsUiState(
-    val theme: AppTheme = AppTheme.DARK,
-    val searchEngine: SearchEngine = SearchEngine.YOUTUBE,
-    val videoFolderUri: Uri? = null,
-    val audioFolderUri: Uri? = null,
-    val maxConcurrentDownloads: Int = 3,
-    val wifiOnlyDownloads: Boolean = false,
-    val forceH264Transcode: Boolean = false,
-)
-
-private data class DownloadPrefs(
     val maxConcurrentDownloads: Int = 3,
     val wifiOnlyDownloads: Boolean = false,
     val forceH264Transcode: Boolean = false,
@@ -59,59 +45,21 @@ class SettingsViewModel @Inject constructor(
 
     private val tag = "SettingsViewModel"
 
-    private val downloadPrefs = combine(
+    val uiState: StateFlow<SettingsUiState> = combine(
         settingsRepository.maxConcurrentDownloads,
         settingsRepository.wifiOnlyDownloads,
         settingsRepository.forceH264Transcode
     ) { max, wifiOnly, forceH264 ->
-        DownloadPrefs(max, wifiOnly, forceH264)
-    }
-
-    val uiState: StateFlow<SettingsUiState> = combine(
-        settingsRepository.theme,
-        settingsRepository.fallbackSearchEngine,
-        settingsRepository.videoFolderUri,
-        settingsRepository.audioFolderUri,
-        downloadPrefs
-    ) { theme, engine, videoFolder, audioFolder, prefs ->
         SettingsUiState(
-            theme = theme,
-            searchEngine = engine,
-            videoFolderUri = videoFolder,
-            audioFolderUri = audioFolder,
-            maxConcurrentDownloads = prefs.maxConcurrentDownloads,
-            wifiOnlyDownloads = prefs.wifiOnlyDownloads,
-            forceH264Transcode = prefs.forceH264Transcode
+            maxConcurrentDownloads = max,
+            wifiOnlyDownloads = wifiOnly,
+            forceH264Transcode = forceH264
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.Eagerly,
         initialValue = SettingsUiState()
     )
-
-    fun onCycleTheme() {
-        viewModelScope.launch {
-            val current = settingsRepository.theme.first()
-            val next = when (current) {
-                AppTheme.SYSTEM -> AppTheme.LIGHT
-                AppTheme.LIGHT -> AppTheme.DARK
-                AppTheme.DARK -> AppTheme.SYSTEM
-            }
-            settingsRepository.setTheme(next)
-        }
-    }
-
-    fun onCycleSearchEngine() {
-        viewModelScope.launch {
-            val current = settingsRepository.fallbackSearchEngine.first()
-            val next = when (current) {
-                SearchEngine.YOUTUBE -> SearchEngine.PIPED
-                SearchEngine.PIPED -> SearchEngine.INVIDIOUS
-                SearchEngine.INVIDIOUS -> SearchEngine.YOUTUBE
-            }
-            settingsRepository.setFallbackSearchEngine(next)
-        }
-    }
 
     fun setMaxConcurrentDownloads(max: Int) {
         viewModelScope.launch {
@@ -131,18 +79,6 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun setVideoFolder(uri: Uri?) {
-        viewModelScope.launch {
-            settingsRepository.setVideoFolderUri(uri)
-        }
-    }
-
-    fun setAudioFolder(uri: Uri?) {
-        viewModelScope.launch {
-            settingsRepository.setAudioFolderUri(uri)
-        }
-    }
-
     // ---- Cookies (§2.6) ----
 
     /** One platform's cookie-panel state. */
@@ -151,14 +87,6 @@ class SettingsViewModel @Inject constructor(
         val lastRefreshedAt: Long? = null,
         /** Copy for an import/clear outcome; self-clears after a few seconds. */
         val actionMessage: String? = null,
-    )
-
-    /** Platforms with a capture route and a jar, in panel order. */
-    private val cookiePlatforms = listOf(
-        Platform.YOUTUBE,
-        Platform.INSTAGRAM,
-        Platform.TWITTER,
-        Platform.THREADS,
     )
 
     private val cookieActionMessages = MutableStateFlow<Map<Platform, String?>>(emptyMap())
@@ -178,7 +106,7 @@ class SettingsViewModel @Inject constructor(
     ) { _, messages ->
         @Suppress("NAME_SHADOWING")
         withContext(Dispatchers.IO) {
-            cookiePlatforms.associateWith { platform ->
+            CAPTURABLE_PLATFORMS.associateWith { platform ->
                 val jar = cookieStore.jarState(platform)
                 CookiesUiState(
                     present = jar != null,
@@ -208,7 +136,7 @@ class SettingsViewModel @Inject constructor(
                 val reason = cookieStore.importNetscapeFile(platform, uri)
                 setCookieMessage(
                     platform,
-                    reason ?: "Cookies imported — you're signed in for ${cookiePlatformName(platform)} extraction."
+                    reason ?: "Cookies imported — you're signed in for ${platform.displayName} extraction."
                 )
             } catch (e: CancellationException) {
                 // ViewModel cleared mid-import: not a user-facing failure.
@@ -233,7 +161,7 @@ class SettingsViewModel @Inject constructor(
             try {
                 cookieStore.clear(platform)
                 cookieCaptureController.clearCaptureSession()
-                setCookieMessage(platform, "${cookiePlatformName(platform)} cookies cleared.")
+                setCookieMessage(platform, "${platform.displayName} cookies cleared.")
             } catch (e: CancellationException) {
                 // ViewModel cleared mid-clear: not a user-facing failure.
                 throw e
@@ -264,13 +192,5 @@ class SettingsViewModel @Inject constructor(
                 if (messages[platform] == message) messages + (platform to null) else messages
             }
         }
-    }
-
-    private fun cookiePlatformName(platform: Platform): String = when (platform) {
-        Platform.YOUTUBE -> "YouTube"
-        Platform.INSTAGRAM -> "Instagram"
-        Platform.TWITTER -> "X"
-        Platform.THREADS -> "Threads"
-        else -> platform.name
     }
 }

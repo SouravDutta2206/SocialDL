@@ -7,17 +7,13 @@ import com.socialdl.src.core.cookies.CookieStore
 import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.python.PythonEngine
 import com.socialdl.src.core.python.PythonExecutionException
-import com.socialdl.src.extraction.api.ExtractionEnvelope
 import com.socialdl.src.extraction.api.ExtractionError
+import com.socialdl.src.extraction.api.ExtractionJson
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
-import com.socialdl.src.extraction.api.decodeEnvelope
-import com.socialdl.src.extraction.api.mapErrorKind
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.TimeoutCancellationException
+import com.socialdl.src.extraction.api.runEnvelopeExtraction
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.decodeFromJsonElement
 import javax.inject.Inject
@@ -77,12 +73,6 @@ class TwitterExtractor @Inject constructor(
 
     private val tag = "TwitterExtractor"
 
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-        coerceInputValues = true
-    }
-
     override val platform: Platform = Platform.TWITTER
 
     override val capabilities: PlatformCapabilities = PlatformCapabilities(
@@ -102,63 +92,37 @@ class TwitterExtractor @Inject constructor(
             return ExtractionResult.Error(ExtractionError.UnsupportedUrl(url))
         }
 
-        Logger.d(
-            tag,
-            "Extracting X metadata for $normalizedUrl " +
-                "(cookies=${cookieStore.jarState(Platform.TWITTER) != null})"
-        )
+        Logger.d(tag, "Extracting X metadata for $normalizedUrl")
 
-        return try {
-            // Missing cookies must not introduce a new failure mode: a null jar
-            // path flows straight through, and the bridge picks syndication.
-            // No UA is pinned: X sessions are not UA-bound, and the capture
-            // WebView presents the device's own Chrome UA (risk-control lesson).
-            val rawJson = cookieStore.withCookieFile(Platform.TWITTER) { cookiePath ->
-                pythonEngine.run(
-                    module = "twitter_bridge.extract",
-                    function = "extract",
-                    normalizedUrl,
-                    cookiePath
-                ) { it }
-            }
-
-            when (val envelope = decodeEnvelope(rawJson)) {
-                is ExtractionEnvelope.Failure -> {
-                    Logger.w(
-                        tag,
-                        "Twitter error envelope: ${envelope.kind} | ${envelope.detail}"
-                    )
-                    envelope.debugLog?.takeIf { it.isNotBlank() }?.let {
-                        Logger.w(tag, "Twitter bridge log:\n$it")
-                    }
-                    ExtractionResult.Error(
-                        mapErrorKind(envelope.kind, envelope.detail, Platform.TWITTER)
-                    )
+        return runEnvelopeExtraction(
+            tag = tag,
+            platform = Platform.TWITTER,
+            url = url,
+            bridgeErrorMessage = "Couldn't process X's response",
+            isBridgeException = { it is PythonExecutionException },
+            fetchRawJson = {
+                // Missing cookies must not introduce a new failure mode: a null jar
+                // path flows straight through, and the bridge picks syndication.
+                // No UA is pinned: X sessions are not UA-bound, and the capture
+                // WebView presents the device's own Chrome UA (risk-control lesson).
+                cookieStore.withCookieFile(Platform.TWITTER) { cookiePath ->
+                    Logger.d(tag, "X bridge cookies=${cookiePath != null}")
+                    // twitter_bridge.extract takes (url, cookiefile) only — no UA arg.
+                    pythonEngine.run(
+                        module = "twitter_bridge.extract",
+                        function = "extract",
+                        normalizedUrl,
+                        cookiePath
+                    ) { it }
                 }
-
-                is ExtractionEnvelope.Success -> mapPayload(envelope.payload, normalizedUrl)
-            }
-        } catch (e: TimeoutCancellationException) {
-            Logger.e(tag, "Extraction timed out for $url", e)
-            ExtractionResult.Error(ExtractionError.Timeout())
-        } catch (e: CancellationException) {
-            // User cancel or structured cancellation — never convert to a
-            // user-facing failure; let the coroutine unwind.
-            throw e
-        } catch (e: PythonExecutionException) {
-            Logger.e(tag, "Extraction failed for $url", e)
-            ExtractionResult.Error(ExtractionError.ParsingFailed("Couldn't process X's response"))
-        } catch (e: Exception) {
-            Logger.e(tag, "Extraction failed for $url", e)
-            ExtractionResult.Error(
-                ExtractionError.ParsingFailed(e.message ?: "Unknown extraction error")
-            )
-        }
+            },
+            mapSuccess = { payload -> mapPayload(payload, normalizedUrl) },
+        )
     }
 
     private suspend fun mapPayload(payload: JsonElement, sourceUrl: String): ExtractionResult {
         val dto = try {
-            json.decodeFromJsonElement<TwitterResponseDto>(payload)
+            ExtractionJson.decodeFromJsonElement<TwitterResponseDto>(payload)
         } catch (e: Exception) {
             Logger.e(tag, "Failed to deserialize Twitter JSON", e)
             return ExtractionResult.Error(

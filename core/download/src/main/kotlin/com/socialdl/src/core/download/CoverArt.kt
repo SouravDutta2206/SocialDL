@@ -34,8 +34,7 @@ class CoverArt @Inject constructor(
         }
 
         val output = File(scratchDir, COVER_FILE_NAME)
-        var completed = false
-        ffmpeg.run(
+        val completed = ffmpeg.run(
             args = listOf(
                 "-y", "-nostdin",
                 "-i", thumbnail.absolutePath,
@@ -49,9 +48,7 @@ class CoverArt @Inject constructor(
                 output.absolutePath,
             ),
             timeoutMs = COVER_TIMEOUT_MS,
-        ).collect { event ->
-            if (event is FFmpegEvent.Completed) completed = true
-        }
+        ) is FFmpegEvent.Completed
 
         if (!completed || output.length() == 0L) {
             Logger.w(tag, "Cover normalisation failed; exporting without cover art")

@@ -27,11 +27,11 @@ android {
 }
 
 dependencies {
-    implementation(project(":core:common"))
+    api(project(":core:common"))
     implementation(project(":core:model"))
 
     // Compose
-    implementation(platform(libs.compose.bom))
+    api(platform(libs.compose.bom))
     api(libs.compose.ui)
     api(libs.compose.ui.graphics)
     api(libs.compose.material3)

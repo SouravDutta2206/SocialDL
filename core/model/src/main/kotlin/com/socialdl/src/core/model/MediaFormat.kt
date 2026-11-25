@@ -59,13 +59,6 @@ data class MediaFormat(
 
     /** From yt-dlp's downloader_options.http_chunk_size — feeds Phase 9's chunked fetch. */
     val httpChunkSizeBytes: Long? = null,
-
-    /**
-     * Legacy: extractors no longer decide the mux strategy. Copy vs re-encode is read
-     * from the probed streams at download time; only [MuxStrategy.FORCE_H264] is still
-     * carried, and that is applied by the settings check, not by this field.
-     */
-    val muxStrategy: MuxStrategy? = null,
 ) {
     val isPlaceholder: Boolean
         get() = id == PLACEHOLDER_BEST_VIDEO_ID || id == PLACEHOLDER_BEST_AUDIO_ID

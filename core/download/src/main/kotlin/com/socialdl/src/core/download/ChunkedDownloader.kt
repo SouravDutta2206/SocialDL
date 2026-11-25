@@ -291,14 +291,14 @@ class ChunkedDownloader @Inject constructor(
                         }
                         val chunkBytesRead = FileOutputStream(destination, true).use { output ->
                             body.byteStream().use { input ->
-                                copyChunkBody(
+                                copyStreamWithProgress(
                                     input = input,
                                     output = output,
-                                    chunkStart = chunkStart,
-                                    claimedBytes = claimedBytes,
                                     totalBytes = totalBytes,
                                     isStopped = isStopped,
-                                    onProgress = onProgress
+                                    onProgress = onProgress,
+                                    offsetBytes = chunkStart,
+                                    maxBytes = claimedBytes
                                 )
                             }
                         }
@@ -395,32 +395,6 @@ class ChunkedDownloader @Inject constructor(
         } finally {
             canceller?.unregister(call)
         }
-    }
-
-    private suspend fun copyStreamWithProgress(
-        input: java.io.InputStream,
-        output: java.io.OutputStream,
-        totalBytes: Long?,
-        isStopped: () -> Boolean,
-        onProgress: suspend (bytesWritten: Long, totalBytes: Long?) -> Unit
-    ) {
-        val buffer = ByteArray(64 * 1024)
-        var bytesRead: Int
-        var totalRead = 0L
-        var lastProgressReport = 0L
-
-        while (input.read(buffer).also { bytesRead = it } != -1) {
-            if (isStopped()) throw CancellationException("Download was stopped")
-            output.write(buffer, 0, bytesRead)
-            totalRead += bytesRead
-
-            val now = System.currentTimeMillis()
-            if (now - lastProgressReport >= 500) {
-                onProgress(totalRead, totalBytes)
-                lastProgressReport = now
-            }
-        }
-        onProgress(totalRead, totalBytes)
     }
 
     private fun truncateFile(file: File, targetSize: Long) {

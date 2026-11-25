@@ -27,7 +27,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
@@ -108,11 +107,11 @@ class DownloadsViewModel @Inject constructor(
         }
     }
 
-    private fun purgeStaleRecords(force: Boolean = false) {
+    private fun purgeStaleRecords() {
         // Guard against overlapping purge runs with an atomic CAS instead of a checked-then-set flag.
         if (!isPurgingStale.compareAndSet(false, true)) return
         val startedAt = System.currentTimeMillis()
-        if (!force && startedAt - lastPurgeAt < PURGE_THROTTLE_MS) {
+        if (startedAt - lastPurgeAt < PURGE_THROTTLE_MS) {
             isPurgingStale.set(false)
             return
         }

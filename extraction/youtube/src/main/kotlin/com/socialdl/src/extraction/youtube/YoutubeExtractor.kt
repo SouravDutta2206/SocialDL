@@ -11,24 +11,25 @@ import com.socialdl.src.core.model.Platform
 import com.socialdl.src.core.node.NodeBinaryProvider
 import com.socialdl.src.core.python.PythonEngine
 import com.socialdl.src.core.python.PythonExecutionException
+import com.socialdl.src.extraction.api.ExtractionEnvelope
 import com.socialdl.src.extraction.api.ExtractionError
+import com.socialdl.src.extraction.api.ExtractionJson
 import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.MediaExtractor
 import com.socialdl.src.extraction.api.PlatformCapabilities
-import com.socialdl.src.extraction.api.mapErrorKind
-import kotlinx.coroutines.CancellationException
+import com.socialdl.src.extraction.api.runEnvelopeExtraction
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.longOrNull
 import kotlin.math.roundToInt
 import javax.inject.Inject
@@ -55,10 +56,6 @@ internal data class YtDlpNormalizedResponse(
     val duration: Double? = null,
     val thumbnail_url: String? = null,
     val formats: List<YtDlpFormatDto> = emptyList(),
-    val error: String? = null,
-    val detail: String? = null,
-    /** yt-dlp's own collected progress/warning lines — diagnostics only, on error envelopes. */
-    val debug_log: String? = null,
     /**
      * Present ONLY when the JS runtime chain is degraded (§2.6 troubleshooting):
      * node invisible, exec-failing, solver distribution missing, or yt-dlp logged
@@ -111,12 +108,6 @@ class YoutubeExtractor @Inject constructor(
      */
     private val thumbnailPermits = Semaphore(MAX_CONCURRENT_THUMBNAIL_FETCHES)
 
-    private val json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-        coerceInputValues = true
-    }
-
     override val platform: Platform = Platform.YOUTUBE
 
     override val capabilities: PlatformCapabilities = PlatformCapabilities(
@@ -159,46 +150,33 @@ class YoutubeExtractor @Inject constructor(
                 "(savedSession=$useSavedSession, nodeDir=$nodeDir, binDir=$nodeBinDir)"
         )
 
-        return try {
-            // §2.6 bridge: decrypt the stored jar into a throwaway cacheDir file for
-            // the duration of this one PythonEngine call, or pass null when the user
-            // never signed in — missing cookies must not become a new failure mode.
-            val rawJson = if (useSavedSession) {
-                cookieStore.withCookieFile(Platform.YOUTUBE) { cookieFilePath: String? ->
-                    runBridge(
-                        normalizedUrl = normalizedUrl,
-                        cookieFilePath = cookieFilePath,
-                        nodeDir = nodeDir,
-                        nodeBinDir = nodeBinDir,
-                        ldLibraryPath = runtimePaths?.ldLibraryPath
-                    )
-                }
-            } else {
-                runBridge(
+        return runEnvelopeExtraction(
+            tag = tag,
+            platform = Platform.YOUTUBE,
+            url = url,
+            bridgeErrorMessage = "Couldn't process YouTube's response",
+            isBridgeException = { it is PythonExecutionException },
+            onFailureEnvelope = ::logJsDiagnosticsFromEnvelope,
+            fetchRawJson = {
+                // §2.6 bridge: decrypt the stored jar into a throwaway cacheDir file
+                // for the duration of this one PythonEngine call, or pass null when
+                // the user never signed in — missing cookies must not become a new
+                // failure mode.
+                suspend fun invokeBridge(cookieFilePath: String?): String = runBridge(
                     normalizedUrl = normalizedUrl,
-                    cookieFilePath = null,
+                    cookieFilePath = cookieFilePath,
                     nodeDir = nodeDir,
                     nodeBinDir = nodeBinDir,
-                    ldLibraryPath = runtimePaths?.ldLibraryPath
+                    ldLibraryPath = runtimePaths?.ldLibraryPath,
                 )
-            }
-
-            parseYtDlpJson(rawJson, normalizedUrl)
-        } catch (e: TimeoutCancellationException) {
-            Logger.e(tag, "Extraction timed out for $url", e)
-            ExtractionResult.Error(ExtractionError.Timeout())
-        } catch (e: CancellationException) {
-            // User cancel or structured cancellation — must never be converted to
-            // a user-facing "parse failed"; let the coroutine unwind.
-            throw e
-        } catch (e: PythonExecutionException) {
-            // The traceback stays in logs; the user gets a generic parse message.
-            Logger.e(tag, "Extraction failed for $url", e)
-            ExtractionResult.Error(ExtractionError.ParsingFailed("Couldn't process YouTube's response"))
-        } catch (e: Exception) {
-            Logger.e(tag, "Extraction failed for $url", e)
-            ExtractionResult.Error(ExtractionError.ParsingFailed(e.message ?: "Unknown extraction error"))
-        }
+                if (useSavedSession) {
+                    cookieStore.withCookieFile(Platform.YOUTUBE) { invokeBridge(it) }
+                } else {
+                    invokeBridge(null)
+                }
+            },
+            mapSuccess = { payload -> mapSuccessPayload(payload, normalizedUrl) },
+        )
     }
 
     /** One yt-dlp bridge invocation; [cookieFilePath] is null for an anonymous call. */
@@ -218,43 +196,35 @@ class YoutubeExtractor @Inject constructor(
         ldLibraryPath
     ) { it }
 
-    internal suspend fun parseYtDlpJson(rawJson: String, sourceUrl: String): ExtractionResult {
+    /**
+     * Envelope-level parse/mapping for one yt-dlp payload. Kept directly testable
+     * by [YoutubeExtractorTest]; production goes through the same shared runner.
+     */
+    internal suspend fun parseYtDlpJson(rawJson: String, sourceUrl: String): ExtractionResult =
+        runEnvelopeExtraction(
+            tag = tag,
+            platform = Platform.YOUTUBE,
+            url = sourceUrl,
+            bridgeErrorMessage = "Couldn't process YouTube's response",
+            isBridgeException = { it is PythonExecutionException },
+            onFailureEnvelope = ::logJsDiagnosticsFromEnvelope,
+            fetchRawJson = { rawJson },
+            mapSuccess = { payload -> mapSuccessPayload(payload, sourceUrl) },
+        )
+
+    /** Maps a decoded success payload (single video or playlist) to media items. */
+    private suspend fun mapSuccessPayload(
+        payload: JsonElement,
+        sourceUrl: String,
+    ): ExtractionResult {
         val parsed = try {
-            json.decodeFromString<YtDlpNormalizedResponse>(rawJson)
+            ExtractionJson.decodeFromJsonElement<YtDlpNormalizedResponse>(payload)
         } catch (e: Exception) {
             Logger.e(tag, "Failed to deserialize yt-dlp JSON", e)
             return ExtractionResult.Error(ExtractionError.ParsingFailed("Malformed yt-dlp JSON: ${e.message}"))
         }
 
-        parsed.js_diagnostics?.let { diag ->
-            Logger.e(
-                "JsRuntime",
-                "yt-dlp JS runtime chain DEGRADED — n/sig challenge solving will fail and " +
-                    "stream formats may be silently missing.\n" +
-                    "  runtime=${diag.runtime ?: "<none visible>"} " +
-                    "version=${diag.version ?: "?"} exec_ok=${diag.exec_ok} " +
-                    "min_supported=${diag.min_supported ?: "?"} " +
-                    "ejs_package=${diag.ejs_package}\n" +
-                    "  path=${diag.path ?: "<none>"}\n" +
-                    "  warnings:\n    " + diag.warnings.joinToString("\n    ") + "\n" +
-                    "Troubleshooting (§2.5.2 hot-swap / yt-dlp update regression): verify " +
-                    "core/node's bundled libnode.so is executable at nativeLibraryDir, its version is >= " +
-                    "${diag.min_supported ?: "22.0.0"}, and extract.py's _resolve_node_runtime() " +
-                    "locates it (bin/node symlink → libnode.so → PATH). Watch for this tag: " +
-                    "adb logcat -s SocialDL:JsRuntime"
-            )
-        }
-
-        if (parsed.error != null) {
-            // Log the envelope verbatim (error text only, never cookie values) — this
-            // is the ground truth needed to distinguish "cookies not loaded" from
-            // "session rejected" from "age-gate even with cookies" in the wild.
-            Logger.w(tag, "yt-dlp error envelope: ${parsed.error} | ${parsed.detail}")
-            parsed.debug_log?.takeIf { it.isNotBlank() }?.let {
-                Logger.w(tag, "yt-dlp debug_log:\n$it")
-            }
-            return ExtractionResult.Error(mapErrorKind(parsed.error, parsed.detail, Platform.YOUTUBE))
-        }
+        parsed.js_diagnostics?.let(::logJsDiagnostics)
 
         if (parsed.is_playlist) {
             // An empty playlist (private, deleted, or filtered out) must not fall through
@@ -289,6 +259,38 @@ class YoutubeExtractor @Inject constructor(
         }
     }
 
+    /**
+     * Logs yt-dlp's `js_diagnostics` when the failure envelope carries one. The
+     * diagnostic rides on the raw failure object, which [decodeEnvelope] keeps in
+     * [ExtractionEnvelope.Failure.raw].
+     */
+    private fun logJsDiagnosticsFromEnvelope(envelope: ExtractionEnvelope.Failure) {
+        runCatching {
+            envelope.raw?.get("js_diagnostics")
+                ?.takeUnless { it is JsonNull }
+                ?.let { ExtractionJson.decodeFromJsonElement<YtDlpJsDiagnostics>(it) }
+        }.getOrNull()?.let(::logJsDiagnostics)
+    }
+
+    private fun logJsDiagnostics(diag: YtDlpJsDiagnostics) {
+        Logger.e(
+            "JsRuntime",
+            "yt-dlp JS runtime chain DEGRADED — n/sig challenge solving will fail and " +
+                "stream formats may be silently missing.\n" +
+                "  runtime=${diag.runtime ?: "<none visible>"} " +
+                "version=${diag.version ?: "?"} exec_ok=${diag.exec_ok} " +
+                "min_supported=${diag.min_supported ?: "?"} " +
+                "ejs_package=${diag.ejs_package}\n" +
+                "  path=${diag.path ?: "<none>"}\n" +
+                "  warnings:\n    " + diag.warnings.joinToString("\n    ") + "\n" +
+                "Troubleshooting (§2.5.2 hot-swap / yt-dlp update regression): verify " +
+                "core/node's bundled libnode.so is executable at nativeLibraryDir, its version is >= " +
+                "${diag.min_supported ?: "22.0.0"}, and extract.py's _resolve_node_runtime() " +
+                "locates it (bin/node symlink → libnode.so → PATH). Watch for this tag: " +
+                "adb logcat -s SocialDL:JsRuntime"
+        )
+    }
+
     /** True when at least one format carries an audio or a video stream. */
     private fun YtDlpNormalizedResponse.hasUsableMedia(): Boolean = formats.any { format ->
         val hasVideo = format.vcodec != null && format.vcodec != "none"
@@ -320,7 +322,7 @@ class YoutubeExtractor @Inject constructor(
                     audioDtos.add(fDto)
                 }
                 hasVideo && hasAudio -> {
-                    progressiveFormats.add(mapProgressiveFormat(fDto, duration))
+                    progressiveFormats.add(mapVideoFormat(fDto, duration))
                 }
                 hasVideo && !hasAudio -> {
                     videoOnlyDtos.add(fDto)
@@ -347,7 +349,7 @@ class YoutubeExtractor @Inject constructor(
         videoFormats.addAll(progressiveFormats)
 
         for (vDto in videoOnlyDtos) {
-            videoFormats.add(mapVideoOnlyFormat(vDto, duration, bestAudio))
+            videoFormats.add(mapVideoFormat(vDto, duration, bestAudio))
         }
 
         // Sort video formats by height descending, then fps, then size — using typed
@@ -422,44 +424,25 @@ class YoutubeExtractor @Inject constructor(
         )
     }
 
-    private fun mapProgressiveFormat(dto: YtDlpFormatDto, durationSeconds: Int): MediaFormat {
-        val container = dto.ext?.uppercase() ?: "MP4"
-        val label = buildVideoLabel(dto)
-        val size = calculateApproxSize(dto, durationSeconds)
-
-        return MediaFormat(
-            id = dto.format_id,
-            kind = FormatKind.VIDEO,
-            container = container,
-            label = label,
-            codec = dto.vcodec,
-            approxSizeBytes = size.first,
-            isSizeEstimated = size.second,
-            fps = dto.fps?.roundToInt(),
-            height = dto.height,
-            isHdr = isHdrFormat(dto.dynamic_range),
-            directUrl = dto.url,
-            requiresMuxing = false,
-            httpChunkSizeBytes = extractChunkSize(dto)
-        )
-    }
-
-    private fun mapVideoOnlyFormat(
+    /**
+     * Maps one video format. With [pairedAudio] == null this is a progressive
+     * (already muxed) stream; with a paired audio format the stream is video-only
+     * and its reported size estimates include the audio bytes it must be muxed with.
+     */
+    private fun mapVideoFormat(
         dto: YtDlpFormatDto,
         durationSeconds: Int,
-        bestAudio: MediaFormat?
+        pairedAudio: MediaFormat? = null,
     ): MediaFormat {
         val container = dto.ext?.uppercase() ?: "MP4"
         val label = buildVideoLabel(dto)
         val (videoBytes, isEstimated) = calculateApproxSize(dto, durationSeconds)
-        val audioBytes = bestAudio?.approxSizeBytes
+        val audioBytes = pairedAudio?.approxSizeBytes
         val totalSize = if (videoBytes != null && audioBytes != null) {
             videoBytes + audioBytes
         } else {
             videoBytes
         }
-
-        val isHdr = isHdrFormat(dto.dynamic_range)
 
         return MediaFormat(
             id = dto.format_id,
@@ -468,13 +451,13 @@ class YoutubeExtractor @Inject constructor(
             label = label,
             codec = dto.vcodec,
             approxSizeBytes = totalSize,
-            isSizeEstimated = isEstimated || (bestAudio?.isSizeEstimated == true),
+            isSizeEstimated = isEstimated || (pairedAudio?.isSizeEstimated == true),
             fps = dto.fps?.roundToInt(),
             height = dto.height,
-            isHdr = isHdr,
+            isHdr = isHdrFormat(dto.dynamic_range),
             directUrl = dto.url,
-            requiresMuxing = bestAudio != null,
-            pairedAudioFormatId = bestAudio?.id,
+            requiresMuxing = pairedAudio != null,
+            pairedAudioFormatId = pairedAudio?.id,
             httpChunkSizeBytes = extractChunkSize(dto)
         )
     }

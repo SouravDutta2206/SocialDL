@@ -69,9 +69,6 @@ _TWEET_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Bare t.co short links (resolved by a redirect-following GET before parsing).
-_TCO_RE = re.compile(r"(?:https?://)?t\.co/\w+", re.IGNORECASE)
-
 # Syndication CDN endpoint and its required static parameters (reference :144–161).
 _SYNDICATION_URL = "https://cdn.syndication.twimg.com/tweet-result"
 
@@ -127,13 +124,12 @@ class _Failure(Exception):
 # ── Entry point ─────────────────────────────────────────────────────────────
 
 
-def extract(url, cookiefile=None, user_agent=None):
+def extract(url, cookiefile=None):
     """Returns the flat success payload or a typed failure envelope.
 
     ``cookiefile`` is the decrypted throwaway Netscape jar path handed in by
     ``CookieStore.withCookieFile(Platform.TWITTER)``, or ``None`` when no jar is
-    stored. ``user_agent`` pins gallery-dl to the same UA that created the
-    session in the capture WebView.
+    stored. No user-agent is pinned: X sessions are not UA-bound.
     """
     try:
         normalized = _normalize_url(url or "")
@@ -153,7 +149,7 @@ def extract(url, cookiefile=None, user_agent=None):
     gdl_auth_failure = False
     if cookiefile:
         try:
-            payload = _via_gallery_dl(normalized, cookiefile, user_agent)
+            payload = _via_gallery_dl(normalized, cookiefile)
             payload["engine"] = "gallery-dl"
             return succeed(payload)
         except _Failure as failure:
@@ -253,7 +249,7 @@ def _extract_tweet_id(url):
 # ── gallery-dl engine (metadata-only; mirror of gallery_dl_bridge/extract.py) ──
 
 
-def _via_gallery_dl(url, cookiefile, user_agent):
+def _via_gallery_dl(url, cookiefile):
     if not _GDL_AVAILABLE:
         raise RuntimeError("gallery-dl is not installed")
 
@@ -267,7 +263,6 @@ def _via_gallery_dl(url, cookiefile, user_agent):
     tweet, files = gallery_dl_util.extract_messages(
         url,
         cookiefile=cookiefile,
-        user_agent=user_agent,
         extractor_section="twitter",
         extractor_options={"videos": True, "previews": True},
     )

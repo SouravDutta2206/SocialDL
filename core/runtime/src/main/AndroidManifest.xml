@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Manually installed native helper packages. Package visibility on
+         Android 11+ requires these to be declared explicitly. -->
+    <queries>
+        <package android:name="com.socialdl.src.helper.ffmpeg" />
+        <package android:name="com.socialdl.src.helper.node" />
+    </queries>
+
 </manifest>

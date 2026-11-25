@@ -76,7 +76,6 @@ class MediaStoreExporter @Inject constructor(
     suspend fun export(
         file: File,
         title: String,
-        author: String?,
         container: String,
         kind: FormatKind,
         carouselIndex: Int? = null,

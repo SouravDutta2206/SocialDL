@@ -35,6 +35,11 @@ data class CookieCaptureConfig(
     /** Toolbar copy shown above the WebView. */
     val title: String,
     val subtitle: String,
+    /**
+     * Copy shown where platform extraction reports an auth wall: why the platform
+     * needs a session, and that the retry happens automatically after sign-in.
+     */
+    val authWallExplanation: String,
 )
 
 /**
@@ -94,6 +99,8 @@ private val CAPTURE_CONFIGS = listOf(
         allowedHostPatterns = listOf(CaptureHostPolicy.GOOGLE_COUNTRY_DOMAIN),
         title = "Sign in with YouTube",
         subtitle = "Sign in normally: tap the profile icon and log in. SocialDL never sees your password.",
+        authWallExplanation = "Age-restricted and bot-checked videos need a signed-in session. " +
+            "Sign in once with YouTube, then this video is retried automatically.",
     ),
     CookieCaptureConfig(
         platform = Platform.INSTAGRAM,
@@ -120,6 +127,8 @@ private val CAPTURE_CONFIGS = listOf(
         ),
         title = "Sign in with Instagram",
         subtitle = "Log in normally (2FA included). SocialDL never sees your password; only cookies are stored encrypted.",
+        authWallExplanation = "Private posts and reels need a signed-in session. " +
+            "Sign in once with Instagram, then this post is retried automatically.",
     ),
     CookieCaptureConfig(
         platform = Platform.TWITTER,
@@ -154,7 +163,6 @@ private val CAPTURE_CONFIGS = listOf(
             "apple.com",
             "icloud.com",
             "google.com",
-            "accounts.google.com",
             "gstatic.com",
             "googleapis.com",
         ),
@@ -163,6 +171,8 @@ private val CAPTURE_CONFIGS = listOf(
         allowedHostPatterns = listOf(CaptureHostPolicy.GOOGLE_COUNTRY_DOMAIN),
         title = "Sign in with X",
         subtitle = "Log in normally (2FA included). SocialDL never sees your password; only cookies are stored encrypted.",
+        authWallExplanation = "Protected or follow-gated posts need a signed-in session. " +
+            "Sign in once with X, then this post is retried automatically.",
     ),
     CookieCaptureConfig(
         platform = Platform.THREADS,
@@ -194,8 +204,20 @@ private val CAPTURE_CONFIGS = listOf(
         ),
         title = "Sign in with Threads",
         subtitle = "Log in normally (Instagram, Facebook or 2FA). SocialDL never sees your password; only cookies are stored encrypted.",
+        authWallExplanation = "Private or login-gated posts need a signed-in session. " +
+            "Sign in once with Threads, then this post is retried automatically.",
     ),
 ).associateBy { it.platform }
+
+/**
+ * Platforms that expose a WebView cookie-capture flow, in [CAPTURE_CONFIGS] order
+ * (`[YOUTUBE, INSTAGRAM, TWITTER, THREADS]`). UI surfaces iterate this instead of
+ * hardcoding the capturable platforms.
+ */
+val CAPTURABLE_PLATFORMS: List<Platform> = CAPTURE_CONFIGS.keys.toList()
+
+/** True when [platform] has a WebView cookie-capture flow. */
+fun supportsCookieCapture(platform: Platform): Boolean = platform in CAPTURE_CONFIGS
 
 /**
  * Resolves the capture flow for [platform]. Fail-closed: platforms without a

@@ -2,6 +2,51 @@ package com.socialdl.src.core.model
 
 import java.util.Locale
 
+/** Video codec families this app can stream-copy. */
+private enum class VideoCodecFamily { H264, HEVC, VP8, VP9, AV1 }
+
+/** Audio codec families a container can carry without re-encoding. */
+private enum class AudioCodecFamily { AAC, OPUS, VORBIS, MP3, PCM, AC3, FLAC, ALAC }
+
+/**
+ * Maps an ffmpeg/yt-dlp codec string to its video family; null when the codec is
+ * blank or unrecognized. Accepts both yt-dlp's short names and ISO-BMFF/Matroska
+ * codec strings ("avc1.640028", "hev1.1.6.L93.B0", "vp09.00.51.08",
+ * "AV01.0.08M.08").
+ */
+private fun parseVideoCodec(codec: String?): VideoCodecFamily? {
+    val c = codec.orEmpty().lowercase(Locale.ROOT)
+    return when {
+        c.startsWith("h264") || c.startsWith("h.264") || c.startsWith("avc") ->
+            VideoCodecFamily.H264
+        c.startsWith("hevc") || c.startsWith("h265") || c.startsWith("h.265") ||
+            c.startsWith("hvc") || c.startsWith("hev1") -> VideoCodecFamily.HEVC
+        c.startsWith("vp8") || c.startsWith("vp08") -> VideoCodecFamily.VP8
+        c.startsWith("vp9") || c.startsWith("vp09") -> VideoCodecFamily.VP9
+        c.startsWith("av1") || c.startsWith("av01") -> VideoCodecFamily.AV1
+        else -> null
+    }
+}
+
+/**
+ * Maps an ffmpeg/yt-dlp codec string to its audio family; null when the codec is
+ * blank or unrecognized. "mp4a.40.2" is the ISO-BMFF spelling of AAC.
+ */
+private fun parseAudioCodec(codec: String?): AudioCodecFamily? {
+    val c = codec.orEmpty().lowercase(Locale.ROOT)
+    return when {
+        c.startsWith("aac") || c.startsWith("mp4a") -> AudioCodecFamily.AAC
+        c.startsWith("opus") -> AudioCodecFamily.OPUS
+        c.startsWith("vorbis") -> AudioCodecFamily.VORBIS
+        c.startsWith("mp3") -> AudioCodecFamily.MP3
+        c.startsWith("pcm") -> AudioCodecFamily.PCM
+        c.contains("ac3") -> AudioCodecFamily.AC3
+        c.startsWith("flac") -> AudioCodecFamily.FLAC
+        c.startsWith("alac") -> AudioCodecFamily.ALAC
+        else -> null
+    }
+}
+
 /**
  * A concrete output container the downloader can produce.
  *
@@ -79,49 +124,39 @@ data class MediaContainer(
          * in MP4"), AV1 likewise, and WebM accepts only VP8/VP9/AV1.
          */
         fun videoCopyable(container: MediaContainer, codec: String?): Boolean {
-            val c = codec.orEmpty().lowercase(Locale.ROOT)
-            if (c.isEmpty()) return false
-            // Accept both yt-dlp's short names and ISO-BMFF/Matroska codec strings
-            // ("avc1.640028", "hev1.1.6.L93.B0", "vp09.00.51.08", "AV01.0.08M.08").
-            val h264 = c.startsWith("h264") || c.startsWith("h.264") || c.startsWith("avc")
-            val hevc = c.startsWith("hevc") || c.startsWith("h265") || c.startsWith("h.265") ||
-                c.startsWith("hvc") || c.startsWith("hev1")
-            val vp8 = c.startsWith("vp8") || c.startsWith("vp08")
-            val vp9 = c.startsWith("vp9") || c.startsWith("vp09")
-            val av1 = c.startsWith("av1") || c.startsWith("av01")
+            // An unknown video codec can never be proven copyable, MKV included.
+            val family = parseVideoCodec(codec) ?: return false
             return when (container) {
-                MKV -> h264 || hevc || vp8 || vp9 || av1
-                WEBM -> vp8 || vp9 || av1
-                MP4 -> h264 || hevc || vp9 || av1
-                MOV -> h264 || hevc
+                MKV -> true
+                WEBM -> family == VideoCodecFamily.VP8 || family == VideoCodecFamily.VP9 ||
+                    family == VideoCodecFamily.AV1
+                MP4 -> family == VideoCodecFamily.H264 || family == VideoCodecFamily.HEVC ||
+                    family == VideoCodecFamily.VP9 || family == VideoCodecFamily.AV1
+                MOV -> family == VideoCodecFamily.H264 || family == VideoCodecFamily.HEVC
                 else -> false
             }
         }
 
         /** True when [codec] can be stream-copied into [container] without re-encoding. */
         fun audioCopyable(container: MediaContainer, codec: String?): Boolean {
-            val c = codec.orEmpty().lowercase(Locale.ROOT)
-            if (c.isEmpty()) return false
-            // "mp4a.40.2" is the ISO-BMFF spelling of AAC (see nativeAudioFor).
-            val aac = c.startsWith("aac") || c.startsWith("mp4a")
-            val opus = c.startsWith("opus")
-            val vorbis = c.startsWith("vorbis")
-            val mp3 = c.startsWith("mp3")
-            val pcm = c.startsWith("pcm")
-            val ac3 = c.contains("ac3")
-            val flac = c.startsWith("flac")
-            val alac = c.startsWith("alac")
+            val raw = codec.orEmpty()
+            if (raw.isBlank()) return false
+            // Matroska accepts any codec pair losslessly — including codecs this
+            // app does not recognize by name.
+            if (container == MKV) return true
+            val family = parseAudioCodec(raw) ?: return false
             return when (container) {
-                // Matroska accepts any codec pair losslessly.
-                MKV -> true
-                WEBM -> opus || vorbis
-                MP4 -> aac || mp3 || ac3
-                MOV -> aac || mp3 || ac3 || pcm || alac
-                OPUS -> opus
-                M4A -> aac
-                MP3 -> mp3
-                FLAC -> flac
-                WAV -> pcm
+                WEBM -> family == AudioCodecFamily.OPUS || family == AudioCodecFamily.VORBIS
+                MP4 -> family == AudioCodecFamily.AAC || family == AudioCodecFamily.MP3 ||
+                    family == AudioCodecFamily.AC3
+                MOV -> family == AudioCodecFamily.AAC || family == AudioCodecFamily.MP3 ||
+                    family == AudioCodecFamily.AC3 || family == AudioCodecFamily.PCM ||
+                    family == AudioCodecFamily.ALAC
+                OPUS -> family == AudioCodecFamily.OPUS
+                M4A -> family == AudioCodecFamily.AAC
+                MP3 -> family == AudioCodecFamily.MP3
+                FLAC -> family == AudioCodecFamily.FLAC
+                WAV -> family == AudioCodecFamily.PCM
                 else -> false
             }
         }
@@ -273,14 +308,14 @@ data class MediaContainer(
          * default, so the untouched path stays a lossless copy.
          */
         private fun nativeAudioFor(format: MediaFormat): MediaContainer {
-            val codec = format.codec.orEmpty().lowercase(Locale.ROOT)
+            val family = parseAudioCodec(format.codec)
             val source = from(format.container)
             return when {
-                codec.startsWith("opus") || source == WEBM -> OPUS
-                codec.startsWith("aac") || codec.startsWith("mp4a") || source == M4A || source == MP4 -> M4A
-                codec.startsWith("mp3") || source == MP3 -> MP3
-                codec.startsWith("flac") || source == FLAC -> FLAC
-                codec.startsWith("pcm") || source == WAV -> WAV
+                family == AudioCodecFamily.OPUS || source == WEBM -> OPUS
+                family == AudioCodecFamily.AAC || source == M4A || source == MP4 -> M4A
+                family == AudioCodecFamily.MP3 || source == MP3 -> MP3
+                family == AudioCodecFamily.FLAC || source == FLAC -> FLAC
+                family == AudioCodecFamily.PCM || source == WAV -> WAV
                 else -> OPUS
             }
         }

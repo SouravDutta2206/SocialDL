@@ -12,7 +12,7 @@ import com.socialdl.src.core.database.entity.DownloadJobEntity
         DownloadHistoryEntity::class,
         DownloadJobEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class SocialDLDatabase : RoomDatabase() {

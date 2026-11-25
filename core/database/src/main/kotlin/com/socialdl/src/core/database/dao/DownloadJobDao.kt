@@ -53,9 +53,6 @@ interface DownloadJobDao {
     )
     suspend fun getActiveJobs(): List<DownloadJobEntity>
 
-    @Query("SELECT * FROM download_jobs WHERE sourceUrl = :sourceUrl")
-    suspend fun getJobsBySourceUrl(sourceUrl: String): List<DownloadJobEntity>
-
     /**
      * Idempotency lookup: the same stream slot already queued/running.
      *

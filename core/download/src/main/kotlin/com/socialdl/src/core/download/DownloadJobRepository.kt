@@ -216,15 +216,6 @@ class DownloadJobRepository @Inject constructor(
     // could interleave with a concurrent insert and drop a fresh failure card.
 
     /**
-     * Startup reconciliation failure write: jobs that lost their WorkManager work
-     * (process death, system kill) become FAILED(INTERRUPTED) cards, consistent
-     * with kill-on-fail.
-     */
-    suspend fun markInterruptedIfNotFailed(id: String) {
-        jobDao.markFailed(id, DownloadError.Interrupted.userMessage, now())
-    }
-
-    /**
      * Source statuses that may write a progress row for [target]. Same-status
      * ticks are allowed; anything after FAILED (or after cancellation, when the
      * row is gone) matches zero rows.

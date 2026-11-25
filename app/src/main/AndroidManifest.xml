@@ -12,13 +12,6 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
-    <!-- Manually installed native helper packages. Package visibility on
-         Android 11+ requires these to be declared explicitly. -->
-    <queries>
-        <package android:name="com.socialdl.src.helper.ffmpeg" />
-        <package android:name="com.socialdl.src.helper.node" />
-    </queries>
-
     <application
         android:name=".SocialDLApplication"
         android:allowBackup="false"
@@ -43,12 +36,6 @@
 
         <!-- WorkManager foreground execution (P1-1): the dataSync service type is
              declared by :core:download, the module that promotes the job. -->
-
-        <!-- In-notification Cancel action: removes the Room row (instant UI
-             deletion) then cancels the WorkManager job. -->
-        <receiver
-            android:name="com.socialdl.src.core.download.DownloadCancelReceiver"
-            android:exported="false" />
 
         <activity
             android:name=".MainActivity"

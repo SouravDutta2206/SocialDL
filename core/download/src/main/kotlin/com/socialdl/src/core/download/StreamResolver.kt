@@ -4,7 +4,6 @@ import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadStatus
 import com.socialdl.src.core.model.FormatKind
-import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.MuxStrategy
@@ -13,7 +12,6 @@ import com.socialdl.src.extraction.api.ExtractionResult
 import com.socialdl.src.extraction.api.ExtractorRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
-import java.util.Locale
 import javax.inject.Inject
 
 /** Effective stream configuration after optional JIT resolution of a placeholder format. */
@@ -234,36 +232,26 @@ class StreamResolver @Inject constructor(
                     // Only accept an explicit container when it is actually
                     // producible for this stream; otherwise adopt the codec-derived
                     // container instead of relabeling bytes (P0-5/P0-6).
-                    val autoContainer = MediaContainer.recommendedFor(resolvedFormat)
-                    val requestedContainer = job.container
-                        .takeIf { it.isNotBlank() && !it.equals("Default", ignoreCase = true) }
-                    effectiveContainer = requestedContainer
-                        ?.takeIf { MediaContainer.isCompatible(resolvedFormat, it) }
-                        ?.let { MediaContainer.extensionOf(it) }
-                        ?: autoContainer.extension
-                    effectiveContainer = effectiveContainer.uppercase(Locale.ROOT)
-
                     // Force-H.264 applies only to muxed, non-HDR streams: a full
                     // re-encode of HDR would destroy the dynamic range.
-                    if (forceH264 && resolvedFormat.requiresMuxing && !resolvedFormat.isHdr) {
-                        effectiveContainer = MediaContainer.MP4.extension.uppercase(Locale.ROOT)
-                        effectiveMuxStrategy = MuxStrategy.FORCE_H264
-                    }
+                    val plan = resolveOutputPlan(
+                        format = resolvedFormat,
+                        requestedContainer = job.container,
+                        forceH264Setting = forceH264,
+                        preserveBlankForPlaceholder = false,
+                    )
+                    effectiveContainer = plan.container
+                    effectiveMuxStrategy = plan.muxStrategy ?: effectiveMuxStrategy
 
                     if (resolvedFormat.requiresMuxing) {
                         // Prefer the paired stream, but never re-request an audio
                         // URL the CDN just refused. Fall back to the paired id,
                         // then to any audio format, only when nothing else exists.
-                        val pairedAudio = resolvedItem.audioFormats
-                            .firstOrNull {
-                                it.id == resolvedFormat.pairedAudioFormatId &&
-                                    it.directUrl != rejectedAudioUrl
-                            }
-                            ?: resolvedItem.audioFormats
-                                .firstOrNull { it.directUrl != rejectedAudioUrl }
-                            ?: resolvedItem.audioFormats
-                                .firstOrNull { it.id == resolvedFormat.pairedAudioFormatId }
-                            ?: resolvedItem.audioFormats.firstOrNull()
+                        val pairedAudio = selectPairedAudio(
+                            audioFormats = resolvedItem.audioFormats,
+                            pairedAudioFormatId = resolvedFormat.pairedAudioFormatId,
+                            rejectedAudioUrl = rejectedAudioUrl,
+                        )
                         effectiveAudioDirectUrl = pairedAudio?.directUrl
                         effectiveAudioChunkSize = pairedAudio?.httpChunkSizeBytes ?: 0L
                     }

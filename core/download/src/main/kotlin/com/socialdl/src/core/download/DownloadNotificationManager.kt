@@ -155,7 +155,19 @@ class DownloadNotificationManager @Inject constructor(
                 DownloadCancelReceiver.pendingIntent(context, jobId)
             )
 
-        BuilderProgress.apply(builder, status, percent, knownTotal)
+        when (status) {
+            DownloadStatus.DOWNLOADING, DownloadStatus.QUEUED ->
+                if (knownTotal) {
+                    builder.setProgress(100, percent, percent == 0)
+                } else {
+                    // No usable total: the percent would be a lie, so show an
+                    // indeterminate bar and let the text carry the byte count.
+                    builder.setProgress(0, 0, true)
+                }
+            DownloadStatus.MUXING, DownloadStatus.EXPORTING ->
+                builder.setProgress(0, 0, true)
+            else -> Unit
+        }
 
         return builder.build()
     }
@@ -178,30 +190,6 @@ fun jobIdNotificationId(jobId: String): Int =
         val uuid = UUID.fromString(jobId)
         (uuid.mostSignificantBits xor uuid.leastSignificantBits).toInt()
     }.getOrDefault(jobId.hashCode())
-
-// Room for progress wiring without polluting the class body.
-private object BuilderProgress {
-    fun apply(
-        builder: NotificationCompat.Builder,
-        status: DownloadStatus,
-        percent: Int,
-        knownTotal: Boolean
-    ) {
-        when (status) {
-            DownloadStatus.DOWNLOADING, DownloadStatus.QUEUED ->
-                if (knownTotal) {
-                    builder.setProgress(100, percent, percent == 0)
-                } else {
-                    // No usable total: the percent would be a lie, so show an
-                    // indeterminate bar and let the text carry the byte count.
-                    builder.setProgress(0, 0, true)
-                }
-            DownloadStatus.MUXING, DownloadStatus.EXPORTING ->
-                builder.setProgress(0, 0, true)
-            else -> Unit
-        }
-    }
-}
 
 /**
  * The in-notification Cancel action (P1-1): runs the SAME instant-deletion

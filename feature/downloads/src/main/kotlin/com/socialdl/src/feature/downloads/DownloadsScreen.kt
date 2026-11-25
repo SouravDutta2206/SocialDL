@@ -3,7 +3,6 @@ package com.socialdl.src.feature.downloads
 import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,12 +35,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import kotlinx.coroutines.flow.collect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,6 +62,7 @@ import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.ui.component.SocialDLToastHost
 import com.socialdl.src.core.ui.component.ToastMessage
 import com.socialdl.src.core.ui.component.ToastType
+import com.socialdl.src.core.ui.component.rememberToastState
 import com.socialdl.src.core.ui.theme.SocialDLAccent
 import com.socialdl.src.core.ui.theme.SocialDLBg
 import com.socialdl.src.core.ui.theme.SocialDLCard
@@ -84,18 +80,7 @@ fun DownloadsScreen(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
-
-    LaunchedEffect(Unit) {
-        // One-shot messages from the VM (deletion failures, download completions)
-        // surfaced as styled app toasts — same mechanism and look as Home.
-        viewModel.messages.collect { msg ->
-            toastMessage = ToastMessage(
-                message = msg.message,
-                type = if (msg.isError) ToastType.ERROR else ToastType.SUCCESS
-            )
-        }
-    }
+    var toastMessage by rememberToastState(viewModel.messages)
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -231,7 +216,10 @@ fun DownloadsScreen(
                                         })
                                     } catch (e: Exception) {
                                         Logger.e("DownloadsScreen", "Failed to open media", e)
-                                        Toast.makeText(context, "No app available to open this file", Toast.LENGTH_SHORT).show()
+                                        toastMessage = ToastMessage(
+                                            message = "No app available to open this file",
+                                            type = ToastType.ERROR
+                                        )
                                     }
                                 },
                                 onShare = {
@@ -254,7 +242,10 @@ fun DownloadsScreen(
                                         })
                                     } catch (e: Exception) {
                                         Logger.e("DownloadsScreen", "Failed to share media", e)
-                                        Toast.makeText(context, "No app available to share this file", Toast.LENGTH_SHORT).show()
+                                        toastMessage = ToastMessage(
+                                            message = "No app available to share this file",
+                                            type = ToastType.ERROR
+                                        )
                                     }
                                 },
                                 onDelete = { viewModel.deleteHistory(history) }

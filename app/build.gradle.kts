@@ -98,14 +98,9 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.material)
     implementation(libs.lifecycle.runtime.ktx)
-    implementation(libs.lifecycle.runtime.compose)
 
-    // Compose
+    // Compose (UI, Material3 and icons are exposed as `api` by :core:ui)
     implementation(platform(libs.compose.bom))
-    implementation(libs.compose.ui)
-    implementation(libs.compose.ui.graphics)
-    implementation(libs.compose.material3)
-    implementation(libs.compose.material.icons.extended)
     debugImplementation(libs.compose.ui.tooling)
     implementation(libs.compose.ui.tooling.preview)
 

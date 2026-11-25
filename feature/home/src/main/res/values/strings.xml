@@ -7,4 +7,12 @@
     <string name="home_error_presets_failed">Failed to load presets: %1$s</string>
     <string name="home_info_loaded">Loaded: %1$s</string>
     <string name="home_error_extraction">Extraction error: %1$s</string>
+    <string name="home_download_queued">Download queued: %1$s (%2$s)</string>
+    <string name="home_error_queue_failed">Couldn\'t queue download: %1$s</string>
+    <string name="home_batch_none_queued">No downloads were queued</string>
+    <string name="home_batch_queued_one">Queued 1 download</string>
+    <string name="home_batch_queued_many">Queued %1$d downloads</string>
+    <string name="home_error_batch_queue_failed">Couldn\'t queue downloads: %1$s</string>
+    <string name="home_error_no_media">This post has no downloadable media</string>
+    <string name="home_signed_in_repaste">Signed in — paste the link again to download</string>
 </resources>

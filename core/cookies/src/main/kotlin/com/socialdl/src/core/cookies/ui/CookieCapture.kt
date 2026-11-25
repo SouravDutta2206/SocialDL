@@ -116,20 +116,20 @@ class CookieCaptureViewModel @Inject constructor(
         // A platform switch must never show the previous platform's config (or a
         // stale init error) while the new config resolves.
         _uiState.update { it.copy(config = null, initError = null) }
-        viewModelScope.launch {
-            runCatching { controller.config(platform) }
-                .onSuccess { config ->
-                    _uiState.update { it.copy(config = config) }
+        // The config table is pure data: resolve it synchronously so the WebView
+        // never waits on a dispatcher for values that are already in memory.
+        runCatching { controller.config(platform) }
+            .onSuccess { config ->
+                _uiState.update { it.copy(config = config) }
+            }
+            .onFailure { error ->
+                _uiState.update {
+                    it.copy(
+                        initError = error.message
+                            ?: "Cookie sign-in is not available for this platform"
+                    )
                 }
-                .onFailure { error ->
-                    _uiState.update {
-                        it.copy(
-                            initError = error.message
-                                ?: "Cookie sign-in is not available for this platform"
-                        )
-                    }
-                }
-        }
+            }
     }
 
     /** Tracks the most recent URL for the manual fallback path. */

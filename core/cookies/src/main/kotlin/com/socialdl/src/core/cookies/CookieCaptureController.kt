@@ -35,8 +35,8 @@ class CookieCaptureController @Inject constructor(
 
     private val tag = "CookieCapture"
 
-    /** Resolves the flow config for [platform]. */
-    suspend fun config(platform: Platform): CookieCaptureConfig =
+    /** Resolves the flow config for [platform]. Pure table lookup; no suspension. */
+    fun config(platform: Platform): CookieCaptureConfig =
         cookieCaptureConfig(platform)
 
     /**

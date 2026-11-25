@@ -204,7 +204,7 @@ def _js_runtime_degraded(diag, debug_logger):
     """True when the runtime chain can't run the challenge solver: no runtime at
     all, a runtime that fails exec/versions, or degradation warnings in yt-dlp's
     own log lines."""
-    warnings = [
+    marker_warnings = [
         line for line in debug_logger.lines
         if any(marker in line for marker in _JS_DEGRADATION_MARKERS)
     ]
@@ -212,9 +212,21 @@ def _js_runtime_degraded(diag, debug_logger):
         diag["runtime"] is None
         or diag["exec_ok"] is False
         or diag.get("ejs_package") is not True
-        or bool(warnings)
+        or bool(marker_warnings)
     )
-    return degraded, warnings
+    if not degraded:
+        return False, []
+    # Include all warning/error/jsc context lines so the preceding cause of a
+    # challenge-solving failure is never stripped out.
+    context_warnings = [
+        line for line in debug_logger.lines
+        if line.startswith("[warn]")
+        or line.startswith("[error]")
+        or "[jsc" in line.lower()
+        or "challenge" in line.lower()
+        or "solving js" in line.lower()
+    ]
+    return True, context_warnings or marker_warnings
 
 
 def warmup():
@@ -247,7 +259,7 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
     is_playlist = _is_playlist_url(url)
     ydl_opts = {
         "quiet": True,
-        "no_warnings": True,
+        "no_warnings": False,        # captured silently by debug_logger for diagnostics
         "skip_download": True,       # metadata only — never triggers a download
         "noplaylist": not is_playlist,  # allow playlist extraction only for real playlist URLs
         "extract_flat": "in_playlist" if is_playlist else False,  # flat metadata for playlists
@@ -264,16 +276,20 @@ def extract(url: str, cookiefile: str | None = None, node_dir: str | None = None
         # paste can't expand into thousands of metadata requests.
         ydl_opts["playlistend"] = 200
 
-    node_bin = _resolve_node_runtime(node_dir, native_bin_dir)
+    # The native env must be in place before the probe execs `node --version`:
+    # libnode's support libraries (e.g. libz.so.1) are only reachable through
+    # LD_LIBRARY_PATH. No-op when the Kotlin side supplied nothing. The probe
+    # resolves the runtime itself, so this is the only resolution per extraction.
+    _ensure_native_env(native_ld_library_path)
+    js_diag = _probe_js_runtime(node_dir, native_bin_dir)
+    node_bin = js_diag.get("path")
     if node_bin:
         # yt-dlp 2026.10+ enables ONLY deno by default (utils/_jsruntime.py); node
         # must be registered explicitly via the `js_runtimes` option, else the
         # n/sig challenges fail and every GVS format is dropped. The path accepts
         # a direct file path, so Android's nativeLibraryDir/libnode.so works as-is.
         ydl_opts["js_runtimes"] = {"node": {"path": node_bin}}
-        _ensure_native_env(native_ld_library_path)
 
-    js_diag = _probe_js_runtime(node_dir, native_bin_dir)
     debug_logger = _DebugLogCollector()
     ydl_opts["logger"] = debug_logger
 
@@ -331,9 +347,7 @@ def _js_diagnostics(js_diag, debug_logger):
 
 
 def _maybe_attach_js_diagnostics(payload, js_diag, debug_logger):
-    degraded, warnings = _js_runtime_degraded(js_diag, debug_logger)
-    if degraded:
-        payload["js_diagnostics"] = {**js_diag, "warnings": warnings[-10:]}
+    payload.update(_js_diagnostics(js_diag, debug_logger))
     return payload
 
 

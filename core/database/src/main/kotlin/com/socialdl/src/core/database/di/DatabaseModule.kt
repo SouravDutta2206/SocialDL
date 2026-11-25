@@ -106,6 +106,72 @@ object DatabaseModule {
         }
     }
 
+    /**
+     * v5 → v6: drop five never-used `download_jobs` columns (`workId`, `groupId`,
+     * `outputUri`, `fileSizeBytes`, `audioContainer`).
+     *
+     * minSdk is 24 and `ALTER TABLE ... DROP COLUMN` needs SQLite 3.35 (API 34), so
+     * the table is recreated: create the narrowed table, copy every surviving
+     * column, swap the tables, then recreate both indices.
+     */
+    val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS `download_jobs_new` (" +
+                    "`id` TEXT NOT NULL, " +
+                    "`sourceUrl` TEXT NOT NULL, " +
+                    "`title` TEXT NOT NULL, " +
+                    "`author` TEXT, " +
+                    "`thumbnailUrl` TEXT, " +
+                    "`platform` TEXT NOT NULL, " +
+                    "`carouselIndex` INTEGER NOT NULL, " +
+                    "`formatId` TEXT NOT NULL, " +
+                    "`formatLabel` TEXT NOT NULL, " +
+                    "`formatKind` TEXT NOT NULL, " +
+                    "`container` TEXT NOT NULL, " +
+                    "`status` TEXT NOT NULL, " +
+                    "`progress` REAL NOT NULL, " +
+                    "`downloadedBytes` INTEGER NOT NULL, " +
+                    "`totalBytes` INTEGER, " +
+                    "`errorMessage` TEXT, " +
+                    "`pendingUri` TEXT, " +
+                    "`directUrl` TEXT, " +
+                    "`requiresMuxing` INTEGER NOT NULL, " +
+                    "`audioDirectUrl` TEXT, " +
+                    "`muxStrategy` TEXT, " +
+                    "`videoChunkSize` INTEGER NOT NULL, " +
+                    "`audioChunkSize` INTEGER NOT NULL, " +
+                    "`isPlaceholder` INTEGER NOT NULL, " +
+                    "`createdAt` INTEGER NOT NULL, " +
+                    "`updatedAt` INTEGER NOT NULL, " +
+                    "PRIMARY KEY(`id`))"
+            )
+            db.execSQL(
+                "INSERT INTO `download_jobs_new` (" +
+                    "id, sourceUrl, title, author, thumbnailUrl, platform, carouselIndex, " +
+                    "formatId, formatLabel, formatKind, container, status, progress, " +
+                    "downloadedBytes, totalBytes, errorMessage, pendingUri, directUrl, " +
+                    "requiresMuxing, audioDirectUrl, muxStrategy, videoChunkSize, " +
+                    "audioChunkSize, isPlaceholder, createdAt, updatedAt) " +
+                    "SELECT id, sourceUrl, title, author, thumbnailUrl, platform, carouselIndex, " +
+                    "formatId, formatLabel, formatKind, container, status, progress, " +
+                    "downloadedBytes, totalBytes, errorMessage, pendingUri, directUrl, " +
+                    "requiresMuxing, audioDirectUrl, muxStrategy, videoChunkSize, " +
+                    "audioChunkSize, isPlaceholder, createdAt, updatedAt FROM `download_jobs`"
+            )
+            db.execSQL("DROP TABLE `download_jobs`")
+            db.execSQL("ALTER TABLE `download_jobs_new` RENAME TO `download_jobs`")
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_download_jobs_status` " +
+                    "ON `download_jobs` (`status`)"
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_download_jobs_sourceUrl` " +
+                    "ON `download_jobs` (`sourceUrl`)"
+            )
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): SocialDLDatabase {
@@ -118,7 +184,7 @@ object DatabaseModule {
         // otherwise Room fails loudly instead of silently wiping download history.
         // (Room 2.6.1 supports the vararg `fallbackToDestructiveMigrationFrom` overload.)
         ).fallbackToDestructiveMigrationFrom(1)
-            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .build()
     }
 

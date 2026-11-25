@@ -18,7 +18,6 @@ val SocialDLSurfaceContainerHigh = Color(0xFF2C2B36) // Dropdown menu background
 
 // ── Interactive elements ──
 val SocialDLButton = Color(0xFF3E4559)            // Slate-blue pill buttons
-val SocialDLButtonHover = Color(0xFF4A536B)       // Button hover state
 val SocialDLActivePill = Color(0xFF3D4558)        // Bottom nav active pill fill
 
 // ── Accent ──
@@ -32,7 +31,6 @@ val SocialDLOnSurfaceDim = Color(0xFF94A3B8)      // slate-400 — readable on S
 
 // ── Status / semantic ──
 val SocialDLSuccess = Color(0xFF34D399)           // emerald-400
-val SocialDLWarning = Color(0xFFFBBF24)           // amber-400
 val SocialDLError = Color(0xFFEF4444)             // Same as accent (red)
 
 // ── Format badge colors ──

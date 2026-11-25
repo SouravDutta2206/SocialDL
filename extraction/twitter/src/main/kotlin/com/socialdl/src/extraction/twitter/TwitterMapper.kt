@@ -5,7 +5,8 @@ import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
-import kotlin.math.roundToInt
+import com.socialdl.src.extraction.api.mapCarouselMediaItems
+import com.socialdl.src.extraction.api.singleDirectFormat
 
 /**
  * Pure DTO → model mapping (no Android/Python dependencies), so fixture tests can
@@ -30,72 +31,41 @@ internal suspend fun mapTwitterItems(
     sourceUrl: String,
     storeThumbnail: suspend (String?) -> String?,
 ): List<MediaItem> {
-    if (dto.items.isEmpty()) return emptyList()
-
-    // Filter before computing the carousel shape: blank media elements are not
-    // downloadable, so "1 real + 1 broken" must stay a single card.
-    val validItems = dto.items.filter { !it.url.isNullOrBlank() }
-    if (validItems.isEmpty()) return emptyList()
-
-    val isCarousel = validItems.size > 1
     val title = dto.caption?.trim()?.takeIf { it.isNotEmpty() } ?: "Twitter/X Post"
 
-    return validItems.mapIndexedNotNull { index, item ->
-        val directUrl = item.url!!.takeIf { it.isNotBlank() } ?: return@mapIndexedNotNull null
-        val mediaType = item.media_type.orEmpty().lowercase()
-        val isGif = mediaType == "animated_gif"
-        val isVideo = mediaType == "video"
-        // Video/GIF CDN URLs are mp4 payloads AsyncImage cannot decode — using
-        // one as a fallback renders a permanently black card. Only true image
-        // cards may fall back to their own CDN URL (it is a real image).
-        val isVideoKind = isVideo || isGif
-        val rawThumb = item.thumbnail_url?.takeIf { it.isNotBlank() }
-        val thumbnailUrl = rawThumb?.let { storeThumbnail(it) ?: it }
-            ?: if (!isVideoKind) directUrl else null
+    return mapCarouselMediaItems(
+        items = dto.items,
+        platform = Platform.TWITTER,
+        sourceUrl = sourceUrl,
+        title = title,
+        author = dto.owner,
+        storeThumbnail = storeThumbnail,
+        directUrlOf = { it.url },
+        isVideoOf = { item ->
+            val mediaType = item.media_type.orEmpty().lowercase()
+            mediaType == "video" || mediaType == "animated_gif"
+        },
+        posterUrlOf = { it.thumbnail_url },
+        durationOf = { it.duration },
         // The bridge numbers items 1-based; fall back to the list position so a
         // payload with 0/duplicate indexes still numbers the carousel.
-        val carouselIndex = if (isCarousel) {
-            item.index.takeIf { it > 0 } ?: (index + 1)
-        } else {
-            null
-        }
-
-        if (isVideo || isGif) {
-            val formats = videoFormats(item, directUrl, isGif)
-            MediaItem(
-                platform = Platform.TWITTER,
-                sourceUrl = sourceUrl,
-                title = title,
-                author = dto.owner,
-                durationSeconds = item.duration?.roundToInt()?.takeIf { it > 0 },
-                thumbnailUrl = thumbnailUrl,
-                isCarousel = isCarousel,
-                carouselIndex = carouselIndex,
-                videoFormats = formats,
+        carouselIndexOf = { index, item -> item.index.takeIf { it > 0 } ?: (index + 1) },
+        cacheImageDirectUrl = false,
+        videoFormatsOf = { _, item, directUrl ->
+            val isGif = item.media_type.orEmpty().lowercase() == "animated_gif"
+            videoFormats(item, directUrl, isGif)
+        },
+        imageFormatsOf = { _, item, directUrl ->
+            listOf(
+                singleDirectFormat(
+                    id = "image_${item.index}",
+                    directUrl = directUrl,
+                    isVideo = false,
+                    label = "Photo",
+                )
             )
-        } else {
-            val container = MediaContainer.fromUrl(directUrl, MediaContainer.JPEG)
-            MediaItem(
-                platform = Platform.TWITTER,
-                sourceUrl = sourceUrl,
-                title = title,
-                author = dto.owner,
-                thumbnailUrl = thumbnailUrl,
-                isCarousel = isCarousel,
-                carouselIndex = carouselIndex,
-                imageFormats = listOf(
-                    MediaFormat(
-                        id = "image_${item.index}",
-                        kind = FormatKind.IMAGE,
-                        container = container.extension.uppercase(),
-                        label = "Photo",
-                        directUrl = directUrl,
-                        requiresMuxing = false,
-                    )
-                ),
-            )
-        }
-    }
+        },
+    )
 }
 
 private fun videoFormats(
@@ -132,16 +102,13 @@ private fun videoFormats(
 
     // Defensive: the bridge always supplies variants for video/GIF elements,
     // but an older/partial payload must still map to a downloadable format.
-    val container = MediaContainer.fromUrl(directUrl, MediaContainer.MP4)
     val fallbackId = "video_${item.index}"
     return listOf(
-        MediaFormat(
+        singleDirectFormat(
             id = if (usedIds.add(fallbackId)) fallbackId else "${fallbackId}_1",
-            kind = FormatKind.VIDEO,
-            container = container.extension.uppercase(),
-            label = if (isGif) "GIF (MP4)" else "Video",
             directUrl = directUrl,
-            requiresMuxing = false,
+            isVideo = true,
+            label = if (isGif) "GIF (MP4)" else "Video",
         )
     )
 }

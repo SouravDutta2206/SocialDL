@@ -1,8 +1,5 @@
 package com.socialdl.src.feature.settings
 
-import android.content.Intent
-import android.net.Uri
-import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,8 +20,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.AlternateEmail
 import androidx.compose.material.icons.filled.Cookie
-import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tag
@@ -62,73 +57,61 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.socialdl.src.core.cookies.CAPTURABLE_PLATFORMS
 import com.socialdl.src.core.model.Platform
-import com.socialdl.src.core.ui.component.SocialDLToastHost
-import com.socialdl.src.core.ui.component.ToastMessage
-import com.socialdl.src.core.ui.component.ToastType
 import com.socialdl.src.core.ui.theme.SocialDLAccent
 import com.socialdl.src.core.ui.theme.SocialDLBg
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 
 /** Which SettingsRow section is currently expanded (null = none). */
-private enum class SettingsSection { GENERAL, FOLDERS, LOGS, ABOUT }
+private enum class SettingsSection { GENERAL, ABOUT }
 
 /** Display metadata for one platform's cookie section (panel + clear confirmation). */
 private data class CookieSection(
     val platform: Platform,
     val icon: ImageVector,
-    val title: String,
     val subtitle: String,
-    /** Brand alone, for the "Sign in with …" button. */
-    val signInLabel: String,
-    val clearTitle: String,
     val clearText: String,
     /** Extra guidance shown while signed out; null when the platform needs none. */
     val signedOutHint: String? = null,
 )
 
-private val COOKIE_SECTIONS = listOf(
-    CookieSection(
+/** Static copy per capturable platform; the capture table owns order and membership. */
+private val sectionByPlatform = mapOf(
+    Platform.YOUTUBE to CookieSection(
         platform = Platform.YOUTUBE,
         icon = Icons.Default.Cookie,
-        title = "YouTube cookies",
         subtitle = "Sign in with WebView, Import cookies.txt, Member access",
-        signInLabel = "YouTube",
-        clearTitle = "Clear YouTube cookies?",
         clearText = "Age-restricted and member-only downloads will stop working until you sign in again. Encrypted cookies are deleted from this device.",
     ),
-    CookieSection(
+    Platform.INSTAGRAM to CookieSection(
         platform = Platform.INSTAGRAM,
         icon = Icons.Default.AccountCircle,
-        title = "Instagram cookies",
         subtitle = "Sign in with WebView, Private posts and reels",
-        signInLabel = "Instagram",
-        clearTitle = "Clear Instagram cookies?",
         clearText = "Private posts and reels will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
     ),
-    CookieSection(
+    Platform.TWITTER to CookieSection(
         platform = Platform.TWITTER,
         icon = Icons.Default.Tag,
-        title = "X (Twitter) cookies",
         subtitle = "Sign in with WebView, Protected posts, Import cookies.txt",
-        signInLabel = "X",
-        clearTitle = "Clear X cookies?",
         clearText = "Protected and follow-gated content will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
         signedOutHint = "If sign-in is ever refused with \"temporarily limited your login\", " +
             "wait a few minutes and retry, or log in at x.com in a browser, export " +
             "cookies.txt, and import it below.",
     ),
-    CookieSection(
+    Platform.THREADS to CookieSection(
         platform = Platform.THREADS,
         icon = Icons.Default.AlternateEmail,
-        title = "Threads cookies",
         subtitle = "Sign in with WebView, Private or login-gated posts, Import cookies.txt",
-        signInLabel = "Threads",
-        clearTitle = "Clear Threads cookies?",
         clearText = "Private and login-gated Threads posts will stop resolving until you sign in again. Encrypted cookies are deleted from this device.",
     ),
 )
+
+// Order mirrors the capture table, so adding a platform there also places its row.
+private val COOKIE_SECTIONS: List<CookieSection> = CAPTURABLE_PLATFORMS.map { platform ->
+    sectionByPlatform.getValue(platform)
+}
 
 @Composable
 fun SettingsScreen(
@@ -140,12 +123,10 @@ fun SettingsScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val cookieStates by viewModel.cookieStates.collectAsStateWithLifecycle()
-    val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
     var expandedSection by remember { mutableStateOf<SettingsSection?>(null) }
     var expandedCookie by remember { mutableStateOf<Platform?>(null) }
     var pendingClear by remember { mutableStateOf<Platform?>(null) }
-    var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
 
     /**
      * Expand/collapse a non-cookie accordion. Opening any of these collapses an
@@ -188,52 +169,6 @@ fun SettingsScreen(
     BackHandler(enabled = expandedSection != null || expandedCookie != null) {
         expandedSection = null
         expandedCookie = null
-    }
-
-    // SAF folder pickers; picked tree URIs are persisted in prefs (storage only —
-    // the download pipeline consumes them later, per the deferred plan item).
-    val videoFolderPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        uri?.let { pickedUri ->
-            // Only persist the folder once the grant is durable; a non-persisted
-            // URI would silently lose access after a restart.
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(
-                    pickedUri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-            }.onSuccess {
-                viewModel.setVideoFolder(pickedUri)
-            }.onFailure { error ->
-                // :feature:settings has no dependency on :core:common, so use Log.
-                Log.w("SettingsScreen", "Could not persist SAF folder permission", error)
-                toastMessage = ToastMessage(
-                    message = "Couldn't get persistent access to the selected folder",
-                    type = ToastType.ERROR
-                )
-            }
-        }
-    }
-    val audioFolderPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        uri?.let { pickedUri ->
-            runCatching {
-                context.contentResolver.takePersistableUriPermission(
-                    pickedUri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-            }.onSuccess {
-                viewModel.setAudioFolder(pickedUri)
-            }.onFailure { error ->
-                Log.w("SettingsScreen", "Could not persist SAF folder permission", error)
-                toastMessage = ToastMessage(
-                    message = "Couldn't get persistent access to the selected folder",
-                    type = ToastType.ERROR
-                )
-            }
-        }
     }
 
     Box(
@@ -279,7 +214,7 @@ fun SettingsScreen(
                     SettingsRow(
                         icon = Icons.Default.Settings,
                         title = "General",
-                        subtitle = "Theme, Preferred search engine, Downloads",
+                        subtitle = "Concurrency, Wi-Fi only, H.264 transcode",
                         expanded = expandedSection == SettingsSection.GENERAL,
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -291,8 +226,6 @@ fun SettingsScreen(
                     item {
                         GeneralSettingsPanel(
                             uiState = uiState,
-                            onCycleTheme = viewModel::onCycleTheme,
-                            onCycleSearchEngine = viewModel::onCycleSearchEngine,
                             onMaxConcurrentChanged = viewModel::setMaxConcurrentDownloads,
                             onWifiOnlyChanged = viewModel::setWifiOnlyDownloads,
                             onForceH264Changed = viewModel::setForceH264Transcode
@@ -300,37 +233,14 @@ fun SettingsScreen(
                     }
                 }
 
-                item {
-                    SettingsRow(
-                        icon = Icons.Default.Folder,
-                        title = "Folders",
-                        subtitle = "Audio folder, Video folder, Custom command folder",
-                        expanded = expandedSection == SettingsSection.FOLDERS,
-                        onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            toggleSection(SettingsSection.FOLDERS)
-                        }
-                    )
-                }
-                if (expandedSection == SettingsSection.FOLDERS) {
-                    item {
-                        FoldersSettingsPanel(
-                            videoFolderName = uiState.videoFolderUri.toFolderDisplayName(),
-                            audioFolderName = uiState.audioFolderUri.toFolderDisplayName(),
-                            onPickVideoFolder = { videoFolderPicker.launch(null) },
-                            onPickAudioFolder = { audioFolderPicker.launch(null) }
-                        )
-                    }
-                }
-
-                // One row + panel per capturable platform (§2.6). Adding a platform is
-                // one entry in COOKIE_SECTIONS, not another copy of this block.
+                // One row + panel per capturable platform (§2.6). Order and membership
+                // come from CAPTURABLE_PLATFORMS, not another copy of this block.
                 COOKIE_SECTIONS.forEach { section ->
                     val state = cookieStates[section.platform] ?: SettingsViewModel.CookiesUiState()
                     item(key = "cookie_${section.platform}") {
                         SettingsRow(
                             icon = section.icon,
-                            title = section.title,
+                            title = "${section.platform.displayName} cookies",
                             subtitle = section.subtitle,
                             expanded = expandedCookie == section.platform,
                             onClick = {
@@ -359,25 +269,9 @@ fun SettingsScreen(
 
                 item {
                     SettingsRow(
-                        icon = Icons.Default.Description,
-                        title = "Logs",
-                        subtitle = "Application logs, yt-dlp terminal output, Debug info",
-                        expanded = expandedSection == SettingsSection.LOGS,
-                        onClick = {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            toggleSection(SettingsSection.LOGS)
-                        }
-                    )
-                }
-                if (expandedSection == SettingsSection.LOGS) {
-                    item { ComingSoonPanel(text = "Log viewer is coming in a future update.") }
-                }
-
-                item {
-                    SettingsRow(
                         icon = Icons.Default.Info,
                         title = "About",
-                        subtitle = "SocialDL $appVersion, GitHub, License, Check for updates",
+                        subtitle = "SocialDL $appVersion",
                         expanded = expandedSection == SettingsSection.ABOUT,
                         onClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -392,21 +286,50 @@ fun SettingsScreen(
                         )
                     }
                 }
+
+                // Local-only debug smoke test trigger (absent in release / clones without ExtractorSmokeTests).
+                item {
+                    val smokeTests = remember {
+                        runCatching { Class.forName("com.socialdl.src.ExtractorSmokeTests") }.getOrNull()
+                    }
+                    if (smokeTests != null) {
+                        val app = LocalContext.current.applicationContext as? android.app.Application
+                        var triggered by remember {
+                            mutableStateOf(
+                                runCatching {
+                                    smokeTests.getMethod("hasTriggered").invoke(null) as? Boolean
+                                }.getOrNull() == true
+                            )
+                        }
+                        OutlinedButton(
+                            enabled = !triggered,
+                            onClick = {
+                                if (!triggered && app != null) {
+                                    triggered = true
+                                    runCatching {
+                                        smokeTests
+                                            .getMethod("trigger", android.app.Application::class.java)
+                                            .invoke(null, app)
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 12.dp)
+                        ) {
+                            Text(if (triggered) "Smoke Tests Ran (Restart to Re-run)" else "Run Smoke Tests")
+                        }
+                    }
+                }
             }
         }
-
-        // Floating Toast (folder-permission failures share the app-wide pill style)
-        SocialDLToastHost(
-            toast = toastMessage,
-            onDismiss = { toastMessage = null }
-        )
     }
 
     // §2.6: Clear cookies is a destructive action — confirmation dialog first.
     pendingClear?.let { platform ->
         val section = COOKIE_SECTIONS.first { it.platform == platform }
         ClearCookiesConfirmDialog(
-            title = section.clearTitle,
+            title = "Clear ${platform.displayName} cookies?",
             text = section.clearText,
             onDismiss = { pendingClear = null },
             onConfirm = {
@@ -475,8 +398,6 @@ private fun SettingsRow(
 @Composable
 private fun GeneralSettingsPanel(
     uiState: SettingsUiState,
-    onCycleTheme: () -> Unit,
-    onCycleSearchEngine: () -> Unit,
     onMaxConcurrentChanged: (Int) -> Unit,
     onWifiOnlyChanged: (Boolean) -> Unit,
     onForceH264Changed: (Boolean) -> Unit
@@ -489,17 +410,6 @@ private fun GeneralSettingsPanel(
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
-        SubSettingRow(
-            label = "Theme",
-            value = uiState.theme.name.lowercase().replaceFirstChar { it.uppercase() },
-            onClick = onCycleTheme
-        )
-        SubSettingRow(
-            label = "Preferred search engine",
-            value = uiState.searchEngine.name.lowercase().replaceFirstChar { it.uppercase() },
-            onClick = onCycleSearchEngine
-        )
-
         // Max concurrent downloads slider (persisted on release)
         var sliderValue by remember(uiState.maxConcurrentDownloads) {
             mutableFloatStateOf(uiState.maxConcurrentDownloads.toFloat())
@@ -528,56 +438,6 @@ private fun GeneralSettingsPanel(
             label = "Force H.264 transcode",
             checked = uiState.forceH264Transcode,
             onCheckedChange = onForceH264Changed
-        )
-    }
-}
-
-@Composable
-private fun FoldersSettingsPanel(
-    videoFolderName: String,
-    audioFolderName: String,
-    onPickVideoFolder: () -> Unit,
-    onPickAudioFolder: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(SocialDLBg)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp)
-    ) {
-        SubSettingRow(
-            label = "Video folder",
-            value = videoFolderName,
-            onClick = onPickVideoFolder
-        )
-        SubSettingRow(
-            label = "Audio folder",
-            value = audioFolderName,
-            onClick = onPickAudioFolder
-        )
-    }
-}
-
-@Composable
-private fun ComingSoonPanel(text: String) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(SocialDLBg)
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-    ) {
-        Text(
-            text = "Coming soon",
-            style = MaterialTheme.typography.titleSmall,
-            color = SocialDLOnSurface
-        )
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodySmall,
-            color = SocialDLOnSurfaceVariant
         )
     }
 }
@@ -635,7 +495,7 @@ private fun CookiesSettingsPanel(
                 contentColor = SocialDLOnSurface
             )
         ) {
-            Text(if (present) "Sign in again" else "Sign in with ${section.signInLabel}")
+            Text(if (present) "Sign in again" else "Sign in with ${section.platform.displayName}")
         }
 
         OutlinedButton(
@@ -714,36 +574,9 @@ private fun AboutPanel(appVersion: String) {
             color = SocialDLOnSurfaceVariant
         )
         Text(
-            text = "GitHub · License · Check for updates",
+            text = "Downloads are saved to Movies/SocialDL, Music/SocialDL, and Pictures/SocialDL.",
             style = MaterialTheme.typography.bodySmall,
             color = SocialDLOnSurfaceVariant
-        )
-    }
-}
-
-@Composable
-private fun SubSettingRow(
-    label: String,
-    value: String,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.titleSmall,
-            color = SocialDLOnSurface
-        )
-        Text(
-            text = "$value ▸",
-            style = MaterialTheme.typography.bodySmall,
-            color = SocialDLAccent
         )
     }
 }
@@ -773,10 +606,4 @@ private fun ToggleRow(
             colors = SwitchDefaults.colors(checkedTrackColor = SocialDLAccent)
         )
     }
-}
-
-private fun Uri?.toFolderDisplayName(): String {
-    if (this == null) return "Default storage location"
-    val segment = lastPathSegment ?: return "Custom folder"
-    return segment.substringAfterLast('/').ifBlank { "Custom folder" }
 }

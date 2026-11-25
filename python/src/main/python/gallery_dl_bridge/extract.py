@@ -113,9 +113,6 @@ def _failure_envelope(error, cookiefile):
     """Maps gallery-dl exceptions, keeping raw text in debug_log (never the toast)."""
     text = str(error).lower()
 
-    if isinstance(error, gd_exc.NoExtractorError):
-        return fail(UNAVAILABLE, _UNSUPPORTED_URL)
-
     if isinstance(error, (gd_exc.AuthenticationError, gd_exc.AuthorizationError)):
         return fail(
             AUTH_WALL,

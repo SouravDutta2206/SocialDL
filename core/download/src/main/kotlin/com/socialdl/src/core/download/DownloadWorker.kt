@@ -265,7 +265,7 @@ class DownloadWorker @AssistedInject constructor(
             } else {
                 val error = DownloadError.from(e)
                 Logger.e(tag, "[$jobId] Download task failed with $error", e)
-                markFailed(jobId, error)
+                jobRepository.markFailed(jobId, error)
                 Result.failure()
             }
         } finally {
@@ -402,7 +402,7 @@ class DownloadWorker @AssistedInject constructor(
             // Fail before fetching hundreds of MB if the mux step can never run.
             if (!ffmpegProcessExecutor.isAvailable()) {
                 Logger.e(tag, "[${job.id}] FFmpeg binary is unavailable; cannot mux")
-                markFailed(job.id, DownloadError.MuxFailed)
+                jobRepository.markFailed(job.id, DownloadError.MuxFailed)
                 return false
             }
             val videoTemp = File(scratchDir, "video.tmp")
@@ -423,7 +423,7 @@ class DownloadWorker @AssistedInject constructor(
                     "[${job.id}] Stream download produced an empty file " +
                         "(video=${videoTemp.length()}, audio=${audioTemp.length()})"
                 )
-                markFailed(job.id, DownloadError.MissingStream)
+                jobRepository.markFailed(job.id, DownloadError.MissingStream)
                 return false
             }
 
@@ -454,7 +454,7 @@ class DownloadWorker @AssistedInject constructor(
                 !ffmpegProcessExecutor.isAvailable()
             ) {
                 Logger.e(tag, "[${job.id}] FFmpeg binary is unavailable; cannot convert")
-                markFailed(job.id, DownloadError.ConversionFailed)
+                jobRepository.markFailed(job.id, DownloadError.ConversionFailed)
                 return false
             }
 
@@ -469,7 +469,7 @@ class DownloadWorker @AssistedInject constructor(
 
             if (mediaTemp.length() == 0L) {
                 Logger.e(tag, "[${job.id}] Single-stream download produced an empty file")
-                markFailed(job.id, DownloadError.MissingStream)
+                jobRepository.markFailed(job.id, DownloadError.MissingStream)
                 return false
             }
 
@@ -616,7 +616,7 @@ class DownloadWorker @AssistedInject constructor(
     ): File? {
         if (!ffmpegProcessExecutor.isAvailable()) {
             Logger.e(tag, "[$jobId] FFmpeg binary is unavailable; cannot mux")
-            markFailed(jobId, DownloadError.MuxFailed)
+            jobRepository.markFailed(jobId, DownloadError.MuxFailed)
             return null
         }
 
@@ -654,20 +654,14 @@ class DownloadWorker @AssistedInject constructor(
 
         var muxSuccess = false
         var muxError = ""
-        ffmpegProcessExecutor.run(ffmpegArgs).collect { event ->
-            when (event) {
-                is FFmpegEvent.Completed -> {
-                    muxSuccess = true
-                }
-                is FFmpegEvent.Failed -> {
-                    muxError = event.errorLog ?: "Exit code ${event.exitCode}"
-                }
-            }
+        when (val event = ffmpegProcessExecutor.run(ffmpegArgs)) {
+            is FFmpegEvent.Completed -> muxSuccess = true
+            is FFmpegEvent.Failed -> muxError = event.errorLog ?: "Exit code ${event.exitCode}"
         }
 
         if (!muxSuccess || !muxedFile.exists() || muxedFile.length() == 0L) {
             Logger.e(tag, "[$jobId] FFmpeg muxing failed: $muxError")
-            markFailed(jobId, DownloadError.MuxFailed)
+            jobRepository.markFailed(jobId, DownloadError.MuxFailed)
             return null
         }
 
@@ -695,21 +689,21 @@ class DownloadWorker @AssistedInject constructor(
     ): File? {
         if (!ffmpegProcessExecutor.isAvailable()) {
             Logger.e(tag, "[${job.id}] FFmpeg binary is unavailable; cannot convert")
-            markFailed(job.id, DownloadError.ConversionFailed)
+            jobRepository.markFailed(job.id, DownloadError.ConversionFailed)
             return null
         }
 
         val probe = ffmpegProcessExecutor.probe(sourceTemp)
         if (probe == null) {
             Logger.e(tag, "[${job.id}] Could not read the downloaded file's codec and bitrate")
-            markFailed(job.id, DownloadError.ConversionFailed)
+            jobRepository.markFailed(job.id, DownloadError.ConversionFailed)
             return null
         }
 
         val target = MediaContainer.from(resolved.container)
         if (target == null) {
             Logger.e(tag, "[${job.id}] Unsupported output container '${resolved.container}'")
-            markFailed(job.id, DownloadError.UnsupportedFormat)
+            jobRepository.markFailed(job.id, DownloadError.UnsupportedFormat)
             return null
         }
 
@@ -734,22 +728,20 @@ class DownloadWorker @AssistedInject constructor(
             buildVideoArgs(job, sourceTemp, output, target, probe)
         }
         if (args == null) {
-            markFailed(job.id, DownloadError.ConversionFailed)
+            jobRepository.markFailed(job.id, DownloadError.ConversionFailed)
             return null
         }
 
         var success = false
         var conversionError = ""
-        ffmpegProcessExecutor.run(args).collect { event ->
-            when (event) {
-                is FFmpegEvent.Completed -> success = true
-                is FFmpegEvent.Failed -> conversionError = event.errorLog ?: "Exit code ${event.exitCode}"
-            }
+        when (val event = ffmpegProcessExecutor.run(args)) {
+            is FFmpegEvent.Completed -> success = true
+            is FFmpegEvent.Failed -> conversionError = event.errorLog ?: "Exit code ${event.exitCode}"
         }
 
         if (!success || !output.exists() || output.length() == 0L) {
             Logger.e(tag, "[${job.id}] Conversion to ${target.extension} failed: $conversionError")
-            markFailed(job.id, DownloadError.ConversionFailed)
+            jobRepository.markFailed(job.id, DownloadError.ConversionFailed)
             return null
         }
 
@@ -836,10 +828,6 @@ class DownloadWorker @AssistedInject constructor(
             return null
         }
         return block
-    }
-
-    private suspend fun markFailed(jobId: String, error: DownloadError) {
-        jobRepository.markFailed(jobId, error)
     }
 
     private suspend fun registerProgress(

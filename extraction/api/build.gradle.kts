@@ -26,8 +26,9 @@ android {
 dependencies {
     api(project(":core:model"))
 
+    implementation(project(":core:common"))
     implementation(libs.kotlinx.coroutines.core)
-    implementation(libs.kotlinx.serialization.json)
+    api(libs.kotlinx.serialization.json)
 
     // Hilt
     implementation(libs.hilt.android)

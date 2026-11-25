@@ -15,6 +15,7 @@ import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
@@ -241,11 +242,29 @@ open class ThumbnailCache @Inject constructor(
         }
     }
 
-    private fun extensionFor(mime: String, sourceUrl: String): String = when {
-        mime.contains("png", true) || sourceUrl.contains(".png", true) -> "png"
-        mime.contains("webp", true) || sourceUrl.contains(".webp", true) -> "webp"
-        mime.contains("gif", true) || sourceUrl.contains(".gif", true) -> "gif"
-        else -> "jpg"
+    /**
+     * File extension for a downloaded thumbnail. The response MIME type is
+     * authoritative — a CDN can serve WebP bytes from a `.png` URL — and only an
+     * unrecognized MIME falls back to the URL *path* extension (query and fragment
+     * stripped, so `?fmt=png` cannot mislabel a WebP).
+     */
+    internal fun extensionFor(mime: String, sourceUrl: String): String {
+        val normalizedMime = mime.lowercase(Locale.ROOT)
+        when {
+            "png" in normalizedMime -> return "png"
+            "webp" in normalizedMime -> return "webp"
+            "gif" in normalizedMime -> return "gif"
+            "jpeg" in normalizedMime || "jpg" in normalizedMime -> return "jpg"
+        }
+        val path = sourceUrl.substringBefore('?').substringBefore('#')
+        val fileName = path.substringAfterLast('/')
+        return when (fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)) {
+            "png" -> "png"
+            "webp" -> "webp"
+            "gif" -> "gif"
+            "jpg", "jpeg" -> "jpg"
+            else -> "jpg"
+        }
     }
 
     /** Copies at most [maxBytes]; returns -1 when the response exceeds the cap. */

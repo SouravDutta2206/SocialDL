@@ -19,6 +19,12 @@
             android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync"
             tools:node="merge" />
+
+        <!-- In-notification Cancel action: removes the Room row (instant UI
+             deletion) then cancels the WorkManager job. -->
+        <receiver
+            android:name="com.socialdl.src.core.download.DownloadCancelReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>

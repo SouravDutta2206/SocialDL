@@ -21,19 +21,17 @@ abstract class DownloadModule {
     abstract fun bindDownloadWorkScheduler(
         scheduler: WorkManagerDownloadScheduler
     ): DownloadWorkScheduler
-}
 
-/**
- * Phase 5 seam binding: [com.socialdl.src.core.download.MediaStoreExporter] depends on
- * the narrow [MediaStoreGateway] instead of a `Context`, so the export cancellation
- * and compensation paths are unit-testable with a fake store.
- */
-@Module
-@InstallIn(SingletonComponent::class)
-object MediaStoreModule {
-
-    @Provides
-    @Singleton
-    fun provideMediaStoreGateway(@ApplicationContext context: Context): MediaStoreGateway =
-        ContentResolverMediaStoreGateway(context.contentResolver)
+    companion object {
+        /**
+         * Phase 5 seam binding: [com.socialdl.src.core.download.MediaStoreExporter]
+         * depends on the narrow [MediaStoreGateway] instead of a `Context`, so the
+         * export cancellation and compensation paths are unit-testable with a fake
+         * store.
+         */
+        @Provides
+        @Singleton
+        fun provideMediaStoreGateway(@ApplicationContext context: Context): MediaStoreGateway =
+            ContentResolverMediaStoreGateway(context.contentResolver)
+    }
 }

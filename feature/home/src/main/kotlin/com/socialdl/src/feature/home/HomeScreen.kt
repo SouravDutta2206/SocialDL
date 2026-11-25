@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,7 +29,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.socialdl.src.core.common.util.readClipboardText
+import com.socialdl.src.core.cookies.cookieCaptureConfig
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
@@ -56,6 +55,7 @@ import com.socialdl.src.core.ui.component.PillSearchBar
 import com.socialdl.src.core.ui.component.SocialDLToastHost
 import com.socialdl.src.core.ui.component.ToastMessage
 import com.socialdl.src.core.ui.component.ToastType
+import com.socialdl.src.core.ui.component.rememberToastState
 import com.socialdl.src.core.ui.theme.SocialDLAccent
 import com.socialdl.src.core.ui.theme.SocialDLAccentButton
 import com.socialdl.src.core.ui.theme.SocialDLBg
@@ -73,7 +73,7 @@ fun HomeScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val resolvingItemId by viewModel.resolvingItemId.collectAsStateWithLifecycle()
-    var toastMessage by remember { mutableStateOf<ToastMessage?>(null) }
+    var toastMessage by rememberToastState(viewModel.messages)
     // Permissions are requested once on first launch (RequestStartupPermissions);
     // here we only enforce the storage grant the export needs and say why.
     val requestDownloadPermissions = rememberDownloadPermissionGate(
@@ -97,17 +97,6 @@ fun HomeScreen(
         } else {
             sheetInitialTab = initialTab
             selectedItemForSheet = item
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        // One-shot messages from the VM (toasts); replay=0 so nothing re-shows
-        // after process restore or rotation.
-        viewModel.messages.collect { msg ->
-            toastMessage = ToastMessage(
-                message = msg.message,
-                type = if (msg.isError) ToastType.ERROR else ToastType.SUCCESS
-            )
         }
     }
 
@@ -350,28 +339,13 @@ private fun AuthWallSignInCard(
     platform: Platform,
     onSignIn: () -> Unit,
 ) {
-    val title = when (platform) {
-        Platform.INSTAGRAM -> "Instagram needs you signed in"
-        Platform.TWITTER -> "X needs you signed in"
-        Platform.THREADS -> "Threads needs you signed in"
-        else -> "YouTube needs you signed in"
+    val config = remember(platform) {
+        runCatching { cookieCaptureConfig(platform) }.getOrNull()
     }
-    val explanation = when (platform) {
-        Platform.INSTAGRAM ->
-            "Private posts and reels need a signed-in session. Sign in once with Instagram, then this post is retried automatically."
-        Platform.TWITTER ->
-            "Protected or follow-gated posts need a signed-in session. Sign in once with X, then this post is retried automatically."
-        Platform.THREADS ->
-            "Private or login-gated posts need a signed-in session. Sign in once with Threads, then this post is retried automatically."
-        else ->
-            "Age-restricted and bot-checked videos need a signed-in session. Sign in once with YouTube, then this video is retried automatically."
-    }
-    val action = when (platform) {
-        Platform.INSTAGRAM -> "Sign in with Instagram"
-        Platform.TWITTER -> "Sign in with X"
-        Platform.THREADS -> "Sign in with Threads"
-        else -> "Sign in with YouTube"
-    }
+    val title = "${platform.displayName} needs you signed in"
+    val explanation = config?.authWallExplanation
+        ?: "Sign in once with ${platform.displayName}, then this post is retried automatically."
+    val action = "Sign in with ${platform.displayName}"
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = SocialDLBg,

@@ -76,7 +76,6 @@ class OutputExporter @Inject constructor(
         val outputUri = mediaStoreExporter.export(
             file = finalFile,
             title = resolvedJob.title,
-            author = resolvedJob.author,
             container = resolved.container,
             kind = resolved.formatKind,
             // Carousel siblings share this title; the slot keeps their export rows

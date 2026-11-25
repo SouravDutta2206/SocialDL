@@ -4,10 +4,8 @@ import android.content.Context
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadStatus
-import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
-import com.socialdl.src.core.model.MuxStrategy
 import com.socialdl.src.core.settings.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -36,7 +34,6 @@ import javax.inject.Singleton
 @Singleton
 class DownloadManager @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val eventBus: DownloadEventBus,
     private val jobRepository: DownloadJobRepository,
     private val settingsRepository: SettingsRepository,
     private val workScheduler: DownloadWorkScheduler,
@@ -129,20 +126,15 @@ class DownloadManager @Inject constructor(
         // - a placeholder without a choice stores "" so the worker adopts the
         //   JIT-resolved native container;
         // - otherwise use the codec-derived recommended container.
-        val requestedContainer = container
-            ?.takeIf { it.isNotBlank() && !it.equals("Default", ignoreCase = true) }
         // Force-H.264 is applied here for non-placeholder jobs (and again after
         // JIT resolution in the worker). HDR formats are never re-encoded.
-        val forceH264 = settingsRepository.forceH264Transcode.first() &&
-            selectedFormat.requiresMuxing &&
-            !selectedFormat.isHdr
-        val finalContainer = when {
-            forceH264 -> MediaContainer.MP4.extension.uppercase()
-            requestedContainer != null && MediaContainer.isCompatible(selectedFormat, requestedContainer) ->
-                MediaContainer.extensionOf(requestedContainer).uppercase()
-            selectedFormat.isPlaceholder -> ""
-            else -> MediaContainer.recommendedFor(selectedFormat).extension.uppercase()
-        }
+        val plan = resolveOutputPlan(
+            format = selectedFormat,
+            requestedContainer = container,
+            forceH264Setting = settingsRepository.forceH264Transcode.first(),
+            preserveBlankForPlaceholder = true,
+        )
+        val finalContainer = plan.container
 
         val title = customTitle ?: mediaItem.title
         val author = customAuthor ?: mediaItem.author
@@ -150,8 +142,7 @@ class DownloadManager @Inject constructor(
         // If format requires muxing, resolve paired audio stream upfront
         // (non-placeholder path; placeholders re-resolve in the worker via JIT).
         val pairedAudio = if (selectedFormat.requiresMuxing) {
-            mediaItem.audioFormats.find { it.id == selectedFormat.pairedAudioFormatId }
-                ?: mediaItem.audioFormats.firstOrNull()
+            selectPairedAudio(mediaItem.audioFormats, selectedFormat.pairedAudioFormatId)
         } else {
             null
         }
@@ -182,7 +173,7 @@ class DownloadManager @Inject constructor(
             audioDirectUrl = pairedAudio?.directUrl?.takeIf { it.isNotBlank() },
             // Only the opt-in H.264 re-encode is persisted now; copy vs encode is decided
             // from the probed codecs at download time.
-            muxStrategy = if (forceH264) MuxStrategy.FORCE_H264.name else null,
+            muxStrategy = plan.muxStrategy?.name,
             videoChunkSize = selectedFormat.httpChunkSizeBytes ?: 0L,
             audioChunkSize = pairedAudio?.httpChunkSizeBytes ?: 0L,
             isPlaceholder = selectedFormat.isPlaceholder,
@@ -269,7 +260,7 @@ class DownloadManager @Inject constructor(
                         Logger.i(tag, "Swept orphaned pending MediaStore row for job ${job.id}")
                     }
                 }
-                jobRepository.markInterruptedIfNotFailed(job.id)
+                jobRepository.markFailed(job.id, DownloadError.Interrupted)
             }
 
             // No-resume + kill-everything-at-restart: every non-terminal row above

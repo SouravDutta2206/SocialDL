@@ -106,16 +106,11 @@ class CookieStoreImpl @Inject constructor(
     }
 
     /**
-     * YouTube keeps its original filename (`youtube_cookies.txt.enc`) so existing
-     * installs remain valid; other platforms use `<platform>_cookies.txt.enc`.
+     * Jar path: `<platform>_cookies.txt.enc`. The naming already produces
+     * `youtube_cookies.txt.enc`, so existing YouTube installs stay valid.
      */
-    private fun jarFile(platform: Platform): File {
-        val name = when (platform) {
-            Platform.YOUTUBE -> "youtube_cookies.txt.enc"
-            else -> "${platform.name.lowercase(Locale.ROOT)}_cookies.txt.enc"
-        }
-        return File(File(context.filesDir, "cookies"), name)
-    }
+    private fun jarFile(platform: Platform): File =
+        File(File(context.filesDir, "cookies"), "${platform.name.lowercase(Locale.ROOT)}_cookies.txt.enc")
 
     /**
      * Scratch directory for atomic writes. `EncryptedFile` authenticates the

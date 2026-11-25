@@ -6,10 +6,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.UiMessageBus
+import com.socialdl.src.core.cookies.supportsCookieCapture
 import com.socialdl.src.core.download.DownloadManager
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
+import com.socialdl.src.core.model.defaultFormat
 import com.socialdl.src.core.model.uiKey
 import com.socialdl.src.extraction.api.ExtractionError
 import com.socialdl.src.extraction.api.ExtractionResult
@@ -23,7 +25,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -44,7 +45,7 @@ data class HomeUiState(
 
     /**
      * Platform that can resolve [authWallUrl] through its WebView cookie capture
-     * route. Null for platforms without a capture flow (Twitter/Threads/unknown),
+     * route. Null for platforms without a capture flow (e.g. UNKNOWN),
      * which keep the generic error only.
      */
     val authWallPlatform: Platform? = null,
@@ -214,7 +215,11 @@ class HomeViewModel @Inject constructor(
             try {
                 startDownload(mediaItem, selectedFormat, container, customTitle, customAuthor)
                 messageBus.post(
-                    "Download queued: ${customTitle ?: mediaItem.title} (${selectedFormat.label})"
+                    stringRes(
+                        R.string.home_download_queued,
+                        customTitle ?: mediaItem.title,
+                        selectedFormat.label
+                    )
                 )
             } catch (e: CancellationException) {
                 // ViewModel cleared mid-enqueue: not a user-facing failure.
@@ -222,7 +227,7 @@ class HomeViewModel @Inject constructor(
             } catch (e: Exception) {
                 Logger.e(tag, "Failed to enqueue download for '${mediaItem.title}'", e)
                 messageBus.post(
-                    "Couldn't queue download: ${e.message ?: "unknown error"}",
+                    stringRes(R.string.home_error_queue_failed, e.message ?: "unknown error"),
                     isError = true
                 )
             }
@@ -238,11 +243,11 @@ class HomeViewModel @Inject constructor(
             try {
                 val taskIds = startBatchDownload(items)
                 if (taskIds.isEmpty()) {
-                    messageBus.post("No downloads were queued", isError = true)
+                    messageBus.post(stringRes(R.string.home_batch_none_queued), isError = true)
                 } else {
                     messageBus.post(
-                        if (taskIds.size == 1) "Queued 1 download"
-                        else "Queued ${taskIds.size} downloads"
+                        if (taskIds.size == 1) stringRes(R.string.home_batch_queued_one)
+                        else stringRes(R.string.home_batch_queued_many, taskIds.size)
                     )
                 }
             } catch (e: CancellationException) {
@@ -251,7 +256,7 @@ class HomeViewModel @Inject constructor(
             } catch (e: Exception) {
                 Logger.e(tag, "Failed to enqueue batch download", e)
                 messageBus.post(
-                    "Couldn't queue downloads: ${e.message ?: "unknown error"}",
+                    stringRes(R.string.home_error_batch_queue_failed, e.message ?: "unknown error"),
                     isError = true
                 )
             }
@@ -265,23 +270,24 @@ class HomeViewModel @Inject constructor(
      * never renders a chooser for these sources.
      */
     fun startDirectDownload(item: MediaItem) {
-        val format = item.videoFormats.firstOrNull()
-            ?: item.imageFormats.firstOrNull()
-            ?: item.audioFormats.firstOrNull()
+        val format = item.defaultFormat()
         if (format == null) {
-            messageBus.post("This post has no downloadable media", isError = true)
+            messageBus.post(stringRes(R.string.home_error_no_media), isError = true)
             return
         }
         viewModelScope.launch {
             try {
                 downloadManager.enqueueDownload(mediaItem = item, selectedFormat = format)
-                messageBus.post("Download queued: ${item.title} (${format.label})")
+                messageBus.post(stringRes(R.string.home_download_queued, item.title, format.label))
             } catch (e: CancellationException) {
                 // ViewModel cleared mid-enqueue: not a user-facing failure.
                 throw e
             } catch (e: Exception) {
                 Logger.e(tag, "Failed to enqueue direct download for '${item.title}'", e)
-                messageBus.post("Couldn't queue download: ${e.message ?: "unknown error"}", isError = true)
+                messageBus.post(
+                    stringRes(R.string.home_error_queue_failed, e.message ?: "unknown error"),
+                    isError = true
+                )
             }
         }
     }
@@ -334,7 +340,7 @@ class HomeViewModel @Inject constructor(
                                 showsFormatPicker = extractor.capabilities.showsFormatPicker,
                                 // Defense-in-depth: guarantee unique (sourceUrl, carouselIndex) pairs so
                                 // LazyColumn keys can never collide.
-                                mediaItems = result.items.distinctBy { "${it.sourceUrl}_${it.carouselIndex}" }
+                                mediaItems = result.items.distinctBy { it.uiKey() }
                             )
                         }
                         messageBus.post(
@@ -352,12 +358,7 @@ class HomeViewModel @Inject constructor(
                         val authWallPlatform =
                             (result.cause as? ExtractionError.AuthWallDetected)
                                 ?.platform
-                                ?.takeIf {
-                                    it == Platform.YOUTUBE ||
-                                        it == Platform.INSTAGRAM ||
-                                        it == Platform.TWITTER ||
-                                        it == Platform.THREADS
-                                }
+                                ?.takeIf { supportsCookieCapture(it) }
                         _uiState.update {
                             it.copy(
                                 isLoading = false,
@@ -399,7 +400,7 @@ class HomeViewModel @Inject constructor(
         if (extractor == null) {
             // Don't silently drop the pending retry — tell the user to re-paste.
             Logger.w(tag, "Sign-in completed but no extractor resolved for $pending")
-            messageBus.post("Signed in — paste the link again to download")
+            messageBus.post(stringRes(R.string.home_signed_in_repaste))
             return
         }
         Logger.i(tag, "Sign-in completed; auto-retrying extraction of $pending")

@@ -51,3 +51,10 @@ data class MediaItem(
  * formulas cannot drift — desynced keys corrupt LazyColumn identity and batch selection.
  */
 fun MediaItem.uiKey(fallbackIndex: Int? = null): String = "${sourceUrl}_${carouselIndex ?: fallbackIndex}"
+
+/**
+ * The format the picker pre-selects for this item: video first, then a photo,
+ * then audio. Null only when every format list is empty (no downloadable stream).
+ */
+fun MediaItem.defaultFormat(): MediaFormat? =
+    videoFormats.firstOrNull() ?: imageFormats.firstOrNull() ?: audioFormats.firstOrNull()

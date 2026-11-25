@@ -23,8 +23,6 @@ import com.socialdl.src.core.model.DownloadStatus
 )
 data class DownloadJobEntity(
     @PrimaryKey val id: String,
-    /** WorkManager work-request UUID, kept for debugging / diagnostics. */
-    val workId: String? = null,
     val sourceUrl: String,
     val title: String,
     val author: String? = null,
@@ -41,21 +39,17 @@ data class DownloadJobEntity(
      * placeholder (batch/playlist) jobs so the JIT-resolved format decides.
      */
     val container: String = "",
-    val groupId: String? = null,
     val status: DownloadStatus,
     val progress: Float = 0f,
     val downloadedBytes: Long = 0L,
     val totalBytes: Long? = null,
     val errorMessage: String? = null,
-    val outputUri: String? = null,
-    val fileSizeBytes: Long = 0L,
     /** MediaStore row created with IS_PENDING=1 during the export step (P1-3). */
     val pendingUri: String? = null,
     // ---- Full download config (moved out of WorkManager Data; P0-4) ----
     val directUrl: String? = null,
     val requiresMuxing: Boolean = false,
     val audioDirectUrl: String? = null,
-    val audioContainer: String? = null,
     val muxStrategy: String? = null,
     val videoChunkSize: Long = 0L,
     val audioChunkSize: Long = 0L,

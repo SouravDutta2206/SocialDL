@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,30 +40,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
-
 import com.socialdl.src.core.common.util.toTimeString
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
+import com.socialdl.src.core.model.defaultFormat
 import com.socialdl.src.core.model.uiKey
-
-
-
 import com.socialdl.src.core.ui.theme.SocialDLBadgeDark
-
-
 import com.socialdl.src.core.ui.theme.SocialDLIndicator
 import com.socialdl.src.core.ui.theme.SocialDLOnSurface
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceDim
 import com.socialdl.src.core.ui.theme.SocialDLOnSurfaceVariant
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerHigh
 import com.socialdl.src.core.ui.theme.SocialDLSurfaceContainerLow
-import com.socialdl.src.core.ui.theme.SocialDLSurfaceVariant
 
 /**
  * Batch download flyout modal / bottom sheet matching the YTDLnis "Edit selected" design.
@@ -109,10 +101,7 @@ fun BatchDownloadBottomSheet(
         val selectedPairs = items.mapIndexedNotNull { index, item ->
             val key = item.uiKey(fallbackIndex = index)
             if (selectedUrls.contains(key)) {
-                val bestFormat = item.videoFormats.firstOrNull()
-                    ?: item.imageFormats.firstOrNull()
-                    ?: item.audioFormats.firstOrNull()
-                bestFormat?.let { Pair(item, it) }
+                item.defaultFormat()?.let { Pair(item, it) }
             } else {
                 null
             }
@@ -199,9 +188,7 @@ fun BatchDownloadBottomSheet(
                 ) { index, item ->
                     val key = item.uiKey(fallbackIndex = index)
                     val isChecked = selectedUrls.contains(key)
-                    val defaultPreset = item.videoFormats.firstOrNull()
-                        ?: item.imageFormats.firstOrNull()
-                        ?: item.audioFormats.firstOrNull()
+                    val defaultPreset = item.defaultFormat()
 
                     BatchItemRow(
                         index = item.carouselIndex ?: (index + 1),

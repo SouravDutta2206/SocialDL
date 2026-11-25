@@ -41,14 +41,3 @@ interface MediaExtractor {
      */
     suspend fun extractWithoutSavedSession(url: String): ExtractionResult? = null
 }
-
-/**
- * Base for not-yet-implemented extractors (Phases 5/6/7): returns a typed
- * [ExtractionError.NotImplemented] — never TODO() (which would throw
- * NotImplementedError into the caller's coroutine) and never
- * [ExtractionError.ContentUnavailable] (which means "post deleted/-private").
- */
-abstract class PlaceholderExtractor : MediaExtractor {
-    override suspend fun extract(url: String): ExtractionResult =
-        ExtractionResult.Error(ExtractionError.NotImplemented(platform, url))
-}
