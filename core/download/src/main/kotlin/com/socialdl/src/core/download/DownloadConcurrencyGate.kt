@@ -1,5 +1,8 @@
 package com.socialdl.src.core.download
 
+import com.socialdl.src.core.settings.DEFAULT_MAX_CONCURRENT_DOWNLOADS
+import com.socialdl.src.core.settings.MAX_CONCURRENT_DOWNLOADS
+import com.socialdl.src.core.settings.MIN_CONCURRENT_DOWNLOADS
 import com.socialdl.src.core.settings.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,11 +31,13 @@ class DownloadConcurrencyGate @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val semaphore: StateFlow<Semaphore> = settingsRepository.maxConcurrentDownloads
-        .map { max -> Semaphore(permits = max.coerceIn(MIN_PERMITS, MAX_PERMITS)) }
+        .map { max ->
+            Semaphore(permits = max.coerceIn(MIN_CONCURRENT_DOWNLOADS, MAX_CONCURRENT_DOWNLOADS))
+        }
         .stateIn(
             scope = scope,
             started = SharingStarted.Eagerly,
-            initialValue = Semaphore(permits = DEFAULT_PERMITS)
+            initialValue = Semaphore(permits = DEFAULT_MAX_CONCURRENT_DOWNLOADS)
         )
 
     /**
@@ -41,11 +46,5 @@ class DownloadConcurrencyGate @Inject constructor(
      */
     suspend fun <T> withDownloadPermit(action: suspend () -> T): T {
         return semaphore.value.withPermit { action() }
-    }
-
-    private companion object {
-        const val DEFAULT_PERMITS = 3
-        const val MIN_PERMITS = 1
-        const val MAX_PERMITS = 10
     }
 }

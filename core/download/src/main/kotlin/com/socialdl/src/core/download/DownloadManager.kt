@@ -6,6 +6,7 @@ import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadStatus
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
+import com.socialdl.src.core.settings.AppSettings
 import com.socialdl.src.core.settings.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
@@ -37,6 +38,7 @@ class DownloadManager @Inject constructor(
     private val jobRepository: DownloadJobRepository,
     private val settingsRepository: SettingsRepository,
     private val workScheduler: DownloadWorkScheduler,
+    private val storageSpaceChecker: StorageSpaceChecker,
 ) {
     private val tag = "DownloadManager"
     private val scope = CoroutineScope(
@@ -117,6 +119,64 @@ class DownloadManager @Inject constructor(
         customAuthor: String? = null,
     ): String {
         startupReconciled.await()
+        return enqueueSingleInternal(
+            mediaItem = mediaItem,
+            selectedFormat = selectedFormat,
+            container = container,
+            customTitle = customTitle,
+            customAuthor = customAuthor,
+        )
+    }
+
+    /**
+     * Batch enqueue for "Download all". The free-space check runs ONCE over the sum
+     * of every item before anything is written, so an insufficient-storage failure
+     * adds ZERO jobs. After that check each item is enqueued independently: a
+     * non-cancellation failure is logged and the remaining items still enqueue,
+     * which keeps the returned ids a truthful count.
+     */
+    suspend fun enqueueBatchDownload(items: List<Pair<MediaItem, MediaFormat>>): List<String> {
+        startupReconciled.await()
+        checkStorageIfEnabled(items)
+
+        val enqueued = mutableListOf<String>()
+        items.forEach { (item, format) ->
+            try {
+                enqueued += enqueueSingleInternal(
+                    mediaItem = item,
+                    selectedFormat = format,
+                    // Playlist placeholders carry a synthetic "MP4" container; passing
+                    // it would lock the worker to MP4 before yt-dlp resolves the real
+                    // format. Let the worker adopt the JIT-resolved native container.
+                    container = format.container.takeUnless { format.isPlaceholder },
+                    customTitle = item.title,
+                    customAuthor = item.author,
+                    skipStorageCheck = true,
+                )
+            } catch (e: CancellationException) {
+                // The batch scope is going away; stop enqueuing instead of logging
+                // each remaining item as a failure.
+                throw e
+            } catch (e: Exception) {
+                Logger.e(tag, "Failed to enqueue batch item '${item.title}'", e)
+            }
+        }
+        return enqueued
+    }
+
+    private suspend fun enqueueSingleInternal(
+        mediaItem: MediaItem,
+        selectedFormat: MediaFormat,
+        container: String?,
+        customTitle: String?,
+        customAuthor: String?,
+        skipStorageCheck: Boolean = false,
+    ): String {
+        // The storage check must run before the Room insert and the WorkManager
+        // enqueue below, so a rejection leaves no row and no scheduled work.
+        if (!skipStorageCheck) {
+            checkStorageIfEnabled(listOf(mediaItem to selectedFormat))
+        }
 
         val jobId = UUID.randomUUID().toString()
 
@@ -237,6 +297,26 @@ class DownloadManager @Inject constructor(
     /** Same deletion for the FAILED card's "X" (background work is already dead). */
     suspend fun removeFailedJob(jobId: String) {
         jobRepository.deleteJob(jobId)
+    }
+
+    /**
+     * Runs the optional pre-download free-space estimate. Callers invoke this
+     * before creating any Room row or WorkRequest so a rejection leaves nothing
+     * behind. An empty batch or an all-unknown size estimate never blocks.
+     */
+    private suspend fun checkStorageIfEnabled(items: List<Pair<MediaItem, MediaFormat>>) {
+        if (items.isEmpty()) return
+        val checkEnabled = try {
+            settingsRepository.appSettings.first().checkAvailableStorage
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A settings read failure must not fail the download; use the default.
+            Logger.w(tag, "Failed to read storage-check setting; using the default", e)
+            AppSettings().checkAvailableStorage
+        }
+        if (!checkEnabled) return
+        storageSpaceChecker.ensureAvailableSpace(items)
     }
 
     /**

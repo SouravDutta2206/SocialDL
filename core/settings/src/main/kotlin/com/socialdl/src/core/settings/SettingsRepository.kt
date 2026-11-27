@@ -1,5 +1,6 @@
 package com.socialdl.src.core.settings
 
+import com.socialdl.src.core.model.Platform
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -7,6 +8,8 @@ import kotlinx.coroutines.flow.Flow
  * Backed by Jetpack DataStore preferences.
  */
 interface SettingsRepository {
+    val appSettings: Flow<AppSettings>
+
     val maxConcurrentDownloads: Flow<Int>
     val wifiOnlyDownloads: Flow<Boolean>
     val forceH264Transcode: Flow<Boolean>
@@ -23,4 +26,13 @@ interface SettingsRepository {
     suspend fun setWifiOnlyDownloads(wifiOnly: Boolean)
     suspend fun setForceH264Transcode(force: Boolean)
     suspend fun setStartupPermissionsRequested(requested: Boolean)
+
+    suspend fun setAudioFolderUri(uri: String?)
+    suspend fun setVideoFolderUri(uri: String?)
+    suspend fun setImageFolderUri(uri: String?)
+    suspend fun setCheckAvailableStorage(enabled: Boolean)
+    suspend fun setTrimFilenames(enabled: Boolean)
+    suspend fun setMaxConcurrentFragments(max: Int)
+    suspend fun setUseCookies(enabled: Boolean)
+    suspend fun setPlatformCookieEnabled(platform: Platform, enabled: Boolean)
 }

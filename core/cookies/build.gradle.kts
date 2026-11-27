@@ -26,6 +26,7 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:model"))
     implementation(project(":core:python"))
+    implementation(project(":core:settings"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.core)

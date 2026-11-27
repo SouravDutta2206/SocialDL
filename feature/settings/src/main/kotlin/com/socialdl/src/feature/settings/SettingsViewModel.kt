@@ -4,36 +4,36 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.socialdl.src.core.common.util.UiMessage
+import com.socialdl.src.core.common.util.UiMessageBus
 import com.socialdl.src.core.cookies.CAPTURABLE_PLATFORMS
 import com.socialdl.src.core.cookies.CookieCaptureController
 import com.socialdl.src.core.cookies.CookieStore
+import com.socialdl.src.core.cookies.cookieCaptureConfig
+import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.Platform
+import com.socialdl.src.core.settings.AppSettings
 import com.socialdl.src.core.settings.SettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
-/**
- * UI state backed by [SettingsRepository].
- *
- * Every preference is consumed by the download pipeline: concurrency (semaphore
- * size), Wi-Fi-only (WorkManager network constraint) and force-H.264 (mux strategy).
- */
-data class SettingsUiState(
-    val maxConcurrentDownloads: Int = 3,
-    val wifiOnlyDownloads: Boolean = false,
-    val forceH264Transcode: Boolean = false,
+/** Saved cookie entry rendered on the Cookies settings subpage. */
+data class CookieEntryUiState(
+    val platform: Platform,
+    val originUrl: String,
+    val lastRefreshedAt: Long?,
+    val enabled: Boolean,
 )
 
 @HiltViewModel
@@ -44,28 +44,76 @@ class SettingsViewModel @Inject constructor(
 ) : ViewModel() {
 
     private val tag = "SettingsViewModel"
+    private val messageBus = UiMessageBus()
 
-    val uiState: StateFlow<SettingsUiState> = combine(
-        settingsRepository.maxConcurrentDownloads,
-        settingsRepository.wifiOnlyDownloads,
-        settingsRepository.forceH264Transcode
-    ) { max, wifiOnly, forceH264 ->
-        SettingsUiState(
-            maxConcurrentDownloads = max,
-            wifiOnlyDownloads = wifiOnly,
-            forceH264Transcode = forceH264
+    val messages: SharedFlow<UiMessage> = messageBus.events
+
+    val appSettings: StateFlow<AppSettings> = settingsRepository.appSettings
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = AppSettings()
         )
+
+    /** Bumps whenever saved jars must be re-stat'd (capture returned, import, clear). */
+    private val cookieTick = MutableStateFlow(0)
+
+    val savedCookieEntries: StateFlow<List<CookieEntryUiState>> = combine(
+        cookieTick,
+        settingsRepository.appSettings
+    ) { _, settings ->
+        withContext(Dispatchers.IO) {
+            CAPTURABLE_PLATFORMS.mapNotNull { platform ->
+                val jar = cookieStore.jarState(platform) ?: return@mapNotNull null
+                CookieEntryUiState(
+                    platform = platform,
+                    originUrl = cookieCaptureConfig(platform).successOrigin,
+                    lastRefreshedAt = jar.lastRefreshedAt,
+                    enabled = settings.isPlatformCookieEnabled(platform),
+                )
+            }
+        }
     }.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.Eagerly,
-        initialValue = SettingsUiState()
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
     )
 
-    fun setMaxConcurrentDownloads(max: Int) {
+    // ---- Folders ----
+
+    fun setCheckAvailableStorage(enabled: Boolean) {
         viewModelScope.launch {
-            settingsRepository.setMaxConcurrentDownloads(max)
+            settingsRepository.setCheckAvailableStorage(enabled)
         }
     }
+
+    fun setTrimFilenames(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setTrimFilenames(enabled)
+        }
+    }
+
+    fun setFolderUri(kind: FormatKind, uri: String?) {
+        viewModelScope.launch {
+            val label = when (kind) {
+                FormatKind.AUDIO -> {
+                    settingsRepository.setAudioFolderUri(uri)
+                    "Audio"
+                }
+                FormatKind.VIDEO -> {
+                    settingsRepository.setVideoFolderUri(uri)
+                    "Video"
+                }
+                FormatKind.IMAGE -> {
+                    settingsRepository.setImageFolderUri(uri)
+                    "Image"
+                }
+            }
+            messageBus.post("$label folder updated")
+        }
+    }
+
+    // ---- Downloads ----
 
     fun setWifiOnlyDownloads(enabled: Boolean) {
         viewModelScope.launch {
@@ -79,78 +127,78 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    // ---- Cookies (§2.6) ----
+    fun setMaxConcurrentFragments(max: Int) {
+        viewModelScope.launch {
+            settingsRepository.setMaxConcurrentFragments(max)
+        }
+    }
 
-    /** One platform's cookie-panel state. */
-    data class CookiesUiState(
-        val present: Boolean = false,
-        val lastRefreshedAt: Long? = null,
-        /** Copy for an import/clear outcome; self-clears after a few seconds. */
-        val actionMessage: String? = null,
-    )
+    fun setMaxConcurrentDownloads(max: Int) {
+        viewModelScope.launch {
+            settingsRepository.setMaxConcurrentDownloads(max)
+        }
+    }
 
-    private val cookieActionMessages = MutableStateFlow<Map<Platform, String?>>(emptyMap())
+    // ---- Cookies ----
 
-    /** Per-platform auto-clear timers, cancelled when a newer message supersedes them. */
-    private val cookieMessageJobs = mutableMapOf<Platform, Job>()
+    fun setUseCookies(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setUseCookies(enabled)
+        }
+    }
 
-    /** Bumps whenever the panels must re-stat the jars (capture returned, import, clear). */
-    private val cookieTick = MutableStateFlow(0)
+    fun setPlatformCookieEnabled(platform: Platform, enabled: Boolean) {
+        viewModelScope.launch {
+            settingsRepository.setPlatformCookieEnabled(platform, enabled)
+        }
+    }
 
-    /**
-     * Per-platform cookie state for the Settings panels, re-read on [refreshCookieStates].
-     */
-    val cookieStates: StateFlow<Map<Platform, CookiesUiState>> = combine(
-        cookieTick,
-        cookieActionMessages
-    ) { _, messages ->
-        @Suppress("NAME_SHADOWING")
-        withContext(Dispatchers.IO) {
-            CAPTURABLE_PLATFORMS.associateWith { platform ->
-                val jar = cookieStore.jarState(platform)
-                CookiesUiState(
-                    present = jar != null,
-                    lastRefreshedAt = jar?.lastRefreshedAt,
-                    actionMessage = messages[platform],
+    /** Exports the stored jar as a `cookies.txt` into the user-picked SAF document. */
+    fun exportCookies(platform: Platform, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                val reason = cookieStore.exportNetscapeFile(platform, uri)
+                if (reason == null) {
+                    messageBus.post("${platform.displayName} cookies exported")
+                } else {
+                    messageBus.post(reason, isError = true)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to export cookies for $platform", e)
+                messageBus.post(
+                    "Couldn't export cookies: ${e.message ?: "unknown error"}",
+                    isError = true
                 )
             }
         }
     }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5000),
-            initialValue = emptyMap()
-        )
 
-    /** Re-stats the jars; call when the Settings screen becomes visible again. */
+    /** Re-stats saved cookie jars; call when the Cookies screen resumes. */
     fun refreshCookieStates() {
         cookieTick.update { it + 1 }
     }
 
-    /** Manual `cookies.txt` import fallback (§2.6) — validated before it is accepted. */
+    /** Manual `cookies.txt` import fallback — validated before it is accepted. */
     fun importCookies(platform: Platform, uri: Uri) {
         viewModelScope.launch {
             try {
-                // null = stored; otherwise the store returns the finished, user-facing
-                // failure message.
                 val reason = cookieStore.importNetscapeFile(platform, uri)
-                setCookieMessage(
-                    platform,
-                    reason ?: "Cookies imported — you're signed in for ${platform.displayName} extraction."
-                )
+                if (reason == null) {
+                    messageBus.post("${platform.displayName} cookies imported")
+                } else {
+                    messageBus.post(reason, isError = true)
+                }
             } catch (e: CancellationException) {
-                // ViewModel cleared mid-import: not a user-facing failure.
                 throw e
             } catch (e: Exception) {
-                // IO/crypto failures must surface as panel copy, never crash the app.
                 Log.e(tag, "Failed to import cookies for $platform", e)
-                setCookieMessage(
-                    platform,
-                    "Couldn't import cookies: ${e.message ?: "unknown error"}"
+                messageBus.post(
+                    "Couldn't import cookies: ${e.message ?: "unknown error"}",
+                    isError = true
                 )
             }
-            // Always re-stat (even for a repeated message string): the jar may have
-            // been replaced, so the presence/age row must follow the store.
             refreshCookieStates()
         }
     }
@@ -161,36 +209,21 @@ class SettingsViewModel @Inject constructor(
             try {
                 cookieStore.clear(platform)
                 cookieCaptureController.clearCaptureSession()
-                setCookieMessage(platform, "${platform.displayName} cookies cleared.")
+                messageBus.post("${platform.displayName} cookies deleted")
             } catch (e: CancellationException) {
-                // ViewModel cleared mid-clear: not a user-facing failure.
                 throw e
             } catch (e: Exception) {
                 Log.e(tag, "Failed to clear cookies for $platform", e)
-                setCookieMessage(
-                    platform,
-                    "Couldn't clear cookies: ${e.message ?: "unknown error"}"
+                messageBus.post(
+                    "Couldn't delete cookies: ${e.message ?: "unknown error"}",
+                    isError = true
                 )
             }
-            // Always re-stat so the panel reflects the actual jar state after a clear
-            // attempt, including when an error left the jar in place.
             refreshCookieStates()
         }
     }
 
-    /**
-     * Sets one platform's message and clears it after a display window. Each platform
-     * owns at most one timer: a newer message cancels the older timer so it cannot
-     * clear the new copy early.
-     */
-    private fun setCookieMessage(platform: Platform, message: String) {
-        cookieMessageJobs[platform]?.cancel()
-        cookieActionMessages.update { it + (platform to message) }
-        cookieMessageJobs[platform] = viewModelScope.launch {
-            delay(4_000)
-            cookieActionMessages.update { messages ->
-                if (messages[platform] == message) messages + (platform to null) else messages
-            }
-        }
+    fun showMessage(message: String, isError: Boolean = false) {
+        messageBus.post(message, isError)
     }
 }

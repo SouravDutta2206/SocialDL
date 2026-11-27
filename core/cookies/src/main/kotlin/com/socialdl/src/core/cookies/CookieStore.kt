@@ -6,6 +6,8 @@ import androidx.security.crypto.EncryptedFile
 import androidx.security.crypto.MasterKey
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.model.Platform
+import com.socialdl.src.core.settings.AppSettings
+import com.socialdl.src.core.settings.SettingsRepository
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -13,6 +15,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -23,6 +26,14 @@ import java.security.GeneralSecurityException
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/**
+ * Pure gating predicate for cookie use (§2.6): the global toggle must be on AND
+ * the platform must not be individually disabled. Kept top-level and free of
+ * Android types so it is unit-testable on the JVM.
+ */
+fun shouldUseCookiesForPlatform(settings: AppSettings, platform: Platform): Boolean =
+    settings.useCookies && settings.isPlatformCookieEnabled(platform)
 
 /**
  * Encrypted persistence for captured cookie jars, one per platform (§2.6).
@@ -63,6 +74,16 @@ interface CookieStore {
     suspend fun importNetscapeFile(platform: Platform, uri: Uri): String?
 
     /**
+     * Writes the decrypted Netscape jar for [platform] straight into the
+     * user-selected SAF [uri] — never through a plaintext temp file on disk.
+     * Works regardless of the cookie toggles: the user explicitly asked for it.
+     *
+     * @return `null` when the jar was exported; otherwise the human-readable
+     *   failure reason for the caller's message surface.
+     */
+    suspend fun exportNetscapeFile(platform: Platform, uri: Uri): String?
+
+    /**
      * Decrypts the stored jar for [platform] into a throwaway file under `cacheDir`
      * and hands the path to [block]; the temp file is deleted in a `finally` the
      * moment the block returns.
@@ -80,7 +101,8 @@ interface CookieStore {
  */
 @Singleton
 class CookieStoreImpl @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val settingsRepository: SettingsRepository
 ) : CookieStore {
 
     private val tag = "CookieStore"
@@ -252,10 +274,58 @@ class CookieStoreImpl @Inject constructor(
         }
     }
 
+    override suspend fun exportNetscapeFile(platform: Platform, uri: Uri): String? =
+        mutex.withLock {
+            withContext(Dispatchers.IO) {
+                if (jarState(platform) == null) {
+                    return@withContext "No saved cookies to export for ${platform.displayName}."
+                }
+                try {
+                    // Open and authenticate the encrypted jar first so a decryption
+                    // failure never truncates or creates an empty output document.
+                    // Stream ciphertext -> plaintext directly into the SAF document;
+                    // a plaintext staging file on disk would defeat §2.6/§2.7.
+                    createEncryptedFile(platform).openFileInput().use { input ->
+                        val output = runCatching { context.contentResolver.openOutputStream(uri, "wt") }.getOrNull()
+                            ?: context.contentResolver.openOutputStream(uri)
+                            ?: return@withContext "Export failed: couldn't open the selected destination."
+                        output.use { out -> input.copyTo(out) }
+                    }
+                    Logger.i(tag, "${platform.name} cookie jar exported to user destination")
+                    null
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Logger.e(tag, "Failed to export ${platform.name} cookie jar", e)
+                    if (e.isCryptoOrCorruptionFailure()) {
+                        "Export failed: the saved cookies can't be decrypted on this device."
+                    } else {
+                        "Export failed: ${e.message ?: "unknown error"}"
+                    }
+                }
+            }
+        }
+
     override suspend fun <T> withCookieFile(
         platform: Platform,
         block: suspend (String?) -> T
     ): T {
+        // Global/per-platform toggles gate cookie use here so every extractor gets
+        // the policy for free. A prefs read failure must not break extraction:
+        // treat it as "cookies enabled" and let the normal jar checks decide.
+        val settings = try {
+            settingsRepository.appSettings.first()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Logger.w(tag, "Failed to read cookie settings; treating cookies as enabled", e)
+            null
+        }
+        if (settings != null && !shouldUseCookiesForPlatform(settings, platform)) {
+            Logger.d(tag, "Cookies disabled for ${platform.name}; extracting without cookies")
+            return block(null)
+        }
+
         val prefix = platform.name.lowercase(Locale.ROOT)
         var tempFile: File? = null
 

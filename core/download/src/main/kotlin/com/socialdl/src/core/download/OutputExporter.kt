@@ -6,9 +6,13 @@ import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.MediaStorageUtils
 import com.socialdl.src.core.database.entity.DownloadJobEntity
 import com.socialdl.src.core.model.DownloadStatus
+import com.socialdl.src.core.model.FormatKind
+import com.socialdl.src.core.settings.AppSettings
+import com.socialdl.src.core.settings.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
@@ -25,6 +29,7 @@ class OutputExporter @Inject constructor(
     private val mediaStoreExporter: MediaStoreExporter,
     private val notificationManager: DownloadNotificationManager,
     private val eventBus: DownloadEventBus,
+    private val settingsRepository: SettingsRepository,
 ) {
     private val tag = "OutputExporter"
 
@@ -73,6 +78,21 @@ class OutputExporter @Inject constructor(
             formatLabel = resolved.formatLabel
         )
 
+        // A settings read failure must not fail the download: fall back to defaults
+        // (MediaStore destination, no filename trimming).
+        val settings = try {
+            settingsRepository.appSettings.first()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            AppSettings()
+        }
+        val customTreeUri = when (resolved.formatKind) {
+            FormatKind.AUDIO -> settings.audioFolderUri
+            FormatKind.IMAGE -> settings.imageFolderUri
+            FormatKind.VIDEO -> settings.videoFolderUri
+        }?.let(Uri::parse)
+
         val outputUri = mediaStoreExporter.export(
             file = finalFile,
             title = resolvedJob.title,
@@ -81,6 +101,8 @@ class OutputExporter @Inject constructor(
             // Carousel siblings share this title; the slot keeps their export rows
             // (and therefore their files) distinct instead of overwriting one another.
             carouselIndex = resolvedJob.carouselIndex.takeIf { it > 0 },
+            customTreeUri = customTreeUri,
+            trimFilenames = settings.trimFilenames,
             onPendingRowCreated = { pendingUri ->
                 // P1-3: record the pending MediaStore row durably, and re-check the
                 // cancellation guard right after row creation so cancels mid-copy

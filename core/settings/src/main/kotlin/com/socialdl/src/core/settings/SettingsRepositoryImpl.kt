@@ -8,8 +8,11 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.socialdl.src.core.common.util.Logger
+import com.socialdl.src.core.model.Platform
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -26,17 +29,6 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(
     corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
 )
 
-// Worker-count bounds. A persisted value outside this range (old build, manual
-// DataStore edit) must never reach the download scheduler.
-internal const val MIN_CONCURRENT_DOWNLOADS = 1
-internal const val MAX_CONCURRENT_DOWNLOADS = 10
-internal const val DEFAULT_MAX_CONCURRENT_DOWNLOADS = 3
-
-/** Clamps a stored/supplied worker count into the supported range. */
-internal fun clampConcurrentDownloads(value: Int?): Int =
-    (value ?: DEFAULT_MAX_CONCURRENT_DOWNLOADS)
-        .coerceIn(MIN_CONCURRENT_DOWNLOADS, MAX_CONCURRENT_DOWNLOADS)
-
 @Singleton
 class SettingsRepositoryImpl @Inject constructor(
     @ApplicationContext private val context: Context
@@ -47,6 +39,14 @@ class SettingsRepositoryImpl @Inject constructor(
         val WIFI_ONLY_DOWNLOADS = booleanPreferencesKey("wifi_only_downloads")
         val FORCE_H264_TRANSCODE = booleanPreferencesKey("force_h264_transcode")
         val STARTUP_PERMISSIONS_REQUESTED = booleanPreferencesKey("startup_permissions_requested")
+        val AUDIO_FOLDER_URI = stringPreferencesKey("audio_folder_uri")
+        val VIDEO_FOLDER_URI = stringPreferencesKey("video_folder_uri")
+        val IMAGE_FOLDER_URI = stringPreferencesKey("image_folder_uri")
+        val CHECK_AVAILABLE_STORAGE = booleanPreferencesKey("check_available_storage")
+        val TRIM_FILENAMES = booleanPreferencesKey("trim_filenames")
+        val MAX_CONCURRENT_FRAGMENTS = intPreferencesKey("max_concurrent_fragments")
+        val USE_COOKIES = booleanPreferencesKey("use_cookies")
+        val DISABLED_COOKIE_PLATFORMS = stringSetPreferencesKey("disabled_cookie_platforms")
     }
 
     /**
@@ -72,6 +72,34 @@ class SettingsRepositoryImpl @Inject constructor(
             prefs[key] = value
         }
     }
+
+    /** Writes a non-blank string under [key], or clears it when null or blank. */
+    private suspend fun writeOptionalStringPreference(key: Preferences.Key<String>, value: String?) {
+        val normalized = value?.trim()?.takeIf { it.isNotEmpty() }
+        context.dataStore.edit { prefs ->
+            if (normalized != null) {
+                prefs[key] = normalized
+            } else {
+                prefs.remove(key)
+            }
+        }
+    }
+
+    override val appSettings: Flow<AppSettings> = safeData.map { prefs ->
+        AppSettings(
+            audioFolderUri = prefs[Keys.AUDIO_FOLDER_URI],
+            videoFolderUri = prefs[Keys.VIDEO_FOLDER_URI],
+            imageFolderUri = prefs[Keys.IMAGE_FOLDER_URI],
+            checkAvailableStorage = prefs[Keys.CHECK_AVAILABLE_STORAGE] ?: true,
+            trimFilenames = prefs[Keys.TRIM_FILENAMES] ?: false,
+            wifiOnlyDownloads = prefs[Keys.WIFI_ONLY_DOWNLOADS] ?: false,
+            maxConcurrentFragments = clampConcurrentFragments(prefs[Keys.MAX_CONCURRENT_FRAGMENTS]),
+            maxConcurrentDownloads = clampConcurrentDownloads(prefs[Keys.MAX_CONCURRENT_DOWNLOADS]),
+            forceH264Transcode = prefs[Keys.FORCE_H264_TRANSCODE] ?: false,
+            useCookies = prefs[Keys.USE_COOKIES] ?: true,
+            disabledCookiePlatforms = parseDisabledCookiePlatforms(prefs[Keys.DISABLED_COOKIE_PLATFORMS]),
+        )
+    }.distinctUntilChanged()
 
     override val maxConcurrentDownloads: Flow<Int> =
         preference(Keys.MAX_CONCURRENT_DOWNLOADS, ::clampConcurrentDownloads)
@@ -99,5 +127,46 @@ class SettingsRepositoryImpl @Inject constructor(
 
     override suspend fun setStartupPermissionsRequested(requested: Boolean) {
         writePreference(Keys.STARTUP_PERMISSIONS_REQUESTED, requested)
+    }
+
+    override suspend fun setAudioFolderUri(uri: String?) {
+        writeOptionalStringPreference(Keys.AUDIO_FOLDER_URI, uri)
+    }
+
+    override suspend fun setVideoFolderUri(uri: String?) {
+        writeOptionalStringPreference(Keys.VIDEO_FOLDER_URI, uri)
+    }
+
+    override suspend fun setImageFolderUri(uri: String?) {
+        writeOptionalStringPreference(Keys.IMAGE_FOLDER_URI, uri)
+    }
+
+    override suspend fun setCheckAvailableStorage(enabled: Boolean) {
+        writePreference(Keys.CHECK_AVAILABLE_STORAGE, enabled)
+    }
+
+    override suspend fun setTrimFilenames(enabled: Boolean) {
+        writePreference(Keys.TRIM_FILENAMES, enabled)
+    }
+
+    override suspend fun setMaxConcurrentFragments(max: Int) {
+        writePreference(Keys.MAX_CONCURRENT_FRAGMENTS, clampConcurrentFragments(max))
+    }
+
+    override suspend fun setUseCookies(enabled: Boolean) {
+        writePreference(Keys.USE_COOKIES, enabled)
+    }
+
+    override suspend fun setPlatformCookieEnabled(platform: Platform, enabled: Boolean) {
+        if (platform == Platform.UNKNOWN) return
+        context.dataStore.edit { prefs ->
+            val current = prefs[Keys.DISABLED_COOKIE_PLATFORMS].orEmpty()
+            val updated = if (enabled) {
+                current - platform.name
+            } else {
+                current + platform.name
+            }
+            prefs[Keys.DISABLED_COOKIE_PLATFORMS] = updated
+        }
     }
 }

@@ -26,6 +26,14 @@ internal class HttpStatusException(
 /** The container/MIME pair can never be inserted into MediaStore (e.g. audio/webm). */
 internal class UnsupportedMediaTypeException(message: String) : IllegalArgumentException(message)
 
+/** The estimated download size does not fit into the free space on the target volume. */
+class InsufficientStorageException(
+    val requiredBytes: Long,
+    val availableBytes: Long,
+) : IOException(
+    "Not enough free storage (need $requiredBytes bytes, available $availableBytes bytes)"
+)
+
 /** True for ENOSPC or "No space left on device". Waiting does not fix it. */
 internal fun Throwable.isStorageFull(): Boolean =
     this is IOException && message.orEmpty().let {
@@ -145,6 +153,8 @@ sealed class DownloadError(val userMessage: String) {
                 is RangeNotSupportedException -> ServerError
 
                 is UnsupportedMediaTypeException -> UnsupportedFormat
+
+                is InsufficientStorageException -> StorageFull
 
                 is SecurityException -> StoragePermission
 

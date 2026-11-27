@@ -5,10 +5,14 @@ import android.content.ContentValues
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaContainer
+import com.socialdl.src.core.settings.DEFAULT_AUDIO_FOLDER_RELATIVE
+import com.socialdl.src.core.settings.DEFAULT_IMAGE_FOLDER_RELATIVE
+import com.socialdl.src.core.settings.DEFAULT_VIDEO_FOLDER_RELATIVE
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -53,6 +57,11 @@ import javax.inject.Singleton
  *
  * Pre-Q (API 24-28) has no IS_PENDING: the inserted row is visible while it is being
  * written, but the same delete-on-failure/cancel/publish-abort paths still apply.
+ *
+ * Custom destination: when a SAF tree URI is configured for the media kind, the file
+ * is written as a document inside that tree instead of into MediaStore. SAF has no
+ * pending rows, so only the document this export created is deleted on failure or
+ * cancellation — the same "delete exactly what we created" rule as above.
  */
 @Singleton
 class MediaStoreExporter @Inject constructor(
@@ -70,6 +79,11 @@ class MediaStoreExporter @Inject constructor(
      * @param onBeforePublish called after the copy completed and before the row is
      *   published (IS_PENDING=0); return false to delete the row and abort (e.g.
      *   the job was cancelled while the bytes were being copied).
+     * @param customTreeUri when set, the file is written as a document inside this
+     *   SAF tree instead of into MediaStore; pending-row callbacks and publish
+     *   updates are skipped because SAF documents have no IS_PENDING state.
+     * @param trimFilenames truncates long titles so the total file name stays
+     *   within [MAX_TRIMMED_FILENAME_LENGTH] characters.
      * @return the finalized content URI, or null on failure. Cancellation is not a
      *   failure result: the row is deleted and [CancellationException] is rethrown.
      */
@@ -81,26 +95,12 @@ class MediaStoreExporter @Inject constructor(
         carouselIndex: Int? = null,
         onPendingRowCreated: suspend (Uri) -> Boolean,
         onBeforePublish: suspend () -> Boolean,
+        customTreeUri: Uri? = null,
+        trimFilenames: Boolean = false,
     ): Uri? {
         val isAudio = kind == FormatKind.AUDIO
         val isImage = kind == FormatKind.IMAGE
         val ext = container.lowercase(Locale.ROOT)
-        val sanitizedBase = title
-            .replace(Regex("[^a-zA-Z0-9.-]"), "_")
-            // Collapse runs of separators and trim every leading/trailing one, so
-            // a title like "..hidden" can never produce a dotfile name.
-            .replace(Regex("[_.]+"), "_")
-            .trim('_', '.', '-')
-        val sanitizedTitle = when {
-            // No usable ASCII base (e.g. "日本語の動画", "🔥🔥", "..."): a stable
-            // hash keeps the name unique instead of inserting "_.mp4".
-            sanitizedBase.isEmpty() -> "media_${shortTitleHash(title)}"
-            // Distinct non-ASCII titles can sanitize to the same few ASCII
-            // leftovers and collide within the same second; the hash keeps them
-            // apart. 41 + 1 + 8 = 50 characters.
-            title.any { it.code > 127 } -> "${sanitizedBase.take(41)}_${shortTitleHash(title)}"
-            else -> sanitizedBase.take(50)
-        }
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         // Carousel slides all carry the post caption as their title and finish
         // exporting within the same second. A title+timestamp name therefore made
@@ -108,9 +108,15 @@ class MediaStoreExporter @Inject constructor(
         // maps those concurrent inserts onto one row ("Identical paths … not
         // moving"), so each copy silently overwrote the previous slide and
         // "Download all" published fewer files than items. The slot index in the
-        // name gives every slide its own row.
-        val itemSuffix = carouselIndex?.takeIf { it > 0 }?.let { "_$it" }.orEmpty()
-        val fileName = "${sanitizedTitle}${itemSuffix}_$timestamp.$ext"
+        // name gives every slide its own row. [buildExportFileName] keeps the slot
+        // and timestamp intact even when the title is trimmed.
+        val fileName = buildExportFileName(
+            title = title,
+            ext = ext,
+            carouselIndex = carouselIndex,
+            timestamp = timestamp,
+            trimFilenames = trimFilenames,
+        )
 
         val mimeType = MediaContainer.mimeTypeFor(container, kind)
 
@@ -124,58 +130,47 @@ class MediaStoreExporter @Inject constructor(
             )
         }
 
+        if (customTreeUri != null) {
+            return exportToDocument(file, customTreeUri, mimeType, fileName, onBeforePublish)
+        }
+
+        val relativePath = when {
+            isImage -> DEFAULT_IMAGE_FOLDER_RELATIVE
+            isAudio -> DEFAULT_AUDIO_FOLDER_RELATIVE
+            else -> DEFAULT_VIDEO_FOLDER_RELATIVE
+        }
+
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(
-                    MediaStore.MediaColumns.RELATIVE_PATH,
-                    when {
-                        isImage -> "${Environment.DIRECTORY_PICTURES}/SocialDL"
-                        isAudio -> "${Environment.DIRECTORY_MUSIC}/SocialDL"
-                        else -> "${Environment.DIRECTORY_MOVIES}/SocialDL"
-                    }
-                )
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             } else {
                 // Pre-Q MediaProvider ignores RELATIVE_PATH and DISPLAY_NAME alone
                 // does not choose a directory, so the row must carry an explicit
-                // DATA path under the public collection's SocialDL folder.
+                // DATA path under the public Downloads directory. The settings
+                // constants are storage-root relative ("Download/SocialDL/…").
                 val publicDir = Environment.getExternalStoragePublicDirectory(
-                    when {
-                        isImage -> Environment.DIRECTORY_PICTURES
-                        isAudio -> Environment.DIRECTORY_MUSIC
-                        else -> Environment.DIRECTORY_MOVIES
-                    }
+                    Environment.DIRECTORY_DOWNLOADS
                 )
-                val targetDir = File(publicDir, "SocialDL").apply { mkdirs() }
+                val subDir = relativePath.substringAfter("${Environment.DIRECTORY_DOWNLOADS}/")
+                val targetDir = File(publicDir, subDir).apply { mkdirs() }
                 @Suppress("DEPRECATION")
                 put(MediaStore.MediaColumns.DATA, File(targetDir, fileName).absolutePath)
             }
         }
 
+        // Every default destination lives under Download/ now. Images/Audio/Video
+        // collections reject a Download/ RELATIVE_PATH on Android 10+, so Q+ rows
+        // must go through the Downloads collection; pre-Q keeps the kind collection
+        // because DATA chooses the directory there.
         val collection = when {
-            isImage -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                } else {
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                }
-            }
-            isAudio -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                } else {
-                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-                }
-            }
-            else -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-                } else {
-                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                }
-            }
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            isImage -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            isAudio -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            else -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         }
 
         Logger.d(tag, "Exporting $fileName as $mimeType into $collection")
@@ -219,64 +214,120 @@ class MediaStoreExporter @Inject constructor(
             }
         }
 
-        return try {
-            val output = store.openOutputStream(itemUri)
-            if (output == null) {
-                // openOutputStream returned null (no stream available) — same
-                // failure class as a failed copy: delete the pending row so no
-                // zero-byte IS_PENDING ghost is left in the gallery.
-                Logger.e(tag, "openOutputStream returned null for $itemUri; deleting pending row")
-                deleteRow(itemUri)
-                return null
-            }
-            output.use { out -> file.inputStream().use { input -> copyStreamCancellable(input, out) } }
-
-            // Copy finished; the row is still pending (Q+) / never marked published
-            // (pre-Q). Publish only if the worker confirms the job is still alive: a
-            // cancel during the copy must not leave a visible file behind.
-            if (!onBeforePublish()) {
-                Logger.i(tag, "Export abandoned before publish; deleting row $itemUri")
-                deleteRow(itemUri)
-                return null
-            }
-
-            if (pending) {
-                contentValues.clear()
-                contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                val updated = store.update(itemUri, contentValues, null, null)
-                if (updated == 0) {
-                    // The row vanished while copying (provider cleanup / user action).
-                    Logger.w(tag, "IS_PENDING=0 update affected no rows for $itemUri")
-                    return null
+        return copyAndPublish(
+            file = file,
+            targetUri = itemUri,
+            targetLabel = "MediaStore row",
+            onBeforePublish = onBeforePublish,
+            deleteCreated = { deleteRow(itemUri) },
+            onPublish = {
+                if (pending) {
+                    contentValues.clear()
+                    contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    val updated = store.update(itemUri, contentValues, null, null)
+                    if (updated == 0) {
+                        // The row vanished while copying (provider cleanup / user action).
+                        Logger.w(tag, "IS_PENDING=0 update affected no rows for $itemUri")
+                        return@copyAndPublish false
+                    }
                 }
-            }
-            itemUri
-        } catch (e: CancellationException) {
-            // Cancellation may land inside the copy loop or in onBeforePublish. The
-            // row this export created must not stay behind; delete it with blocking
-            // resolver calls (no suspension point) and let the worker observe the
-            // cancellation instead of a failure.
-            Logger.i(tag, "Export cancelled; deleting row $itemUri")
-            deleteRow(itemUri)
-            throw e
-        } catch (e: Exception) {
-            Logger.e(tag, "Failed to copy file to MediaStore URI: $itemUri", e)
-            // finally-guarded: never leave a dangling pending row behind a failed copy.
-            deleteRow(itemUri)
-            // A permission denial or a full disk is typed (StoragePermission /
-            // StorageFull); only generic I/O failures become ExportFailed.
-            if (e is SecurityException || DownloadError.from(e) == DownloadError.StorageFull) {
-                throw e
-            }
-            null
-        }
+                true
+            },
+        )
     }
 
-    /** Stable 8-hex-char digest of the raw title, used to disambiguate names. */
-    private fun shortTitleHash(title: String): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(title.toByteArray(Charsets.UTF_8))
-        return digest.joinToString("") { "%02x".format(it) }.take(8)
+    /**
+     * SAF variant of [export]: creates a document inside [treeUri], copies the
+     * bytes and asks the worker to publish. SAF has no pending row and no publish
+     * step, so [onPendingRowCreated] is deliberately not called. Every failure
+     * path deletes exactly the document this export created; cancellation and
+     * typed storage/permission failures are rethrown, everything else is a normal
+     * export failure.
+     */
+    private suspend fun exportToDocument(
+        file: File,
+        treeUri: Uri,
+        mimeType: String,
+        fileName: String,
+        onBeforePublish: suspend () -> Boolean,
+    ): Uri? {
+        val documentUri = try {
+            store.createDocument(treeUri, mimeType, fileName) ?: return null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (e is SecurityException || DownloadError.from(e) == DownloadError.StorageFull) {
+                Logger.e(tag, "SAF document creation failed for a typed cause ($fileName)", e)
+                throw e
+            }
+            Logger.e(tag, "SAF rejected the export document ($fileName, $mimeType)", e)
+            return null
+        }
+
+        Logger.d(tag, "Exporting $fileName as $mimeType into SAF tree $treeUri")
+
+        return copyAndPublish(
+            file = file,
+            targetUri = documentUri,
+            targetLabel = "SAF document",
+            onBeforePublish = onBeforePublish,
+            deleteCreated = { deleteDocument(documentUri) },
+        )
+    }
+
+    /**
+     * Shared copy -> pre-publish guard -> optional publish -> error/cancel cleanup
+     * pipeline used by both MediaStore rows and SAF documents.
+     */
+    private suspend fun copyAndPublish(
+        file: File,
+        targetUri: Uri,
+        targetLabel: String,
+        onBeforePublish: suspend () -> Boolean,
+        deleteCreated: () -> Unit,
+        onPublish: () -> Boolean = { true },
+    ): Uri? = try {
+        val output = store.openOutputStream(targetUri)
+        if (output == null) {
+            // openOutputStream returned null (no stream available) — same
+            // failure class as a failed copy: delete what we created so no
+            // zero-byte ghost is left behind.
+            Logger.e(tag, "openOutputStream returned null for $targetUri; deleting $targetLabel")
+            deleteCreated()
+            null
+        } else {
+            output.use { out -> file.inputStream().use { input -> copyStreamCancellable(input, out) } }
+
+            // Copy finished; publish only if the worker confirms the job is still
+            // alive so a cancel during the copy never leaves a visible file behind.
+            if (!onBeforePublish()) {
+                Logger.i(tag, "Export abandoned before publish; deleting $targetLabel $targetUri")
+                deleteCreated()
+                null
+            } else if (!onPublish()) {
+                null
+            } else {
+                targetUri
+            }
+        }
+    } catch (e: CancellationException) {
+        // Cancellation may land inside the copy loop or in onBeforePublish. The
+        // target this export created must not stay behind; delete it with blocking
+        // resolver calls (no suspension point) and let the worker observe the
+        // cancellation instead of a failure.
+        Logger.i(tag, "Export cancelled; deleting $targetLabel $targetUri")
+        deleteCreated()
+        throw e
+    } catch (e: Exception) {
+        Logger.e(tag, "Failed to copy file to $targetLabel: $targetUri", e)
+        // finally-guarded: never leave a dangling target behind a failed copy.
+        deleteCreated()
+        // A permission denial or a full disk is typed (StoragePermission /
+        // StorageFull); only generic I/O failures become ExportFailed.
+        if (e is SecurityException || DownloadError.from(e) == DownloadError.StorageFull) {
+            throw e
+        }
+        null
     }
 
     /**
@@ -288,6 +339,74 @@ class MediaStoreExporter @Inject constructor(
         runCatching { store.delete(uri, null, null) }
             .onFailure { e -> Logger.w(tag, "Failed to delete MediaStore row $uri", e) }
     }
+
+    /** Deletes exactly the SAF document this export created. */
+    private fun deleteDocument(uri: Uri) {
+        runCatching { store.deleteDocument(uri) }
+            .onFailure { e -> Logger.w(tag, "Failed to delete SAF document $uri", e) }
+    }
+}
+
+/** Maximum total file-name length when filename trimming is enabled. */
+internal const val MAX_TRIMMED_FILENAME_LENGTH: Int = 40
+
+/**
+ * Builds the DISPLAY_NAME/document name for an export.
+ *
+ * Sanitization is unchanged from the MediaStore implementation: non-ASCII runs
+ * collapse to `_`, leading/trailing separators are trimmed so a title can never
+ * produce a dotfile, and titles with non-ASCII characters (or no usable ASCII at
+ * all) get a stable hash so same-second exports cannot collide.
+ *
+ * With [trimFilenames], names longer than [MAX_TRIMMED_FILENAME_LENGTH] keep the
+ * complete `_<carousel slot>_<timestamp>.<ext>` suffix and truncate only the title,
+ * so the extension, timestamp and slot uniqueness survive trimming.
+ */
+internal fun buildExportFileName(
+    title: String,
+    ext: String,
+    carouselIndex: Int?,
+    timestamp: String,
+    trimFilenames: Boolean,
+): String {
+    val sanitizedTitle = sanitizeExportTitle(title)
+    val itemSuffix = carouselIndex?.takeIf { it > 0 }?.let { "_$it" }.orEmpty()
+    val suffix = "${itemSuffix}_$timestamp.$ext"
+    val fileName = "$sanitizedTitle$suffix"
+    if (!trimFilenames || fileName.length <= MAX_TRIMMED_FILENAME_LENGTH) return fileName
+
+    val maxTitleLength = (MAX_TRIMMED_FILENAME_LENGTH - suffix.length).coerceAtLeast(1)
+    val trimmedTitle = sanitizedTitle
+        .take(maxTitleLength)
+        .trimEnd('_', '.', '-')
+        .ifEmpty { "m" }
+    return "$trimmedTitle$suffix"
+}
+
+private fun sanitizeExportTitle(title: String): String {
+    val sanitizedBase = title
+        .replace(Regex("[^a-zA-Z0-9.-]"), "_")
+        // Collapse runs of separators and trim every leading/trailing one, so
+        // a title like "..hidden" can never produce a dotfile name.
+        .replace(Regex("[_.]+"), "_")
+        .trim('_', '.', '-')
+    return when {
+        // No usable ASCII base (e.g. "日本語の動画", "🔥🔥", "..."): a stable
+        // hash keeps the name unique instead of inserting "_.mp4".
+        sanitizedBase.isEmpty() -> "media_${shortTitleHash(title)}"
+        // Distinct non-ASCII titles can sanitize to the same few ASCII
+        // leftovers and collide within the same second; the hash keeps them
+        // apart. 41 + 1 + 8 = 50 characters.
+        title.any { it.code > 127 } -> "${sanitizedBase.take(41)}_${shortTitleHash(title)}"
+        else -> sanitizedBase.take(50)
+    }
+}
+
+/** Stable 8-hex-char digest of the raw title, used to disambiguate names. */
+private fun shortTitleHash(title: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(title.toByteArray(Charsets.UTF_8))
+    return digest.joinToString("") { "%02x".format(it) }.take(8)
 }
 
 /**
@@ -313,6 +432,15 @@ interface MediaStoreGateway {
     ): Int
 
     fun delete(uri: Uri, selection: String?, selectionArgs: Array<String>?): Int
+
+    /**
+     * Creates a document named [displayName] inside the SAF tree [treeUri].
+     * Returns null when the provider refuses to create it.
+     */
+    fun createDocument(treeUri: Uri, mimeType: String, displayName: String): Uri?
+
+    /** Deletes a SAF document created by [createDocument]. */
+    fun deleteDocument(uri: Uri): Boolean
 }
 
 /** Production [MediaStoreGateway] over the app's [ContentResolver]. */
@@ -334,6 +462,17 @@ class ContentResolverMediaStoreGateway(
 
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<String>?): Int =
         resolver.delete(uri, selection, selectionArgs)
+
+    override fun createDocument(treeUri: Uri, mimeType: String, displayName: String): Uri? {
+        val parentDocumentUri = DocumentsContract.buildDocumentUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+        )
+        return DocumentsContract.createDocument(resolver, parentDocumentUri, mimeType, displayName)
+    }
+
+    override fun deleteDocument(uri: Uri): Boolean =
+        DocumentsContract.deleteDocument(resolver, uri)
 }
 
 /** Chunk size for export copies: large enough to keep I/O cheap, small enough to stop promptly. */

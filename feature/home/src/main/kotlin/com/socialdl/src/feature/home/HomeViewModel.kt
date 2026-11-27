@@ -8,6 +8,7 @@ import com.socialdl.src.core.common.util.Logger
 import com.socialdl.src.core.common.util.UiMessageBus
 import com.socialdl.src.core.cookies.supportsCookieCapture
 import com.socialdl.src.core.download.DownloadManager
+import com.socialdl.src.core.download.InsufficientStorageException
 import com.socialdl.src.core.model.MediaFormat
 import com.socialdl.src.core.model.MediaItem
 import com.socialdl.src.core.model.Platform
@@ -171,33 +172,10 @@ class HomeViewModel @Inject constructor(
         )
     }
 
-    suspend fun startBatchDownload(items: List<Pair<MediaItem, MediaFormat>>): List<String> {
-        // Enqueue items individually: a mid-loop failure must not silently lose the
-        // remaining items after the caller announced selectedPairs.size. Return the
-        // ACTUAL enqueued IDs so toasts report a truthful count.
-        val enqueued = mutableListOf<String>()
-        items.forEach { (item, format) ->
-            try {
-                enqueued += downloadManager.enqueueDownload(
-                    mediaItem = item,
-                    selectedFormat = format,
-                    // Playlist placeholders carry a synthetic "MP4" container; passing
-                    // it would lock the worker to MP4 before yt-dlp resolves the real
-                    // format. Let the worker adopt the JIT-resolved native container.
-                    container = format.container.takeUnless { format.isPlaceholder },
-                    customTitle = item.title,
-                    customAuthor = item.author,
-                )
-            } catch (e: CancellationException) {
-                // The batch scope is going away; stop enqueuing instead of logging
-                // each remaining item as a failure.
-                throw e
-            } catch (e: Exception) {
-                Logger.e(tag, "Failed to enqueue batch item '${item.title}'", e)
-            }
-        }
-        return enqueued
-    }
+    suspend fun startBatchDownload(items: List<Pair<MediaItem, MediaFormat>>): List<String> =
+        // The manager runs the free-space check once over ALL items before any row
+        // is written, then enqueues each item with per-item failure isolation.
+        downloadManager.enqueueBatchDownload(items)
 
     /**
      * ViewModel-scoped enqueue for the format sheet. Running the suspend enqueue here
@@ -224,6 +202,12 @@ class HomeViewModel @Inject constructor(
             } catch (e: CancellationException) {
                 // ViewModel cleared mid-enqueue: not a user-facing failure.
                 throw e
+            } catch (e: InsufficientStorageException) {
+                Logger.w(tag, "Not enough free storage to enqueue '${mediaItem.title}'", e)
+                messageBus.post(
+                    stringRes(R.string.home_error_insufficient_storage),
+                    isError = true
+                )
             } catch (e: Exception) {
                 Logger.e(tag, "Failed to enqueue download for '${mediaItem.title}'", e)
                 messageBus.post(
@@ -253,6 +237,12 @@ class HomeViewModel @Inject constructor(
             } catch (e: CancellationException) {
                 // ViewModel cleared mid-batch: not a user-facing failure.
                 throw e
+            } catch (e: InsufficientStorageException) {
+                Logger.w(tag, "Not enough free storage to enqueue the batch", e)
+                messageBus.post(
+                    stringRes(R.string.home_error_insufficient_storage),
+                    isError = true
+                )
             } catch (e: Exception) {
                 Logger.e(tag, "Failed to enqueue batch download", e)
                 messageBus.post(
@@ -282,6 +272,12 @@ class HomeViewModel @Inject constructor(
             } catch (e: CancellationException) {
                 // ViewModel cleared mid-enqueue: not a user-facing failure.
                 throw e
+            } catch (e: InsufficientStorageException) {
+                Logger.w(tag, "Not enough free storage to enqueue '${item.title}'", e)
+                messageBus.post(
+                    stringRes(R.string.home_error_insufficient_storage),
+                    isError = true
+                )
             } catch (e: Exception) {
                 Logger.e(tag, "Failed to enqueue direct download for '${item.title}'", e)
                 messageBus.post(

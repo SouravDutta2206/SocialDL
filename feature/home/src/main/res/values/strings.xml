@@ -9,6 +9,7 @@
     <string name="home_error_extraction">Extraction error: %1$s</string>
     <string name="home_download_queued">Download queued: %1$s (%2$s)</string>
     <string name="home_error_queue_failed">Couldn\'t queue download: %1$s</string>
+    <string name="home_error_insufficient_storage">Not enough free storage available</string>
     <string name="home_batch_none_queued">No downloads were queued</string>
     <string name="home_batch_queued_one">Queued 1 download</string>
     <string name="home_batch_queued_many">Queued %1$d downloads</string>

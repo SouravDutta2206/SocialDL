@@ -14,12 +14,15 @@ import com.socialdl.src.core.model.DownloadStatus
 import com.socialdl.src.core.model.FormatKind
 import com.socialdl.src.core.model.MediaContainer
 import com.socialdl.src.core.model.MuxStrategy
+import com.socialdl.src.core.settings.DEFAULT_MAX_CONCURRENT_FRAGMENTS
+import com.socialdl.src.core.settings.SettingsRepository
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
@@ -71,6 +74,7 @@ class DownloadWorker @AssistedInject constructor(
     private val outputExporter: OutputExporter,
     private val coverArt: CoverArt,
     private val downloadManager: DownloadManager,
+    private val settingsRepository: SettingsRepository,
 ) : CoroutineWorker(appContext, workerParams) {
 
     private val tag = "DownloadWorker"
@@ -398,6 +402,7 @@ class DownloadWorker @AssistedInject constructor(
         scratchDir: File,
         callCanceller: DownloadCallCanceller,
     ): Boolean {
+        val maxConcurrentFragments = readMaxConcurrentFragments(job.id)
         val finalFile = if (resolved.requiresMuxing) {
             // Fail before fetching hundreds of MB if the mux step can never run.
             if (!ffmpegProcessExecutor.isAvailable()) {
@@ -415,6 +420,7 @@ class DownloadWorker @AssistedInject constructor(
                 audioTemp = audioTemp,
                 platform = job.platform,
                 canceller = callCanceller,
+                maxConcurrentFragments = maxConcurrentFragments,
             )
 
             if (videoTemp.length() == 0L || audioTemp.length() == 0L) {
@@ -465,6 +471,7 @@ class DownloadWorker @AssistedInject constructor(
                 chunkSizeBytes = resolved.videoChunkSize,
                 platform = job.platform,
                 canceller = callCanceller,
+                maxConcurrentFragments = maxConcurrentFragments,
             )
 
             if (mediaTemp.length() == 0L) {
@@ -493,6 +500,20 @@ class DownloadWorker @AssistedInject constructor(
     }
 
     /**
+     * Fragment concurrency for this download. The setting is advisory: a failed
+     * read must never fail the download itself, so anything but cancellation
+     * falls back to the default.
+     */
+    private suspend fun readMaxConcurrentFragments(jobId: String): Int = try {
+        settingsRepository.appSettings.first().maxConcurrentFragments
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Logger.w(tag, "[$jobId] Failed to read maxConcurrentFragments; using default", e)
+        DEFAULT_MAX_CONCURRENT_FRAGMENTS
+    }
+
+    /**
      * Dual-stream download for YouTube video + audio muxing (§9), video first
      * (weighted 80% of progress) then audio (15%). Throws on IO failure —
      * handled by [doWork]'s catch, which maps to a typed [DownloadError].
@@ -504,6 +525,7 @@ class DownloadWorker @AssistedInject constructor(
         audioTemp: File,
         platform: String,
         canceller: DownloadCallCanceller,
+        maxConcurrentFragments: Int,
     ) {
         Logger.d(tag, "[$jobId] Downloading video stream (chunkSize=${resolved.videoChunkSize})...")
         chunkedDownloader.download(
@@ -512,7 +534,8 @@ class DownloadWorker @AssistedInject constructor(
             chunkSizeBytes = resolved.videoChunkSize,
             platform = platform,
             isStopped = { isStopped },
-            canceller = canceller
+            canceller = canceller,
+            maxConcurrentFragments = maxConcurrentFragments,
         ) { bytesWritten, totalBytes ->
             val total = totalBytes?.takeIf { it > 0 }
             val progress = if (total != null) {
@@ -531,7 +554,8 @@ class DownloadWorker @AssistedInject constructor(
                 chunkSizeBytes = resolved.audioChunkSize,
                 platform = platform,
                 isStopped = { isStopped },
-                canceller = canceller
+                canceller = canceller,
+                maxConcurrentFragments = maxConcurrentFragments,
             ) { bytesWritten, totalBytes ->
                 val videoBytes = videoTemp.length()
                 val total = totalBytes?.takeIf { it > 0 }
@@ -577,6 +601,7 @@ class DownloadWorker @AssistedInject constructor(
         chunkSizeBytes: Long,
         platform: String,
         canceller: DownloadCallCanceller,
+        maxConcurrentFragments: Int,
     ) {
         Logger.d(tag, "[$jobId] Downloading single media stream (chunkSize=$chunkSizeBytes)...")
         chunkedDownloader.download(
@@ -585,7 +610,8 @@ class DownloadWorker @AssistedInject constructor(
             chunkSizeBytes = chunkSizeBytes,
             platform = platform,
             isStopped = { isStopped },
-            canceller = canceller
+            canceller = canceller,
+            maxConcurrentFragments = maxConcurrentFragments,
         ) { bytesWritten, totalBytes ->
             val total = totalBytes?.takeIf { it > 0 }
             val progress = if (total != null) {

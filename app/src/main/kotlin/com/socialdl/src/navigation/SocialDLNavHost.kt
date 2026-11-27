@@ -40,8 +40,10 @@ fun SocialDLNavHost(
         )
 
         settingsScreen(
+            navController = navController,
             onNavigateBack = { navController.popBackStack() },
             onSignIn = signIn,
+            packageName = BuildConfig.APPLICATION_ID,
             appVersion = BuildConfig.VERSION_NAME
         )
 
